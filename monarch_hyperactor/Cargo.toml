@@ -12,6 +12,7 @@ anyhow = "1.0.95"
 async-trait = "0.1.86"
 bincode = "1.3.3"
 hyperactor = { path = "../hyperactor" }
+hyperactor_extension = { path = "../hyperactor_extension" }
 hyperactor_mesh = { path = "../hyperactor_mesh" }
 hyperactor_multiprocess = { path = "../hyperactor_multiprocess" }
 hyperactor_telemetry = { path = "../hyperactor_telemetry" }

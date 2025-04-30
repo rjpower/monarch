@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use hyperactor_extension::alloc::TakeableAlloc;
 use hyperactor_mesh::alloc::Alloc;
 use hyperactor_mesh::proc_mesh::ProcMesh;
 use hyperactor_mesh::proc_mesh::SharedSpawnable;
@@ -13,7 +14,6 @@ use pyo3::types::PyType;
 use crate::actor_mesh::PythonActorMesh;
 use crate::alloc::PyLocalAlloc;
 use crate::alloc::PyProcessAlloc;
-use crate::alloc::TakeableAlloc;
 use crate::mailbox::PyMailbox;
 
 #[pyclass(name = "ProcMesh", module = "monarch._monarch.hyperactor")]
