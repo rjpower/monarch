@@ -841,6 +841,8 @@ mod tests {
     use hyperactor::id;
     use hyperactor::mailbox::Mailbox;
     use hyperactor::reference::ActorRef;
+    use hyperactor::test_utils::pingpong::PingPongActor;
+    use hyperactor::test_utils::pingpong::PingPongMessage;
     use maplit::hashset;
     use rand::Rng;
     use rand::distributions::Alphanumeric;
@@ -1592,5 +1594,90 @@ mod tests {
             Ok(())
         );
         assert_matches!(once_rx.recv().await.unwrap(), ());
+    }
+
+    #[tokio::test]
+    async fn test_update_address_book_cache() {
+        let server_handle = System::serve(
+            ChannelAddr::any(ChannelTransport::Tcp),
+            SystemActorParams::new(
+                Duration::from_secs(2), // supervision update timeout
+                Duration::from_secs(2), // duration to evict an unhealthy world
+            ),
+        )
+        .await
+        .unwrap();
+        let system_addr = server_handle.local_addr().clone();
+        let mut system = System::new(system_addr.clone());
+
+        let system_client = system.attach().await.unwrap();
+
+        // Spawn ping and pong actors to play a ping pong game.
+        let ping_actor_id = id!(world[0].ping[0]);
+        let (ping_actor_ref, _ping_proc_ref) =
+            spawn_actor(&ping_actor_id, &system_addr, system_client.clone()).await;
+
+        let pong_actor_id = id!(world[1].pong[0]);
+        let (pong_actor_ref, pong_proc_ref) =
+            spawn_actor(&pong_actor_id, &system_addr, system_client.clone()).await;
+
+        // After playing the first round game, ping and pong actors has each other's
+        // ChannelAddr cached in their procs' mailboxes, respectively.
+        let (done_tx, done_rx) = system_client.open_once_port();
+        let ping_pong_message = PingPongMessage(4, pong_actor_ref.clone(), done_tx.bind());
+        ping_actor_ref
+            .send(&system_client, ping_pong_message)
+            .unwrap();
+        assert!(done_rx.recv().await.unwrap());
+
+        // Now we kill and respawn the pong actor so it's ChannelAddr is changed.
+        let ProcStopResult { actors_aborted, .. } = pong_proc_ref
+            .stop(&system_client, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(1, actors_aborted);
+        let (pong_actor_ref, _pong_proc_ref) =
+            spawn_actor(&pong_actor_id, &system_addr, system_client.clone()).await;
+
+        // Now we expect to play the game between ping and new pong. The new pong has the same
+        // proc ID as the old pong but different ChannelAddr. The game should still be playable
+        // with system actor updating the cached address of Pong inside Ping's mailbox.
+        let (done_tx, done_rx) = system_client.open_once_port();
+        let ping_pong_message = PingPongMessage(4, pong_actor_ref.clone(), done_tx.bind());
+        ping_actor_ref
+            .send(&system_client, ping_pong_message)
+            .unwrap();
+        assert!(done_rx.recv().await.unwrap());
+    }
+
+    async fn spawn_actor(
+        actor_id: &ActorId,
+        system_addr: &ChannelAddr,
+        system_client: Mailbox,
+    ) -> (ActorRef<PingPongActor>, ActorRef<ProcActor>) {
+        let listen_addr = ChannelAddr::any(ChannelTransport::Tcp);
+        let bootstrap = ProcActor::bootstrap(
+            actor_id.proc_id().clone(),
+            actor_id.proc_id().world_id().clone(),
+            listen_addr.clone(),
+            system_addr.clone(),
+            Duration::from_secs(3),
+            HashMap::new(),
+            ProcLifecycleMode::ManagedBySystem,
+        )
+        .await
+        .unwrap();
+        let (undeliverable_msg_tx, _) = system_client.open_port();
+
+        let actor_ref = spawn::<PingPongActor>(
+            &system_client,
+            &bootstrap.proc_actor.bind(),
+            &actor_id.to_string(),
+            &undeliverable_msg_tx.bind(),
+        )
+        .await
+        .unwrap();
+        let proc_actor_ref = bootstrap.proc_actor.bind();
+        (actor_ref, proc_actor_ref)
     }
 }

@@ -7,10 +7,12 @@ use std::collections::hash_map::Entry;
 use std::fmt::Display;
 use std::fmt::Formatter;
 use std::hash::Hash;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use enum_as_inner::EnumAsInner;
 use hyperactor::Actor;
 use hyperactor::ActorHandle;
@@ -677,7 +679,13 @@ impl World {
 /// additionally reports the destination address back to the sender’s
 /// [`ProcActor`], allowing it to cache the address for future use.
 #[derive(Debug, Clone)]
-pub struct ReportingRouter(DialMailboxRouter);
+pub struct ReportingRouter {
+    router: DialMailboxRouter,
+    /// A record of cached addresses from dst_proc_id to HashSet(src_proc_id)
+    /// Right now only the proc_ids are recorded for updating purpose.
+    /// We can also cache the address here in the future.
+    address_cache: Arc<DashMap<ProcId, HashSet<ProcId>>>,
+}
 
 impl MailboxSender for ReportingRouter {
     fn post(
@@ -685,7 +693,7 @@ impl MailboxSender for ReportingRouter {
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
-        let ReportingRouter(router) = self;
+        let ReportingRouter { router, .. } = self;
         self.post_update_address(&envelope);
         router.post(envelope, return_handle);
     }
@@ -714,17 +722,60 @@ impl ReportingRouter {
         {
             return;
         }
-        let (proc_id, proc_addr) = self.dest_proc_id_and_address(envelope);
-        if let Some(addr) = proc_addr {
-            self.serialize_and_send(
-                &self.sender_proc_port_ref(envelope),
-                MailboxAdminMessage::UpdateAddress { proc_id, addr },
-                monitored_return_handle(),
-            )
-            .expect("unexpected serialization failure")
-        } else {
-            tracing::warn!("unknown address for {}", &proc_id);
+        let (dst_proc_id, dst_proc_addr) = self.dest_proc_id_and_address(envelope);
+        let Some(dst_proc_addr) = dst_proc_addr else {
+            tracing::warn!("unknown address for {}", &dst_proc_id);
+            return;
+        };
+
+        let sender_proc_id = envelope.sender().proc_id();
+        self.upsert_address_cache(sender_proc_id, &dst_proc_id);
+        self.serialize_and_send(
+            &self.proc_port_ref(sender_proc_id),
+            MailboxAdminMessage::UpdateAddress {
+                proc_id: dst_proc_id,
+                addr: dst_proc_addr,
+            },
+            monitored_return_handle(),
+        )
+        .expect("unexpected serialization failure")
+    }
+
+    /// broadcasts the address of the proc if there's any stale record that has been sent
+    /// out to senders before.
+    fn broadcast_addr(&self, dst_proc_id: &ProcId, dst_proc_addr: ChannelAddr) {
+        if let Some(r) = self.address_cache.get(dst_proc_id) {
+            for sender_proc_id in r.value() {
+                tracing::info!(
+                    "broadcasting address change to {} for {}: {}",
+                    sender_proc_id,
+                    dst_proc_id,
+                    dst_proc_addr
+                );
+                self.serialize_and_send(
+                    &self.proc_port_ref(sender_proc_id),
+                    MailboxAdminMessage::UpdateAddress {
+                        proc_id: dst_proc_id.clone(),
+                        addr: dst_proc_addr.clone(),
+                    },
+                    monitored_return_handle(),
+                )
+                .expect("unexpected serialization failure")
+            }
         }
+    }
+
+    fn upsert_address_cache(&self, src_proc_id: &ProcId, dst_proc_id: &ProcId) {
+        self.address_cache
+            .entry(dst_proc_id.clone())
+            .and_modify(|src_proc_ids| {
+                src_proc_ids.insert(src_proc_id.clone());
+            })
+            .or_insert({
+                let mut set = HashSet::new();
+                set.insert(src_proc_id.clone());
+                set
+            });
     }
 
     fn dest_proc_id_and_address(
@@ -734,15 +785,14 @@ impl ReportingRouter {
         let dest_proc_port_id = envelope.dest();
         let dest_proc_actor_id = dest_proc_port_id.actor_id();
         let dest_proc_id = dest_proc_actor_id.proc_id();
-        let dest_proc_addr = self.0.lookup_addr(dest_proc_actor_id);
+        let dest_proc_addr = self.router.lookup_addr(dest_proc_actor_id);
         (dest_proc_id.clone(), dest_proc_addr)
     }
 
-    fn sender_proc_port_ref(&self, envelope: &MessageEnvelope) -> PortRef<MailboxAdminMessage> {
-        let sender_proc_id = envelope.sender().proc_id();
-        let sender_proc_actor_id = ActorId(sender_proc_id.clone(), "proc".to_string(), 0);
-        let sender_proc_actor_ref = ActorRef::<ProcActor>::attest(sender_proc_actor_id);
-        sender_proc_actor_ref.port::<MailboxAdminMessage>()
+    fn proc_port_ref(&self, proc_id: &ProcId) -> PortRef<MailboxAdminMessage> {
+        let proc_actor_id = ActorId(proc_id.clone(), "proc".to_string(), 0);
+        let proc_actor_ref = ActorRef::<ProcActor>::attest(proc_actor_id);
+        proc_actor_ref.port::<MailboxAdminMessage>()
     }
 }
 
@@ -762,7 +812,10 @@ impl SystemActorParams {
     /// Create a new system actor params.
     pub fn new(supervision_update_timeout: Duration, world_eviction_timeout: Duration) -> Self {
         Self {
-            mailbox_router: ReportingRouter(DialMailboxRouter::new()),
+            mailbox_router: ReportingRouter {
+                router: DialMailboxRouter::new(),
+                address_cache: Arc::new(DashMap::new()),
+            },
             supervision_update_timeout,
             world_eviction_timeout,
         }
@@ -1089,7 +1142,7 @@ impl SystemActor {
         // Remove all the addresses starting with the world_id as the prefix.
         self.params
             .mailbox_router
-            .0
+            .router
             .unbind(&world_id.clone().into());
     }
 }
@@ -1184,8 +1237,10 @@ impl SystemMessageHandler for SystemActor {
         tracing::info!("received join for proc {} in world {}", proc_id, world_id);
         // todo: check that proc_id is a user id
         self.router()
-            .0
+            .router
             .bind(proc_id.clone().into(), channel_addr.clone());
+
+        self.router().broadcast_addr(&proc_id, channel_addr.clone());
 
         // TODO: handle potential undeliverable message return
         self.router().serialize_and_send(
@@ -1228,7 +1283,11 @@ impl SystemMessageHandler for SystemActor {
             Ok(host_id) => {
                 tracing::info!("{}: adding host {}", world_id, host_id);
                 return world
-                    .on_host_join(host_id, proc_message_port, &self.params.mailbox_router.0)
+                    .on_host_join(
+                        host_id,
+                        proc_message_port,
+                        &self.params.mailbox_router.router,
+                    )
                     .await
                     .map_err(anyhow::Error::from);
             }
@@ -1297,7 +1356,7 @@ impl SystemMessageHandler for SystemActor {
                     }
                 }
 
-                world.on_create(&self.params.mailbox_router.0).await?;
+                world.on_create(&self.params.mailbox_router.router).await?;
                 tracing::info!(
                     "modified parameters to world {} with shape: {:?} and labels {:?}",
                     &world.world_id,
