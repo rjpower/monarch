@@ -30,7 +30,7 @@ class Counter(Actor):
 
 class Indirect(Actor):
     @endpoint
-    async def call_value(self, c: Counter) -> Awaitable[int]:
+    async def call_value(self, c: Counter) -> int:
         return await c.value.choose()
 
 
@@ -68,6 +68,7 @@ async def test_choose():
     v.incr.broadcast()
     result = await v.value.choose()
     result2 = await i.call_value.choose(v)
+
     assert result == result2
 
 

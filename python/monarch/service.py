@@ -1,5 +1,3 @@
-# pyre-strict
-
 import asyncio
 import contextvars
 import ctypes
@@ -20,6 +18,7 @@ from typing import (
     Awaitable,
     Callable,
     cast,
+    Concatenate,
     Coroutine,
     Dict,
     Generator,
@@ -48,15 +47,8 @@ try:
 except ImportError:
     IN_PAR = False
 
-T = TypeVar("T")
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
-# TODO: ParamSpec + Generics isn't supported by pyre yet, but is on their roadmap - https://fb.workplace.com/groups/aps.discussions/posts/708057758287050/?comment_id=708063008286525&reply_comment_id=708097684949724
-# P = ParamSpec("P")
-R = TypeVar("R")
-# pyre-ignore[33]: Prohibited any [33]: Type variable `RAsync` cannot have a bound containing `Any`.
-RAsync = TypeVar("RAsync", bound=Coroutine[Any, Any, Any])
-A = TypeVar("A")
 
 
 @dataclass
@@ -109,6 +101,11 @@ class RestOfCoroutine(Generic[T1, T2]):
     async def run(self) -> T1 | T2:
         return await self
 
+
+T = TypeVar("T")
+P = ParamSpec("P")
+R = TypeVar("R")
+A = TypeVar("A")
 
 # keep this load balancing deterministic, but
 # equally distributed.
@@ -222,7 +219,6 @@ class ProcMesh:
         return cast(T, service)
 
 
-# pyre-ignore[5]: Missing global annotation [5]: Globally accessible variable `init_asyncio_loop` has type `functools._lru_cache_wrapper[None]` but type `Any` is specified
 init_asyncio_loop: Any = cache(hyperactor.init_asyncio_loop)
 
 
@@ -269,13 +265,12 @@ async def proc_mesh(
     return ProcMesh(await hyperactor.ProcMesh.allocate(alloc))
 
 
-class Endpoint(Generic[R]):
+class Endpoint(Generic[P, R]):
     def __init__(
         self,
         actor_mesh_ref: ActorMeshRef,
         name: str,
-        # TODO: Once pyrefly lands support for ParamSpec + Generics, parameterize this on P
-        impl: Callable[..., Awaitable[R]],
+        impl: Callable[Concatenate[Any, P], Coroutine[Any, Any, R]],
         mailbox: hyperactor.Mailbox,
     ) -> None:
         self._actor_mesh = actor_mesh_ref
@@ -283,7 +278,7 @@ class Endpoint(Generic[R]):
         self._signature: inspect.Signature = inspect.signature(impl)
         self._mailbox = mailbox
 
-    def broadcast(self, *args: Any, **kwargs: Any) -> None:
+    def broadcast(self, *args: P.args, **kwargs: P.kwargs) -> None:
         """
         Fire-and-forget broadcast invocation of the endpoint across all actors in the mesh.
 
@@ -301,7 +296,7 @@ class Endpoint(Generic[R]):
         port_id: hyperactor.PortId = handle.bind()
         return Port(port_id, self._mailbox), receiver
 
-    async def choose(self, *args: Any, **kwargs: Any) -> R:
+    async def choose(self, *args: P.args, **kwargs: P.kwargs) -> R:
         """
         Load balanced sends a message to one chosen actor and awaits a result.
 
@@ -312,14 +307,14 @@ class Endpoint(Generic[R]):
         self._actor_mesh.choose(self._message(args, kwargs, port))
         return self._unpack(await receiver.recv())
 
-    def call(self, *args: Any, **kwargs: Any) -> Awaitable[R]:
+    def call(self, *args: P.args, **kwargs: P.kwargs) -> Awaitable[R]:
         if self._actor_mesh.len != 1:
             raise ValueError(
                 f"Can only use 'call' on a single Actor but this actor has shape {self._actor_mesh._shape}"
             )
         return self.choose(*args, **kwargs)
 
-    async def stream(self, *args: Any, **kwargs: Any) -> AsyncGenerator[R, R]:
+    async def stream(self, *args: P.args, **kwargs: P.kwargs) -> AsyncGenerator[R, R]:
         """
         Broadcasts to all actors and yields their responses as a stream / generator.
 
@@ -336,15 +331,17 @@ class Endpoint(Generic[R]):
         self,
         identity: A,
         combine: Callable[[A, R], A],
-        *args: Any,
-        **kwargs: Any,
+        *args: P.args,
+        **kwargs: P.kwargs,
     ) -> A:
         value = identity
         async for x in self.stream(*args, **kwargs):
             value = combine(value, x)
         return value
 
-    def broadcast_and_wait(self, *args: Any, **kwargs: Any) -> Awaitable[None]:
+    def broadcast_and_wait(
+        self, *args: P.args, **kwargs: P.kwargs
+    ) -> Coroutine[None, Any, Any]:
         """
         Broadcast to all actors and wait for each to acknowledge receipt.
 
@@ -375,23 +372,20 @@ class Endpoint(Generic[R]):
         )
 
 
-class EndpointProperty(Generic[RAsync]):
-    def __init__(
-        self,
-        method: Callable[..., RAsync],
-    ) -> None:
-        self._method: Callable[..., RAsync] = method
+class EndpointProperty(Generic[P, R]):
+    def __init__(self, method: Callable[Concatenate[Any, P], Coroutine[Any, Any, R]]):
+        self._method = method
 
-    def __get__(self, instance: ..., owner: ...) -> Endpoint[RAsync]:
+    def __get__(self, instance, owner) -> Endpoint[P, R]:
         # this is a total lie, but we have to actually
         # recognize this was defined as an endpoint,
         # and also lookup the method
-        return cast(Endpoint[RAsync], self)
+        return cast(Endpoint[P, R], self)
 
 
 def endpoint(
-    method: Callable[..., RAsync],
-) -> EndpointProperty[RAsync]:
+    method: Callable[Concatenate[Any, P], Coroutine[Any, Any, R]],
+) -> EndpointProperty[P, R]:
     if not inspect.iscoroutinefunction(method):
         raise TypeError(f"The implementation of an endpoint must be an async function")
     return EndpointProperty(method)
@@ -433,15 +427,7 @@ class _Actor:
         try:
             _context.set(MonarchContext(mailbox, mailbox.actor_id.proc_id, rank, shape))
 
-            # pyre-ignore Figure out how to type this better
-            _args, _kwargs, _port = _unpickle(message.message, mailbox)
-            assert isinstance(_args, tuple)
-            args: Tuple[Callable[..., ...], ...] = _args
-            assert isinstance(_kwargs, dict)
-            kwargs: Dict[str, object] = _kwargs
-            assert _port is None or isinstance(_port, Port)
-            port: Port | None = _port
-
+            args, kwargs, port = _unpickle(message.message, mailbox)
             if message.method == "__init__":
                 # pyre-ignore Incompatible variable type [9]: Unable to unpack `List[typing.Callable[..., ...]]`, expected a tuple.
                 Class, *args = args
@@ -482,7 +468,7 @@ def _pickle(obj: object) -> bytes:
     return msg
 
 
-def _unpickle(data: bytes, mailbox: hyperactor.Mailbox) -> object:
+def _unpickle(data: bytes, mailbox: hyperactor.Mailbox) -> Any:
     # regardless of the mailboxes of the remote objects
     # they all become the local mailbox.
     return unflatten(data, itertools.repeat(mailbox))
@@ -528,10 +514,8 @@ class Service(MeshTrait):
                     ),
                 )
 
-    def _create(self, args: Iterable[object], kwargs: Dict[str, object]) -> None:
-        async def null_func(
-            *_args: Iterable[object], **_kwargs: Dict[str, object]
-        ) -> None:
+    def _create(self, args: Iterable[Any], kwargs: Dict[str, Any]) -> None:
+        async def null_func(*_args: Iterable[Any], **_kwargs: Dict[str, Any]) -> None:
             return None
 
         ep = Endpoint(
@@ -540,9 +524,10 @@ class Service(MeshTrait):
             null_func,
             self._mailbox,
         )
+        # pyre-ignore
         ep.broadcast(self._class, *args, **kwargs)
 
-    def __reduce_ex__(self, protocol: ...) -> "Tuple[Type[Service], Tuple[..., ...]]":
+    def __reduce_ex__(self, protocol: ...) -> "Tuple[Type[Service], Tuple[Any, ...]]":
         return Service, (
             self._class,
             self._actor_mesh_ref,
