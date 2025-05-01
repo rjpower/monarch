@@ -262,7 +262,7 @@ impl fmt::Display for Selection {
 }
 
 /// An algebra for expressing node selection.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Selection {
     /// A selection that never matches any node.
     False,

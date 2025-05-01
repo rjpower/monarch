@@ -17,7 +17,7 @@ use serde::Serialize;
 /// ranks in a gang. It is represented by a Slice together with a Selection.
 /// This is used to define the destination of a cast message or the source of
 /// accumulation request.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Uslice {
     /// A slice representing a whole gang.
     pub slice: Slice,
@@ -66,7 +66,7 @@ impl DestinationPort {
 }
 
 /// The is used to start casting a message to a group of actors.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Named)]
+#[derive(Serialize, Deserialize, Debug, Clone, Named)]
 pub struct CastMessage {
     /// The cast destination.
     pub dest: Uslice,
@@ -77,7 +77,7 @@ pub struct CastMessage {
 /// Forward a message to procs of next hops. This is used by comm actor to
 /// forward a message to other comm actors following the selection topology.
 /// This message is not visible to the clients.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Named)]
+#[derive(Serialize, Deserialize, Debug, Clone, Named)]
 pub(crate) struct ForwardMessage {
     /// The destination of the message.
     pub(crate) dest: RoutingFrame,

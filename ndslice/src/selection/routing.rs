@@ -56,7 +56,7 @@ pub enum RoutingAction {
 ///
 /// Each frame represents an independent routing decision and produces
 /// zero or more new frames via `next_hops`.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RoutingFrame {
     /// The current coordinate in the mesh where this frame is being
     /// evaluated.
