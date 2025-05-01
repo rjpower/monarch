@@ -237,10 +237,10 @@ macro_rules! declare_static_counter {
     ($name:ident, $key:expr) => {
         #[doc = "a global counter named: "]
         #[doc = $key]
-        pub static $name: std::sync::LazyLock<opentelemetry::metrics::UpDownCounter<i64>> =
+        pub static $name: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
             std::sync::LazyLock::new(|| {
                 hyperactor_telemetry::meter(module_path!())
-                    .i64_up_down_counter($key)
+                    .u64_counter($key)
                     .build()
             });
     };
