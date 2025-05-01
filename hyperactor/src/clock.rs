@@ -158,6 +158,7 @@ impl Clock for RealClock {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use crate::clock::Clock;
     use crate::clock::SimClock;

@@ -214,6 +214,7 @@ mod tests {
                     if retries >= max_retries {
                         anyhow::bail!("Failed after {} retries: {}", max_retries, e);
                     }
+                    #[allow(clippy::disallowed_methods)]
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
                 }
             }

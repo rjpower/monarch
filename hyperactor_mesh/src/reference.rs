@@ -10,7 +10,6 @@ use hyperactor::RemoteHandles;
 use hyperactor::RemoteMessage;
 use hyperactor::actor::RemoteActor;
 use hyperactor::cap;
-use hyperactor::reference::Index;
 use serde::Deserialize;
 use serde::Serialize;
 

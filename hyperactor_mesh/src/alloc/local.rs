@@ -114,6 +114,7 @@ impl Alloc for LocalAlloc {
                     Ok(addr_and_proc_rx) => break addr_and_proc_rx,
                     Err(err) => {
                         tracing::error!("failed to create channel for rank {}: {}", rank, err);
+                        #[allow(clippy::disallowed_methods)]
                         sleep(Duration::from_secs(1)).await;
                         continue;
                     }
