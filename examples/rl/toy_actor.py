@@ -9,7 +9,7 @@ from monarch.service import Actor, endpoint, proc_mesh, RDMABuffer
 # No CUDA yet because no device support yet?
 class Learner(Actor):
     def __init__(self):
-        self.model = torch.nn.Linear(4, 4, bias=False)
+        self.model = torch.nn.Linear(4, 4, bias=False, device="cuda")
         self.optim = torch.optim.AdamW(
             self.model.parameters(),
             lr=1e-3,
@@ -48,7 +48,7 @@ class Learner(Actor):
 
 class Generator(Actor):
     def __init__(self, weight_buffer: RDMABuffer):
-        self.model = torch.nn.Linear(4, 4, bias=False)
+        self.model = torch.nn.Linear(4, 4, bias=False, device="cuda")
         self.weight_buffer = weight_buffer
 
     @endpoint
@@ -75,12 +75,12 @@ async def main():
     weight_buffer = await learner.weights_handle.call()
     generators = await gen_mesh.spawn("generator", Generator, weight_buffer)
 
-    generation_stream = generators.generate.stream(torch.randn(4, 4))
+    generation_stream = generators.generate.stream(torch.randn(4, 4, device="cuda"))
     for step in range(3):
         generations = [gen async for gen in generation_stream]
         loss, rewards = await learner.step.call(generations)
         print(f"step: {step}, loss: {loss}, rewards: {rewards}")
-        generation_stream = generators.generate.stream(torch.randn(4, 4))
+        generation_stream = generators.generate.stream(torch.randn(4, 4, device="cuda"))
         await generators.update.broadcast_and_wait()
 
     print("done")

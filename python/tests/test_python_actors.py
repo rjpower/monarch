@@ -51,13 +51,17 @@ class ParameterServer(Actor):
 
     @endpoint
     async def grad_handle(self) -> RDMABuffer:
-        return RDMABuffer(self.grad_buffer)
+        byte_tensor = self.grad_buffer.view(torch.uint8).flatten()
+        return RDMABuffer(byte_tensor)
 
+    @endpoint
     async def update(self):
         self.params += 0.01 * self.grad_buffer
 
-    async def log(self):
-        print(self.params)
+    @endpoint
+    async def get_grad_buffer(self) -> torch.Tensor:
+        # just used for testing
+        return self.grad_buffer
 
 
 @run_async
@@ -84,7 +88,8 @@ async def test_stream():
 class ParameterClient(Actor):
     def __init__(self, server, buffer):
         self.server = server
-        self.buffer = buffer
+        byte_tensor = buffer.view(torch.uint8).flatten()
+        self.buffer = byte_tensor
 
     @endpoint
     async def upload(self, tensor):
@@ -102,39 +107,54 @@ class ParameterClient(Actor):
 
 
 @run_async
-async def test_rdma():
-    proc = await local_proc_mesh(gpus=1)
-    server = await proc.spawn("server", ParameterServer)
-    client = await proc.spawn("client", ParameterClient, server, torch.ones(10, 10))
-
-    buffer = await client.get_buffer.call()
-    assert torch.sum(buffer) == 100
-
-    tensor = torch.zeros(10, 10)
-
-    await client.upload.call(tensor)
-    await client.download.call()
-
-    buffer = await client.get_buffer.call()
-    assert torch.sum(buffer) == 0
-
-
-@run_async
 async def test_proc_mesh_rdma():
     proc = await proc_mesh(gpus=1)
     server = await proc.spawn("server", ParameterServer)
-    client = await proc.spawn("client", ParameterClient, server, torch.ones(10, 10))
 
-    buffer = await client.get_buffer.call()
+    # --- CPU TESTS ---
+    client_cpu = await proc.spawn(
+        "client_cpu", ParameterClient, server, torch.ones(10, 10)
+    )
+    x = await client_cpu.get_buffer.call()
+    assert torch.sum(x.view(torch.float32).view(10, 10)) == 100
+    zeros = torch.zeros(10, 10)
+    await client_cpu.upload.call(zeros.view(torch.uint8).flatten())
+    await client_cpu.download.call()
+    x = await client_cpu.get_buffer.call()
+    assert torch.sum(x.view(torch.float32).view(10, 10)) == 0
+
+    # --- Modify server's backing buffer directly ---
+    await server.update.call()
+
+    # Should reflect updated values
+    await client_cpu.download.call()
+
+    buffer = await client_cpu.get_buffer.call()
+    remote_grad = await server.get_grad_buffer.call()
+    assert torch.allclose(buffer.view(torch.float32).view(10, 10), remote_grad)
+
+    # --- GPU TESTS ---
+    client_gpu = await proc.spawn(
+        "client_gpu", ParameterClient, server, torch.ones(10, 10, device="cuda")
+    )
+    x = await client_gpu.get_buffer.call()
+    buffer = x.view(torch.float32).view(10, 10)
     assert torch.sum(buffer) == 100
+    zeros = torch.zeros(10, 10, device="cuda")
+    await client_gpu.upload.call(zeros.view(torch.uint8).flatten())
+    await client_gpu.download.call()
+    x = await client_gpu.get_buffer.call()
+    buffer_gpu = x.view(torch.float32).view(10, 10)
+    assert torch.sum(buffer_gpu) == 0
+    assert buffer_gpu.device.type == "cuda"
 
-    tensor = torch.zeros(10, 10)
-
-    await client.upload.call(tensor)
-    await client.download.call()
-
-    buffer = await client.get_buffer.call()
-    assert torch.sum(buffer) == 0
+    # Modify server state again
+    await server.update.call()
+    await client_gpu.download.call()
+    x = await client_gpu.get_buffer.call()
+    buffer_gpu = x.view(torch.float32).view(10, 10)
+    remote_grad = await server.get_grad_buffer.call()
+    assert torch.allclose(buffer_gpu.cpu(), remote_grad)
 
 
 class To(Actor):
@@ -208,3 +228,66 @@ async def test_rank_size():
 
     assert 1 == await r.run.aggregate(0, operator.add, lambda: current_rank()["gpus"])
     assert 4 == await r.run.aggregate(0, operator.add, lambda: current_size()["gpus"])
+
+
+class TrainerActor(Actor):
+    def __init__(self):
+        super().__init__()
+        self.trainer = torch.nn.Linear(10, 10).to("cuda")
+        self.trainer.weight.data.zero_()
+
+    @endpoint
+    async def init(self, gen):
+        ranks = current_rank()
+        self.gen = gen.slice(**ranks)
+
+    @endpoint
+    async def exchange_metadata(self):
+        byte_tensor = self.trainer.weight.data.view(torch.uint8).flatten()
+        self.handle = RDMABuffer(byte_tensor)
+        await self.gen.attach_weight_buffer.call(self.handle)
+
+    @endpoint
+    async def weights_ready(self):
+        self.trainer.weight.data.add_(1.0)
+
+
+class GeneratorActor(Actor):
+    def __init__(self):
+        super().__init__()
+        self.generator = torch.nn.Linear(10, 10).to("cuda")
+        self.step = 0
+
+    @endpoint
+    async def init(self, trainer):
+        ranks = current_rank()
+        self.trainer = trainer.slice(**ranks)
+
+    @endpoint
+    async def attach_weight_buffer(self, handle):
+        self.handle = handle
+
+    @endpoint
+    async def update_weights(self):
+        self.step += 1
+        byte_tensor = self.generator.weight.data.view(torch.uint8).flatten()
+        await self.handle.read_into(byte_tensor)
+        assert (
+            torch.sum(self.generator.weight.data) == self.step * 100
+        ), f"{torch.sum(self.generator.weight.data)=}, {self.step=}"
+
+
+@run_async
+async def test_gpu_trainer_generator():
+    trainer_proc = await proc_mesh(gpus=1)
+    gen_proc = await proc_mesh(gpus=1)
+    trainer = await trainer_proc.spawn("trainer", TrainerActor)
+    generator = await gen_proc.spawn("gen", GeneratorActor)
+
+    await generator.init.broadcast_and_wait(trainer)
+    await trainer.init.broadcast_and_wait(generator)
+    await trainer.exchange_metadata.broadcast_and_wait()
+
+    for _ in range(3):
+        await trainer.weights_ready.broadcast_and_wait()
+        await generator.update_weights.broadcast_and_wait()

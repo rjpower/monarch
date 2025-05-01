@@ -557,13 +557,14 @@ class Service(MeshTrait):
 
 @dataclass
 class LocalRDMARecord:
-    data: torch.ByteTensor
+    data: torch.Tensor
 
 
 _local_buffers: Dict[int, "LocalRDMARecord"] = {}
 
 
-def _get_bytes(storage: torch.ByteTensor, offset: int, size: int) -> bytearray:
+def _get_bytes(storage: torch.Tensor, offset: int, size: int) -> bytearray:
+    """Extracts a bytearray from a 1D, 1byte per item tensor."""
     if offset + size > storage.numel():
         raise ValueError(f"Read out of range: {offset + size} > {storage.size()}")
     addr = storage.data_ptr()
@@ -619,19 +620,33 @@ class RDMAManager(Actor):
         )
 
 
+def _assert_tensor_is_1d_contiguous_uint8(t: torch.Tensor) -> None:
+    if t.ndim != 1:
+        raise ValueError(f"Tensor must be 1D, got {t.ndim}D")
+    if t.dtype != torch.uint8:
+        raise ValueError(f"Tensor must be uint8, got {t.dtype}")
+    if not t.is_contiguous():
+        raise ValueError("Tensor must be contiguous")
+
+
 class RDMABuffer:
     def __init__(self, data: torch.Tensor) -> None:
-        if data._is_view():
-            raise ValueError("data buffer must not be a view of another tensor.")
+        """
+        RDMABuffer only supports 1D contiguous tensors that are 1 byte per item.
+
+        To create a 1 byte, 1D view, use t.view(torch.uint8).flatten()
+
+        TODO: Create TensorBuffer, which will be main user API supporting non-contiguous , multi-byte-per-elment tensors
+        """
+        _assert_tensor_is_1d_contiguous_uint8(data)
         assert data.storage_offset() == 0
-        assert data.is_contiguous()
         storage = data.untyped_storage()
         self.addr: int = storage.data_ptr()
         self.begin = 0
         self.end: int = storage.size()
         self.proc_id: str = MonarchContext.get().proc_id
         self.local_data: object = None
-        _local_buffers[self.addr] = LocalRDMARecord(torch.ByteTensor(storage))
+        _local_buffers[self.addr] = LocalRDMARecord(data)
 
     def drop(self) -> None:
         if self.proc_id is None:
@@ -654,24 +669,28 @@ class RDMABuffer:
         self.addr, self.begin, self.end, self.proc_id = state
 
     async def read_into(self, dst: torch.Tensor, offset: int = 0) -> None:
-        if not dst.is_contiguous():
-            raise ValueError("destination must be contiguous")
-        nbytes = dst.element_size() * dst.numel()
+        """
+        Read data from the RDMABuffer into a destination tensor.
+
+        The destination tensor must be contiguous and 1 byte per item.
+        """
+        _assert_tensor_is_1d_contiguous_uint8(dst)
         bytes = await RDMAManager.on_proc(self.proc_id).fetch.call(
-            self.addr, offset, nbytes
+            self.addr, offset, dst.numel()
         )
-        torch.ByteTensor(dst.untyped_storage()).copy_(
-            torch.frombuffer(bytes, dtype=torch.uint8)
-        )
+        dst.copy_(torch.frombuffer(bytes, dtype=torch.uint8))
 
     async def write(self, src: torch.Tensor, offset: int = 0) -> None:
-        if not src.is_contiguous():
-            raise ValueError("destination must be contiguous")
-        nbytes = src.element_size() * src.numel()
+        """
+        Write data from a source tensor into the RDMABuffer.
+
+        The source tensor must be contiguous and 1 byte per item.
+        """
+        _assert_tensor_is_1d_contiguous_uint8(src)
         bytes = _get_bytes(
-            torch.ByteTensor(src.untyped_storage()),
+            src,
             cast(int, src.storage_offset()),
-            nbytes,
+            src.numel(),
         )
         await RDMAManager.on_proc(self.proc_id).put.call(self.addr, offset, bytes)
 
