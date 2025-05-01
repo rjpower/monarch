@@ -24,14 +24,11 @@ use hyperactor::cap;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::clock::Clock;
 use hyperactor::data::Serialized;
-use hyperactor_mesh::Selection;
 use hyperactor_mesh::comm::CommActor;
 use hyperactor_mesh::comm::multicast::CastMessage;
 use hyperactor_mesh::comm::multicast::CastMessageEnvelope;
 use hyperactor_mesh::comm::multicast::DestinationPort;
 use hyperactor_mesh::comm::multicast::Uslice;
-use hyperactor_mesh::selection::SelectionSYM;
-use hyperactor_mesh::shape::Range;
 use hyperactor_multiprocess::proc_actor::ProcActor;
 use hyperactor_multiprocess::proc_actor::spawn;
 use hyperactor_multiprocess::supervision::WorldSupervisionMessageClient;
@@ -53,7 +50,10 @@ use monarch_messages::worker::Ref;
 use monarch_messages::worker::WorkerActor;
 use monarch_messages::worker::WorkerMessage;
 use monarch_messages::worker::WorkerMessageClient;
+use ndslice::Selection;
 use ndslice::Slice;
+use ndslice::selection::dsl;
+use ndslice::shape::Range;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::OnceCell;
@@ -293,11 +293,11 @@ impl Handler<CheckWorkerProgress> for ControllerActor {
 fn slice_to_selection(slice: Slice) -> Selection {
     match (slice.sizes(), slice.strides()) {
         // Special case exact rank `Selection`.
-        ([], []) => Selection::range(slice.offset()..=slice.offset(), Selection::True),
+        ([], []) => dsl::range(slice.offset()..=slice.offset(), dsl::true_()),
         // Special case trivial range `Selection`.
-        ([size, rsizes @ ..], [stride, ..]) if rsizes.iter().all(|s| *s == 1) => Selection::range(
+        ([size, rsizes @ ..], [stride, ..]) if rsizes.iter().all(|s| *s == 1) => dsl::range(
             Range(slice.offset(), Some(slice.offset() + *size), *stride),
-            Selection::True,
+            dsl::true_(),
         ),
         // Fallback to more heavy-weight translation for everything else.
         _ => {
@@ -307,8 +307,7 @@ fn slice_to_selection(slice: Slice) -> Selection {
                 if !selected_ranks.insert(rank) {
                     continue;
                 }
-                selection =
-                    Selection::union(Selection::range(rank..=rank, Selection::True), selection);
+                selection = dsl::union(dsl::range(rank..=rank, dsl::true_()), selection);
             }
             selection
         }
@@ -371,8 +370,8 @@ impl ControllerMessageHandler for ControllerActor {
     ) -> Result<(), anyhow::Error> {
         let selection = match ranks {
             Ranks::Slice(slice) => slice_to_selection(slice),
-            Ranks::SliceList(slices) => slices.into_iter().fold(Selection::False, |sel, slice| {
-                Selection::union(sel, slice_to_selection(slice))
+            Ranks::SliceList(slices) => slices.into_iter().fold(dsl::false_(), |sel, slice| {
+                dsl::union(sel, slice_to_selection(slice))
             }),
         };
         let message = CastMessageEnvelope {

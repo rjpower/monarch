@@ -1,9 +1,8 @@
 use async_trait::async_trait;
+use ndslice::Range;
+use ndslice::Shape;
+use ndslice::ShapeError;
 use ndslice::SliceIterator;
-
-use crate::Range;
-use crate::Shape;
-use crate::ShapeError;
 
 /// A mesh of nodes, organized into the topology described by its shape (see [`Shape`]).
 #[async_trait]

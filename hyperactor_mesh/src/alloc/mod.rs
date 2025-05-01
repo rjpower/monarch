@@ -19,12 +19,12 @@ pub use local::LocalAlloc;
 pub use local::LocalAllocator;
 use mockall::predicate::*;
 use mockall::*;
+use ndslice::Shape;
 pub use process::ProcessAlloc;
 pub use process::ProcessAllocator;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::Shape;
 use crate::proc_mesh::mesh_agent::MeshAgent;
 
 /// Errors that occur during allocation operations.
@@ -165,8 +165,9 @@ pub(crate) mod testing {
     use std::collections::HashMap;
     use std::collections::HashSet;
 
+    use ndslice::shape;
+
     use super::*;
-    use crate::shape;
 
     #[macro_export]
     macro_rules! alloc_test_suite {

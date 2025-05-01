@@ -293,8 +293,8 @@ mod tests {
     use hyperactor_mesh::alloc::AllocSpec;
     use hyperactor_mesh::alloc::Allocator;
     use hyperactor_mesh::alloc::LocalAllocator;
-    use hyperactor_mesh::selection;
-    use hyperactor_mesh::shape;
+    use ndslice::selection;
+    use ndslice::shape;
     use tokio::time::Duration;
 
     use super::*;

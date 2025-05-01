@@ -19,11 +19,11 @@ use hyperactor::mailbox::MailboxServer;
 use hyperactor::proc::Proc;
 use hyperactor::reference::ProcId;
 use hyperactor::reference::Reference;
+use ndslice::Range;
+use ndslice::Shape;
+use ndslice::ShapeError;
 
 use crate::Mesh;
-use crate::Range;
-use crate::Shape;
-use crate::ShapeError;
 use crate::actor_mesh::ActorMesh;
 use crate::alloc::Alloc;
 use crate::alloc::AllocatorError;
@@ -346,12 +346,13 @@ impl Mesh for SlicedProcMesh<'_> {
 
 #[cfg(test)]
 mod tests {
+    use ndslice::shape;
+
     use super::*;
     use crate::alloc::AllocConstraints;
     use crate::alloc::AllocSpec;
     use crate::alloc::Allocator;
     use crate::alloc::local::LocalAllocator;
-    use crate::shape;
 
     #[tokio::test]
     async fn test_basic() {

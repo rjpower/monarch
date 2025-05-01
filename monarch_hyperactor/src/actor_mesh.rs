@@ -21,7 +21,7 @@ pub struct PythonActorMesh {
 #[pymethods]
 impl PythonActorMesh {
     fn cast(&self, message: &PythonMessage) -> PyResult<()> {
-        use hyperactor_mesh::selection::dsl::*;
+        use ndslice::selection::dsl::*;
         self.inner
             .cast(all(true_()), message.clone())
             .map_err(|err| PyException::new_err(err.to_string()))?;

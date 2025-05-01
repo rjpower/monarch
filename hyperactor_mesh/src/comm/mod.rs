@@ -13,15 +13,15 @@ use hyperactor::ActorRef;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
+use ndslice::selection::NormalizedSelectionKey;
+use ndslice::selection::routing::RoutingFrame;
+use ndslice::selection::routing::RoutingFrameKey;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::comm::multicast::CastMessage;
 use crate::comm::multicast::CastMessageEnvelope;
 use crate::comm::multicast::ForwardMessage;
-use crate::selection::NormalizedSelectionKey;
-use crate::selection::routing::RoutingFrame;
-use crate::selection::routing::RoutingFrameKey;
 
 /// Parameters to initialize the CommActor
 #[derive(Debug, Clone, Serialize, Deserialize, Named)]

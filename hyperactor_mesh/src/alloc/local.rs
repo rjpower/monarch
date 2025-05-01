@@ -16,9 +16,9 @@ use hyperactor::mailbox;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::mailbox::MailboxServerHandle;
 use hyperactor::proc::Proc;
+use ndslice::Shape;
 use tokio::time::sleep;
 
-use crate::Shape;
 use crate::alloc::Alloc;
 use crate::alloc::AllocSpec;
 use crate::alloc::Allocator;

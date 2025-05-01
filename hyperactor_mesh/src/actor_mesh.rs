@@ -20,16 +20,16 @@ use hyperactor::actor::RemoteActor;
 use hyperactor::cap;
 use hyperactor::mailbox::MailboxSenderError;
 use hyperactor::mailbox::PortReceiver;
+use ndslice::Range;
+use ndslice::Selection;
+use ndslice::Shape;
+use ndslice::ShapeError;
+use ndslice::selection::EvalOpts;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::Mesh;
-use crate::Range;
-use crate::Selection;
-use crate::Shape;
-use crate::ShapeError;
 use crate::proc_mesh::ProcMesh;
-use crate::selection::EvalOpts;
 
 /// Abstracts over shared and borrowed references to a [`ProcMesh`].
 /// Given a shared ProcMesh, we can obtain a [`ActorMesh<'static, _>`]
@@ -296,18 +296,18 @@ mod tests {
     #[macro_export] // ok since this is only enabled in tests
     macro_rules! select_ {
         ($shape:expr, $label:ident = $range:expr) => {
-            $crate::selection::selection_from_one($shape, stringify!($label), $range).unwrap()
+            ndslice::selection::selection_from_one($shape, stringify!($label), $range).unwrap()
         };
 
         ($shape:expr, $($label:ident = $val:literal),* $(,)?) => {
-            $crate::selection::selection_from($shape,
+            ndslice::selection::selection_from($shape,
                            &[
                                $((stringify!($label), $val..$val+1)),*
                            ]).unwrap()
         };
 
         ($shape:expr, $($label:ident = $range:expr),* $(,)?) => {
-            $crate::selection::selection_from($shape, &[
+            ndslice::selection::selection_from($shape, &[
                 $((stringify!($label), $range)),*
 
             ]).unwrap()
@@ -320,12 +320,12 @@ mod tests {
         ($allocator:expr) => {
             use std::assert_matches::assert_matches;
 
-            use $crate::shape;
+            use ndslice::shape;
             use $crate::alloc::AllocSpec;
             use $crate::alloc::AllocConstraints;
             use $crate::alloc::Allocator;
             use $crate::assign::Ranks;
-            use $crate::selection::dsl::*;
+            use ndslice::selection::dsl::*;
             use $crate::proc_mesh::SharedSpawnable;
 
             use super::*;

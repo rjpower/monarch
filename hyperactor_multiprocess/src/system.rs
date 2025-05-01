@@ -208,9 +208,9 @@ mod tests {
     use hyperactor_mesh::comm::multicast::CastMessageEnvelope;
     use hyperactor_mesh::comm::multicast::DestinationPort;
     use hyperactor_mesh::comm::multicast::Uslice;
-    use hyperactor_mesh::selection;
     use maplit::hashset;
     use ndslice::Slice;
+    use ndslice::selection;
     use serde::Deserialize;
     use serde::Serialize;
     use timed_test::async_timed_test;

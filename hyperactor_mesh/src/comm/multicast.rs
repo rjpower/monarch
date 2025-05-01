@@ -8,11 +8,10 @@ use hyperactor::reference::Index;
 use hyperactor::reference::PortId;
 use hyperactor::reference::ProcId;
 use ndslice::Slice;
+use ndslice::selection::Selection;
+use ndslice::selection::routing::RoutingFrame;
 use serde::Deserialize;
 use serde::Serialize;
-
-use crate::selection::Selection;
-use crate::selection::routing::RoutingFrame;
 
 /// A union of slices that can be used to represent arbitrary subset of
 /// ranks in a gang. It is represented by a Slice together with a Selection.

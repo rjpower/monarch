@@ -29,7 +29,7 @@
 //! use hyperactor_mesh::alloc::AllocSpec;
 //! use hyperactor_mesh::alloc::Allocator;
 //! use hyperactor_mesh::alloc::LocalAllocator;
-//! use hyperactor_mesh::shape;
+//! use ndslice::shape;
 //! use rdma::RdmaConnectionConfig;
 //! use rdma::RdmaManager;
 //! use rdma::RdmaManagerArgs;
@@ -74,7 +74,7 @@ use hyperactor::clock::RealClock;
 use hyperactor_mesh::ActorMesh;
 use hyperactor_mesh::Mesh;
 use hyperactor_mesh::ProcMesh;
-use hyperactor_mesh::selection;
+use ndslice::selection;
 use tokio::time::Duration;
 
 use crate::ibverbs_primitives::IbvWc;
@@ -280,7 +280,7 @@ mod tests {
     use hyperactor_mesh::alloc::AllocSpec;
     use hyperactor_mesh::alloc::Allocator;
     use hyperactor_mesh::alloc::LocalAllocator;
-    use hyperactor_mesh::shape;
+    use ndslice::shape;
 
     use super::*;
 

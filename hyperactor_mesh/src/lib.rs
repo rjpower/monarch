@@ -20,27 +20,20 @@ pub use bootstrap::bootstrap_or_die;
 pub use comm::CommActor;
 pub use hyperactor_mesh_macros::sel;
 pub use mesh::Mesh;
-pub use ndslice::selection;
-pub use ndslice::shape;
 pub use proc_mesh::ProcMesh;
 pub use proc_mesh::SlicedProcMesh;
-pub use selection::Selection;
-pub use selection::dsl;
-pub use selection::token_parser;
-pub use shape::Range;
-pub use shape::Shape;
-pub use shape::ShapeError;
 
 #[cfg(test)]
 mod tests {
 
     #[test]
     fn basic() {
-        use crate::selection::dsl;
-        use crate::selection::structurally_equal;
+        use ndslice::selection::dsl;
+        use ndslice::selection::structurally_equal;
+
         let actual = sel!(*, 0:4, *);
         let expected = dsl::all(dsl::range(
-            crate::shape::Range(0, Some(4), 1),
+            ndslice::shape::Range(0, Some(4), 1),
             dsl::all(dsl::true_()),
         ));
         assert!(structurally_equal(&actual, &expected));

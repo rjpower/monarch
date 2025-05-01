@@ -1,6 +1,6 @@
-use hyperactor_mesh::Shape;
 use hyperactor_mesh::alloc::AllocConstraints;
 use hyperactor_mesh::alloc::AllocSpec;
+use ndslice::Shape;
 use ndslice::Slice;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

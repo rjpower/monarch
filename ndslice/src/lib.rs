@@ -23,6 +23,8 @@ pub mod selection;
 /// Core types for representing multidimensional shapes and strides.
 pub mod shape;
 
+/// The selection expression type used to define routing constraints.
+pub use selection::Selection;
 /// DSL-style constructors for building `Selection` expressions.
 pub use selection::dsl;
 /// A range with optional end and step size, used in shape and

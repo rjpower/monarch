@@ -1,4 +1,4 @@
-use hyperactor_mesh::Shape;
+use ndslice::Shape;
 use ndslice::Slice;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

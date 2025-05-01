@@ -10,13 +10,13 @@ use hyperactor::RemoteHandles;
 use hyperactor::RemoteMessage;
 use hyperactor::actor::RemoteActor;
 use hyperactor::cap;
+use ndslice::Selection;
+use ndslice::Shape;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::ActorMesh;
 use crate::Mesh;
-use crate::Selection;
-use crate::Shape;
 use crate::actor_mesh::Cast;
 use crate::actor_mesh::CastError;
 
@@ -167,6 +167,7 @@ impl<A: RemoteActor> Hash for ActorMeshRef<A> {
 #[cfg(test)]
 mod tests {
     use hyperactor::id;
+    use ndslice::shape;
 
     use super::*;
     use crate::ActorMesh;
@@ -175,7 +176,6 @@ mod tests {
     use crate::alloc::AllocSpec;
     use crate::alloc::Allocator;
     use crate::alloc::local::LocalAllocator;
-    use crate::shape;
     use crate::test_utils::EmptyActor;
     use crate::test_utils::EmptyMessage;
 

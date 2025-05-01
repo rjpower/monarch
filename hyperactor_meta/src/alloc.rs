@@ -24,7 +24,6 @@ use hyperactor::channel::Rx;
 use hyperactor::channel::Tx;
 use hyperactor::clock;
 use hyperactor::clock::Clock;
-use hyperactor_mesh::Shape;
 use hyperactor_mesh::alloc::Alloc;
 use hyperactor_mesh::alloc::AllocSpec;
 use hyperactor_mesh::alloc::Allocator;
@@ -33,6 +32,7 @@ use hyperactor_mesh::alloc::ProcState;
 use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAllocatorMessage;
 use hyperactor_mesh::alloc::remoteprocess::RemoteProcessProcStateMessage;
 use mockall::automock;
+use ndslice::Shape;
 use ndslice::Slice;
 use regex::Regex;
 use serde::Deserialize;
@@ -1059,7 +1059,7 @@ mod test {
 
     use hyperactor_mesh::alloc::AllocConstraints;
     use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAllocator;
-    use hyperactor_mesh::shape;
+    use ndslice::shape;
     use timed_test::async_timed_test;
     use tokio::process::Command;
 

@@ -14,7 +14,7 @@ use hyperactor_mesh::alloc::AllocConstraints;
 use hyperactor_mesh::alloc::AllocSpec;
 use hyperactor_mesh::alloc::Allocator;
 use hyperactor_mesh::alloc::LocalAllocator;
-use hyperactor_mesh::shape;
+use ndslice::shape;
 use rdma::RdmaConnectionConfig;
 use rdma::RdmaManager;
 use rdma::RdmaManagerArgs;

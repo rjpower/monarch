@@ -8,13 +8,13 @@ use hyperactor::channel::ChannelRx;
 use hyperactor::channel::Rx;
 use hyperactor::channel::Tx;
 use hyperactor::serde_json;
+use ndslice::Shape;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-use crate::Shape;
 use crate::alloc::Alloc;
 use crate::alloc::AllocSpec;
 use crate::alloc::Allocator;
@@ -258,6 +258,7 @@ mod test {
 
     use hyperactor::ActorRef;
     use hyperactor::id;
+    use ndslice::shape;
 
     use super::*;
     use crate::alloc::AllocConstraints;
@@ -265,7 +266,6 @@ mod test {
     use crate::alloc::MockAlloc;
     use crate::alloc::MockAllocator;
     use crate::proc_mesh::mesh_agent::MeshAgent;
-    use crate::shape;
 
     #[timed_test::async_timed_test(timeout_secs = 5)]
     async fn test_simple() {
