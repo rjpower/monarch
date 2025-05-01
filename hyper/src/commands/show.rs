@@ -42,6 +42,7 @@ impl ShowCommand {
                     .expect("failed to snapshot system");
 
                 let mut tw = TabWriter::new(io::stdout());
+                write!(tw, "Execution ID: {}\n", snapshot.execution_id)?;
                 for (world, world_snapshot) in snapshot.worlds {
                     write!(tw, "{}\t{}\n", world, world_snapshot.status)?;
                 }

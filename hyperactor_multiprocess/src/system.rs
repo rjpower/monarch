@@ -208,6 +208,7 @@ mod tests {
     use hyperactor_mesh::comm::multicast::CastMessageEnvelope;
     use hyperactor_mesh::comm::multicast::DestinationPort;
     use hyperactor_mesh::comm::multicast::Uslice;
+    use hyperactor_telemetry::env::execution_id;
     use maplit::hashset;
     use ndslice::Slice;
     use ndslice::selection;
@@ -286,6 +287,7 @@ mod tests {
                 snapshot,
                 SystemSnapshot {
                     worlds: HashMap::new(),
+                    execution_id: execution_id(),
                 }
             );
         }
@@ -329,6 +331,7 @@ mod tests {
                                 labels: HashMap::new(),
                             }
                         ),]),
+                        execution_id: execution_id(),
                     }
                 );
             }
@@ -383,6 +386,7 @@ mod tests {
                     snapshot,
                     SystemSnapshot {
                         worlds: HashMap::from([foo_world.clone(),]),
+                        execution_id: execution_id(),
                     },
                 );
 
@@ -454,7 +458,8 @@ mod tests {
                                     labels: HashMap::new(),
                                 }
                             ),
-                        ])
+                        ]),
+                        execution_id: execution_id(),
                     },
                 );
             }
@@ -509,7 +514,8 @@ mod tests {
                                     labels: HashMap::new(),
                                 }
                             ),
-                        ])
+                        ]),
+                        execution_id: execution_id(),
                     },
                 );
             }
@@ -555,7 +561,8 @@ mod tests {
                                     labels: HashMap::new(),
                                 }
                             ),
-                        ])
+                        ]),
+                        execution_id: execution_id(),
                     }
                 );
             }

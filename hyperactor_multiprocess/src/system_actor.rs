@@ -117,6 +117,8 @@ impl WorldSnapshot {
 pub struct SystemSnapshot {
     /// Snapshots of all the worlds in this system.
     pub worlds: HashMap<WorldId, WorldSnapshot>,
+    /// Execution ID of the system.
+    pub execution_id: String,
 }
 
 /// A filter used to filter the snapshot view of the system.
@@ -1382,6 +1384,7 @@ impl SystemMessageHandler for SystemActor {
             .collect();
         Ok(SystemSnapshot {
             worlds: world_snapshots,
+            execution_id: hyperactor_telemetry::env::execution_id(),
         })
     }
 
