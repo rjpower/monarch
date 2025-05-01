@@ -141,6 +141,65 @@ pub fn expression(input: &str) -> IResult<&str, Selection> {
     })(input)
 }
 
+/// Converts a Selection to its compact string representation.
+/// E.g., `*,*,1:4|5:6` is parsed as:
+///  Union(All(All(Range(1..4, True))), Range(5..6, True))
+pub fn to_compact_syntax(selection: &Selection) -> String {
+    match selection {
+        Selection::False => "false".to_string(),
+        Selection::True => "".to_string(),
+        Selection::All(inner) => {
+            let inner_str = to_compact_syntax(inner);
+            if inner_str.is_empty() {
+                "*".to_string()
+            } else {
+                format!("*,{}", inner_str)
+            }
+        }
+        Selection::First(inner) => {
+            let inner_str = to_compact_syntax(inner);
+            if inner_str.is_empty() {
+                "0".to_string()
+            } else {
+                format!("0,{}", inner_str)
+            }
+        }
+        Selection::Range(r, inner) => {
+            let range_str = match (r.0, r.1, r.2) {
+                (start, Some(end), 1) => format!("{}:{}", start, end),
+                (start, Some(end), step) => format!("{}:{}:{}", start, end, step),
+                (start, None, step) => format!("{}::{}", start, step),
+            };
+            let inner_str = to_compact_syntax(inner);
+            if inner_str.is_empty() {
+                range_str
+            } else {
+                format!("{},{}", range_str, inner_str)
+            }
+        }
+        Selection::Label(labels, inner) => {
+            let inner_str = to_compact_syntax(inner);
+            if inner_str.is_empty() {
+                format!("[{}]", labels.join(","))
+            } else {
+                format!("[{}],{}", labels.join(","), inner_str)
+            }
+        }
+        Selection::Any(inner) => {
+            let inner_str = to_compact_syntax(inner);
+            if inner_str.is_empty() {
+                "?".to_string()
+            } else {
+                format!("?,{}", inner_str)
+            }
+        }
+        Selection::Intersection(a, b) => {
+            format!("({}&{})", to_compact_syntax(a), to_compact_syntax(b))
+        }
+        Selection::Union(a, b) => format!("({}|{})", to_compact_syntax(a), to_compact_syntax(b)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::selection::Selection;
@@ -285,5 +344,96 @@ mod tests {
         use crate::dsl::true_;
 
         assert_parses_to!("*,*,*,*,*,*", all(all(all(all(all(all(true_())))))));
+    }
+
+    macro_rules! round_trip {
+        ($selection:expr) => {{
+            let compact = to_compact_syntax($selection);
+            let parsed = parse(&compact);
+            assert!(
+                structurally_equal($selection, &parsed),
+                "input: {} \n compact: {}\n parsed: {}",
+                $selection,
+                compact,
+                parsed
+            );
+        }};
+    }
+
+    #[test]
+    fn test_selection_to_compact_and_back() {
+        use crate::selection::dsl::*;
+        use crate::selection::parse::to_compact_syntax;
+        use crate::selection::structurally_equal;
+
+        round_trip!(&all(true_()));
+        round_trip!(&all(all(true_())));
+        round_trip!(&all(all(all(true_()))));
+
+        round_trip!(&range(shape::Range(4, Some(8), 1), true_()));
+        round_trip!(&range(shape::Range(4, None, 1), true_()));
+        round_trip!(&range(shape::Range(4, Some(5), 1), true_()));
+        round_trip!(&range(shape::Range(0, None, 1), true_()));
+
+        round_trip!(&range(0, range(0, range(0, true_()))));
+        round_trip!(&range(1, range(1, range(1, true_()))));
+        round_trip!(&all(range(0, true_())));
+        round_trip!(&all(range(0, all(true_()))));
+        round_trip!(&all(all(range(4.., true_()))));
+        round_trip!(&all(all(range(shape::Range(1, None, 2), true_()))));
+
+        round_trip!(&union(
+            all(all(range(0..4, true_()))),
+            all(all(range(shape::Range(4, None, 1), true_()))),
+        ));
+        round_trip!(&union(
+            all(range(0, range(0..4, true_()))),
+            all(range(1, range(4..8, true_()))),
+        ));
+        round_trip!(&union(
+            all(all(range(0..2, true_()))),
+            all(all(range(shape::Range(6, None, 1), true_()))),
+        ));
+        round_trip!(&union(
+            all(all(range(shape::Range(1, Some(4), 2), true_()))),
+            all(all(range(shape::Range(5, None, 2), true_()))),
+        ));
+        round_trip!(&intersection(all(true_()), all(true_())));
+        round_trip!(&intersection(all(true_()), all(all(range(4..8, true_())))));
+        round_trip!(&intersection(
+            all(all(range(0..5, true_()))),
+            all(all(range(4..8, true_()))),
+        ));
+
+        round_trip!(&any(any(any(true_()))));
+        round_trip!(&range(0, any(range(0..4, true_()))));
+        round_trip!(&range(0, any(true_())));
+        round_trip!(&any(true_()));
+        round_trip!(&union(
+            range(0, range(0, any(true_()))),
+            range(0, range(0, any(true_()))),
+        ));
+        round_trip!(&union(all(all(range(1..4, true_()))), range(5..6, true_())));
+        round_trip!(&all(all(union(range(1..4, true_()), range(5..6, true_())))));
+        round_trip!(&all(union(
+            range(shape::Range(1, Some(4), 1), all(true_())),
+            range(shape::Range(5, Some(6), 1), all(true_())),
+        )));
+        round_trip!(&intersection(
+            all(all(all(true_()))),
+            all(all(all(true_()))),
+        ));
+        round_trip!(&intersection(
+            range(0, all(all(true_()))),
+            range(0, union(range(1, all(true_())), range(3, all(true_())))),
+        ));
+        round_trip!(&intersection(
+            all(all(union(
+                range(0..2, true_()),
+                range(shape::Range(6, None, 1), true_()),
+            ))),
+            all(all(range(shape::Range(4, None, 1), true_()))),
+        ));
+        round_trip!(&range(1..4, range(2, true_())));
     }
 }
