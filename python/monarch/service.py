@@ -40,6 +40,9 @@ from monarch.common.mesh_trait import MeshTrait
 from monarch.common.pickle_flatten import flatten, unflatten
 from monarch.python_local_mesh import _local_device_count
 
+
+Allocator = hyperactor.ProcessAllocator | hyperactor.LocalAllocator
+
 try:
     from __manifest__ import fbmake  # noqa
 
