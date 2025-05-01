@@ -122,13 +122,21 @@ impl Handler<ForwardMessage> for CommActor {
             );
         } else {
             let mut seen = HashSet::new();
-            let unique_hops = fwd_message.dest.next_hops().into_iter().filter(|frame| {
-                seen.insert(RoutingFrameKey::new(
-                    frame.here.clone(),
-                    frame.dim,
-                    NormalizedSelectionKey::new(&frame.selection),
-                ))
-            });
+            // Note: Observe the use of `step.into_forward()`
+            // here. Without further support encountering a
+            // `RoutingStep` of case `Choice(_)` will cause a panic.
+            let unique_hops = fwd_message
+                .dest
+                .next_steps()
+                .into_iter()
+                .map(|step| step.into_forward().unwrap())
+                .filter(|frame| {
+                    seen.insert(RoutingFrameKey::new(
+                        frame.here.clone(),
+                        frame.dim,
+                        NormalizedSelectionKey::new(&frame.selection),
+                    ))
+                });
             self.forward(this, unique_hops, &fwd_message.message)
                 .await?;
         }

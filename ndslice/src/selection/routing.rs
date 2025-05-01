@@ -1,4 +1,6 @@
-//! This module defines [`RoutingFrame`] and its [`next_hops`] method,
+//! # Routing
+//!
+//! This module defines [`RoutingFrame`] and its [`next_steps`] method,
 //! which model how messages propagate through a multidimensional mesh
 //! based on a [`Selection`] expression.
 //!
@@ -7,11 +9,29 @@
 //! remaining selection to apply (`selection`), the mesh layout
 //! (`slice`), and the current dimension of traversal (`dim`).
 //!
-//! [`next_hops`] defines a routing-specific evaluation strategy for
+//! [`next_steps`] defines a routing-specific evaluation strategy for
 //! `Selection`. Unlike [`Selection::eval`], which produces flat
 //! indices that match a selection, this method produces intermediate
-//! routing states — new frames to continue traversing.
+//! routing states — new frames or deferred steps to continue
+//! traversing.
 //!
+//! Rather than returning raw frames directly, [`next_steps`] produces
+//! a list of [`RoutingStep`]s — each representing a distinct kind of
+//! routing progression:
+//!
+//! - [`RoutingStep::Forward`] indicates that routing proceeds
+//!   deterministically to a new [`RoutingFrame`] — the next coordinate
+//!   is fully determined by the current selection and frame state.
+//! - [`RoutingStep::Choice`] represents a deferred decision: it
+//!   returns a set of admissible indices, and **the caller must select
+//!   one** (e.g., for load balancing or policy-based routing) **before
+//!   routing can proceed**.
+//!
+//! In this way, non-determinism is treated as a **first-class,
+//! policy-driven** aspect of the routing system — enabling
+//! inspection, customization, and future extensions without
+//! complicating the core traversal logic.
+//
 //! A frame is considered a delivery target if its selection is
 //! [`Selection::True`] and all dimensions have been traversed, as
 //! determined by [`RoutingFrame::deliver_here`]. All other frames are
@@ -33,7 +53,7 @@ use std::fmt::Write;
 use std::hash::Hash;
 use std::sync::Arc;
 
-// use hyperactor::Named;
+use enum_as_inner::EnumAsInner;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -55,7 +75,7 @@ pub enum RoutingAction {
 /// the shape and layout information (`slice`), and the current dimension (`dim`).
 ///
 /// Each frame represents an independent routing decision and produces
-/// zero or more new frames via `next_hops`.
+/// zero or more new frames via `next_steps`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RoutingFrame {
     /// The current coordinate in the mesh where this frame is being
@@ -91,6 +111,86 @@ fn _assert_routing_frame_traits()
 where
     RoutingFrame: Send + Sync + Serialize + DeserializeOwned + 'static,
 {
+}
+
+/// A `RoutingStep` represents a unit of progress in the routing
+/// process.
+///
+/// Returned by [`RoutingFrame::next_steps`], each step describes how
+/// routing should proceed from a given frame:
+///
+/// - [`RoutingStep::Forward`] represents a deterministic hop to the
+///   next coordinate in the mesh, with an updated [`RoutingFrame`].
+///
+/// - [`RoutingStep::Choice`] indicates that routing cannot proceed
+///   until the caller selects one of several admissible indices. This
+///   allows for policy-driven or non-deterministic routing behavior,
+///   such as load balancing.
+#[derive(Debug, Clone, EnumAsInner)]
+pub enum RoutingStep {
+    /// A deterministic routing hop to the next coordinate. Carries an
+    /// updated [`RoutingFrame`] describing the new position and
+    /// residual selection.
+    Forward(RoutingFrame),
+
+    /// A deferred routing decision at the current dimension. Contains
+    /// a set of admissible indices and a residual [`RoutingFrame`] to
+    /// continue routing once a choice is made.
+    Choice(Choice),
+}
+
+/// A deferred routing decision as contained in a
+/// [`RoutingStep::Choice`].
+///
+/// A `Choice` contains:
+/// - `candidates`: the admissible indices at the current dimension
+/// - `frame`: the residual [`RoutingFrame`] describing how routing
+///   continues once a choice is made
+///
+/// To continue routing, the caller must select one of the
+/// `candidates` and call [`Choice::choose`] to produce the
+/// corresponding [`RoutingStep::Forward`].
+#[derive(Debug, Clone)]
+pub struct Choice {
+    pub(crate) candidates: Vec<usize>,
+    pub(crate) frame: RoutingFrame,
+}
+
+impl Choice {
+    /// Returns the list of admissible indices at the current
+    /// dimension.
+    ///
+    /// These represent the valid choices that the caller can select
+    /// from when resolving this deferred routing step.
+    pub fn candidates(&self) -> &[usize] {
+        &self.candidates
+    }
+
+    /// Returns a reference to the residual [`RoutingFrame`]
+    /// associated with this choice.
+    ///
+    /// This frame encodes the selection and mesh context to be used
+    /// once a choice is made, and routing continues at the next
+    /// dimension.
+    pub fn frame(&self) -> &RoutingFrame {
+        &self.frame
+    }
+
+    /// Resolves the choice by selecting a specific index.
+    ///
+    /// Constrains the residual selection to the chosen index at the
+    /// current dimension and returns a [`RoutingStep::Forward`] for
+    /// continued routing.
+    pub fn choose(self, index: usize) -> RoutingStep {
+        // The only thing `next()` has to do is constrain the
+        // selection to a concrete choice at the current dimension.
+        // `self.frame.selection` is the residual (inner) selection to
+        // be applied *past* the current dimension.
+        RoutingStep::Forward(RoutingFrame {
+            selection: crate::dsl::range(index..=index, self.frame.selection),
+            ..self.frame
+        })
+    }
 }
 
 /// Key used to deduplicate routing frames.
@@ -212,7 +312,7 @@ impl RoutingFrame {
     /// This design ensures routing is recursive, local, and
     /// compositional — each hop carries precisely the information
     /// needed for the next step.
-    pub fn next_hops(&self) -> Vec<RoutingFrame> {
+    pub fn next_steps(&self) -> Vec<RoutingStep> {
         let selection = self
             .selection
             .clone()
@@ -226,7 +326,7 @@ impl RoutingFrame {
                     .map(|i| {
                         let mut coord = self.here.clone();
                         coord[self.dim] = i;
-                        self.advance(coord, *inner.clone())
+                        RoutingStep::Forward(self.advance(coord, *inner.clone()))
                     })
                     .collect()
             }
@@ -239,7 +339,7 @@ impl RoutingFrame {
                     .map(|i| {
                         let mut coord = self.here.clone();
                         coord[self.dim] = i;
-                        self.advance(coord, *inner.clone())
+                        RoutingStep::Forward(self.advance(coord, *inner.clone()))
                     })
                     .collect()
             }
@@ -255,12 +355,12 @@ impl RoutingFrame {
 
                 let mut coord = self.here.clone();
                 coord[self.dim] = i;
-                vec![self.advance(coord, *inner)]
+                vec![RoutingStep::Forward(self.advance(coord, *inner))]
             }
 
             Selection::Union(a, b) => {
-                let mut left = self.with_selection(*a).next_hops();
-                let right = self.with_selection(*b).next_hops();
+                let mut left = self.with_selection(*a).next_steps();
+                let right = self.with_selection(*b).next_steps();
                 left.extend(right);
                 left
             }
@@ -268,25 +368,53 @@ impl RoutingFrame {
             Selection::Intersection(a, b) => {
                 let mut result = vec![];
 
-                let hops_a = self.with_selection(*a).next_hops();
-                let hops_b = self.with_selection(*b).next_hops();
+                let hops_a = self.with_selection(*a).next_steps();
+                let hops_b = self.with_selection(*b).next_steps();
 
-                for frame_a in &hops_a {
-                    for frame_b in &hops_b {
-                        if frame_a.here == frame_b.here {
-                            let residual = frame_a
-                                .selection
-                                .clone()
-                                .reduce_intersection(frame_b.selection.clone());
-                            result.push(self.advance(frame_a.here.clone(), residual));
-                            break;
+                for step_a in &hops_a {
+                    for step_b in &hops_b {
+                        match (step_a, step_b) {
+                            (RoutingStep::Forward(frame_a), RoutingStep::Forward(frame_b))
+                                if frame_a.here == frame_b.here =>
+                            {
+                                let residual = frame_a
+                                    .selection
+                                    .clone()
+                                    .reduce_intersection(frame_b.selection.clone());
+                                result.push(RoutingStep::Forward(
+                                    self.advance(frame_a.here.clone(), residual),
+                                ));
+                            }
+                            (RoutingStep::Forward(_), RoutingStep::Forward(_)) => {
+                                // Different coordinates. Empty intersection.
+                            }
+                            (RoutingStep::Choice(_), _) | (_, RoutingStep::Choice(_)) => {
+                                unimplemented!(
+                                    "choices inside intersections aren't supported at this time"
+                                );
+                            }
                         }
                     }
                 }
 
                 result
             }
-
+            /*
+                        // TODO(SF, 2025-04-30): This term is not in the algebra yet.
+                        LoadBalanced(inner) => {
+                            let size = self.slice.sizes()[self.dim];
+                            if size == 0 {
+                                vec![]
+                            } else {
+                                let candidates = (0..size).collect();
+                                vec![RoutingStep::Choice(Choice {
+                                    candidates,
+                                    frame: self.with_selection(*inner),
+                                })]
+                            }
+                        }
+            */
+            // Catch-all for future combinators (e.g., Label).
             _ => unimplemented!(),
         }
     }
@@ -303,7 +431,9 @@ impl RoutingFrame {
     pub fn should_route(&self) -> bool {
         !self.deliver_here()
     }
+}
 
+impl RoutingFrame {
     /// Traces the unique routing path to the given destination
     /// coordinate.
     ///
@@ -337,7 +467,8 @@ impl RoutingFrame {
                 return Some(path);
             }
 
-            for next in frame.next_hops() {
+            for step in frame.next_steps() {
+                let next = step.into_forward().unwrap();
                 if let Some(found) = go(next, dest, path.clone(), seen) {
                     return Some(found);
                 }
@@ -440,7 +571,8 @@ fn format_routing_tree_rec(
         }
         RoutingAction::Forward => {
             writeln!(out, "{}{}", indent_str, coord_str)?;
-            for next in frame.next_hops() {
+            for step in frame.next_steps() {
+                let next = step.into_forward().unwrap();
                 format_routing_tree_rec(&next, indent + 1, out, seen)?;
             }
         }
@@ -519,7 +651,7 @@ mod tests {
     // `Selection`.
     //
     // Starts from coordinate `[0, 0, ..., 0]` and proceeds
-    // dimension-by-dimension. At each step, `next_hops` computes the
+    // dimension-by-dimension. At each step, `next_steps` computes the
     // set of `RoutingFrame`s to forward the message to.
     //
     // A frame is considered a delivery target if:
@@ -539,7 +671,8 @@ mod tests {
         ));
 
         while let Some(RoutedMessage { frame, .. }) = pending.pop_front() {
-            for next_frame in frame.next_hops() {
+            for step in frame.next_steps() {
+                let next_frame = step.into_forward().unwrap();
                 let key = RoutingFrameKey::new(
                     next_frame.here.clone(),
                     next_frame.dim,
@@ -1026,8 +1159,11 @@ mod tests {
         println!("Fan-out trace for selection: {}", sel);
 
         while let Some(frame) = pending.pop_front() {
-            let fanout = frame.next_hops();
-            let next_coords: Vec<_> = fanout.iter().map(|f| f.here.clone()).collect();
+            let fanout = frame.next_steps();
+            let next_coords: Vec<_> = fanout
+                .iter()
+                .map(|f| f.as_forward().unwrap().here.clone())
+                .collect();
             let deliver_here = frame.deliver_here();
 
             println!(
@@ -1065,7 +1201,7 @@ mod tests {
             }
 
             for next in fanout {
-                pending.push_back(next);
+                pending.push_back(next.into_forward().unwrap());
             }
 
             step += 1;
@@ -1090,7 +1226,10 @@ mod tests {
         pending.push_back(RoutedMessage::<()>::new(root.here.clone(), root));
 
         while let Some(RoutedMessage { frame, .. }) = pending.pop_front() {
-            for next in frame.next_hops() {
+            for step in frame.next_steps() {
+                // Reject choices
+                let next = step.into_forward().unwrap();
+
                 // Always record for non-dedup case
                 if next.action() == RoutingAction::Deliver {
                     nodup_delivered.push(next.slice.location(&next.here).unwrap());
@@ -1130,12 +1269,15 @@ mod tests {
         let selection = any(all(all(true_())));
 
         let frame = RoutingFrame::root(selection, slice.clone());
-        let hops = frame.next_hops();
+        let hops = frame.next_steps();
 
         // Only one hop should be produced at the `any` dimension.
         assert_eq!(hops.len(), 1);
 
-        let hop = &hops[0];
+        // Reject choices.
+        let hop = &hops[0].as_forward().unwrap();
+
+        // There should be 3 components to the frame's coordinate.
         assert_eq!(hop.here.len(), 3);
 
         // The selected zone (dim 0) should be in bounds.
