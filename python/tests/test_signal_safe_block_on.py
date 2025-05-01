@@ -10,6 +10,7 @@ verifying that signal_safe_block_on correctly handles signals.
 """
 
 import importlib.resources
+import os
 import signal
 import subprocess
 import time
@@ -26,6 +27,10 @@ class TestSignalSafeBlockOn(unittest.TestCase):
         2. Waits for it to start
         3. Sends SIGINT to the process
         4. Verifies that the process exits within a reasonable timeout
+
+        To validate that it will behave in the same way as a ctl-c in the shell,
+        we launch the process in it's own process group and send the signal to the process
+        group instead of the process itself.
         """
         test_bin = importlib.resources.files("monarch.python.tests").joinpath(
             "test_bin"
@@ -36,7 +41,10 @@ class TestSignalSafeBlockOn(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
+
+        gpig = os.getpgid(process.pid)
 
         try:
             # Wait for the process to start and print its startup message
@@ -56,7 +64,7 @@ class TestSignalSafeBlockOn(unittest.TestCase):
             time.sleep(1)
 
             # Send SIGINT to the process
-            process.send_signal(signal.SIGINT)
+            os.killpg(gpig, signal.SIGINT)
 
             # Wait for the process to exit with a timeout
             exit_timeout = 5  # seconds

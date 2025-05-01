@@ -97,11 +97,14 @@ where
 /// The function will sleep forever until interrupted by a signal.
 #[pyfunction]
 pub fn sleep_indefinitely_for_unit_tests(py: Python) -> Result<()> {
+    // Safe to call multiple times, but ensures anything that could fail within hyperactor runtime like telemetry gets reported.
+    hyperactor::initialize();
     // Create a future that sleeps indefinitely
     let future = async {
         loop {
+            tracing::info!("idef sleeping for 100ms");
             #[allow(clippy::disallowed_methods)]
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     };
 
