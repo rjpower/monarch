@@ -46,6 +46,7 @@ use hyperactor::reference::Index;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::time::Duration;
+use tokio::time::Instant;
 
 use super::proc_actor::ProcMessage;
 use crate::proc_actor::Environment;
@@ -831,26 +832,20 @@ struct SystemSupervisionState {
     supervision_update_timeout: Duration,
 }
 
-fn now_from_epoch(_clock: &impl Clock) -> anyhow::Result<Duration> {
-    // TODO(T220691786) Use "Clock" to get the current time instead of using
-    // SystemTime::now directly.
-    Ok(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?)
-}
-
 // Used to record when procs sent their last heartbeats.
 #[derive(Debug, Clone, Default)]
 struct HeartbeatRecord {
     // This index is used to efficiently find expired procs.
     // T208419148: Handle btree_index initialization during system actor recovery
-    btree_index: BTreeSet<(Duration, ProcId)>,
+    btree_index: BTreeSet<(Instant, ProcId)>,
 
     // Last time when proc was updated.
-    proc_last_update_time: HashMap<ProcId, Duration>,
+    proc_last_update_time: HashMap<ProcId, Instant>,
 }
 
 impl HeartbeatRecord {
     // Update this proc's heartbeat record with timestamp as "now".
-    fn update(&mut self, proc_id: &ProcId, clock: &impl Clock) -> anyhow::Result<()> {
+    fn update(&mut self, proc_id: &ProcId, clock: &impl Clock) {
         // Remove previous entry in btree_index if exists.
         if let Some(update_time) = self.proc_last_update_time.get(proc_id) {
             self.btree_index
@@ -858,11 +853,10 @@ impl HeartbeatRecord {
         }
 
         // Insert new entry into btree_index.
-        let now = now_from_epoch(clock)?;
+        let now = clock.now();
         self.proc_last_update_time
             .insert(proc_id.clone(), now.clone());
         self.btree_index.insert((now.clone(), proc_id.clone()));
-        Ok(())
     }
 
     // Find all the procs with expired heartbeat, and mark them as expired in
@@ -872,9 +866,9 @@ impl HeartbeatRecord {
         state: &mut WorldSupervisionState,
         clock: &impl Clock,
         supervision_update_timeout: Duration,
-    ) -> anyhow::Result<()> {
+    ) {
         // Update procs' live status.
-        let now = now_from_epoch(clock)?;
+        let now = clock.now();
         self.btree_index
             .iter()
             .take_while(|(last_update_time, _)| {
@@ -889,7 +883,6 @@ impl HeartbeatRecord {
                     }
                 }
             });
-        Ok(())
     }
 }
 
@@ -930,9 +923,9 @@ impl SystemSupervisionState {
         proc_state: ProcSupervisionState,
         lifecycle_mode: ProcLifecycleMode,
         clock: &impl Clock,
-    ) -> anyhow::Result<()> {
+    ) {
         if World::is_host_world(&proc_state.world_id) {
-            return Ok(());
+            return;
         }
 
         let world = self
@@ -943,17 +936,13 @@ impl SystemSupervisionState {
             .lifecycle_mode
             .insert(proc_state.proc_id.clone(), lifecycle_mode);
 
-        self.update(proc_state, clock)
+        self.update(proc_state, clock);
     }
 
     /// Update a proc supervision entry.
-    fn update(
-        &mut self,
-        proc_state: ProcSupervisionState,
-        clock: &impl Clock,
-    ) -> anyhow::Result<()> {
+    fn update(&mut self, proc_state: ProcSupervisionState, clock: &impl Clock) {
         if World::is_host_world(&proc_state.world_id) {
-            return Ok(());
+            return;
         }
 
         let world = self
@@ -961,7 +950,7 @@ impl SystemSupervisionState {
             .entry(proc_state.world_id.clone())
             .or_insert_with(WorldSupervisionInfo::new);
 
-        world.heartbeat_record.update(&proc_state.proc_id, clock)?;
+        world.heartbeat_record.update(&proc_state.proc_id, clock);
 
         // Update supervision map.
         if let Some(info) = world.state.procs.get_mut(&proc_state.proc_id.rank()) {
@@ -977,17 +966,12 @@ impl SystemSupervisionState {
                 .procs
                 .insert(proc_state.proc_id.rank(), proc_state);
         }
-        Ok(())
     }
 
     /// Report the given proc's supervision state. If the proc is not in the map, do nothing.
-    fn report(
-        &mut self,
-        proc_state: ProcSupervisionState,
-        clock: &impl Clock,
-    ) -> anyhow::Result<()> {
+    fn report(&mut self, proc_state: ProcSupervisionState, clock: &impl Clock) {
         if World::is_host_world(&proc_state.world_id) {
-            return Ok(());
+            return;
         }
 
         let proc_id = proc_state.proc_id.clone();
@@ -1000,7 +984,7 @@ impl SystemSupervisionState {
                     .entry(proc_id.1)
                 {
                     Entry::Occupied(_) => {
-                        self.update(proc_state, clock)?;
+                        self.update(proc_state, clock);
                     }
                     Entry::Vacant(_) => {
                         tracing::error!("supervision not enabled for proc {}", &proc_id);
@@ -1011,7 +995,6 @@ impl SystemSupervisionState {
                 tracing::error!("supervision not enabled for proc {}", &proc_id);
             }
         }
-        Ok(())
     }
 
     /// Get procs of a world with expired supervision updates, as well as procs with
@@ -1020,28 +1003,27 @@ impl SystemSupervisionState {
         &mut self,
         world_id: &WorldId,
         clock: &impl Clock,
-    ) -> anyhow::Result<Option<WorldSupervisionState>> {
+    ) -> Option<WorldSupervisionState> {
         if let Some(world) = self.supervision_map.get_mut(world_id) {
             world.heartbeat_record.mark_expired_procs(
                 &mut world.state,
                 clock,
                 self.supervision_update_timeout,
-            )?;
+            );
             // Get procs with failures.
             let mut world_state_copy = world.state.clone();
             // Only return failed procs if there is any
             world_state_copy
                 .procs
                 .retain(|_, proc_state| !proc_state.is_healthy());
-            return Ok(Some(world_state_copy));
+            return Some(world_state_copy);
         }
-        Ok(None)
+        None
     }
 
-    fn is_world_healthy(&mut self, world_id: &WorldId, clock: &impl Clock) -> anyhow::Result<bool> {
-        Ok(self
-            .get_world_with_failures(world_id, clock)?
-            .is_none_or(|state| WorldSupervisionState::is_healthy(&state)))
+    fn is_world_healthy(&mut self, world_id: &WorldId, clock: &impl Clock) -> bool {
+        self.get_world_with_failures(world_id, clock)
+            .is_none_or(|state| WorldSupervisionState::is_healthy(&state))
     }
 }
 
@@ -1260,7 +1242,7 @@ impl SystemMessageHandler for SystemActor {
                 },
                 lifecycle_mode.clone(),
                 this.clock(),
-            )?;
+            );
         }
 
         // If the proc's life cycle is not managed by system actor, system actor
@@ -1335,12 +1317,10 @@ impl SystemMessageHandler for SystemActor {
                             status: if world.state.procs.len() < world.scheduler_params.num_procs()
                                 || !self
                                     .supervision_state
-                                    .is_world_healthy(&world_id, this.clock())?
+                                    .is_world_healthy(&world_id, this.clock())
                             {
                                 WorldStatus::Unhealthy(SystemTime::now())
                             } else {
-                                // This is another place we might need to start
-                                // heartbeat.
                                 WorldStatus::Live
                             },
                         };
@@ -1547,7 +1527,7 @@ impl Handler<MaintainWorldHealth> for SystemActor {
 
             let Some(state) = self
                 .supervision_state
-                .get_world_with_failures(&world.world_id, this.clock())?
+                .get_world_with_failures(&world.world_id, this.clock())
             else {
                 tracing::debug!("world {} does not have failures, skipping.", world.world_id);
                 continue;
@@ -1652,7 +1632,7 @@ impl Handler<ProcSupervisionMessage> for SystemActor {
     ) -> anyhow::Result<()> {
         match msg {
             ProcSupervisionMessage::Update(state, reply_port) => {
-                self.supervision_state.report(state, this.clock())?;
+                self.supervision_state.report(state, this.clock());
                 let _ = reply_port.send(this, ());
             }
         }
@@ -1671,8 +1651,7 @@ impl Handler<WorldSupervisionMessage> for SystemActor {
             WorldSupervisionMessage::State(world_id, reply_port) => {
                 let world_state = self
                     .supervision_state
-                    .get_world_with_failures(&world_id, this.clock())
-                    .unwrap();
+                    .get_world_with_failures(&world_id, this.clock());
                 // TODO: handle potential undeliverable message return
                 let _ = reply_port.send(this, world_state);
             }
@@ -1934,8 +1913,7 @@ mod tests {
             },
             ProcLifecycleMode::ManagedBySystem,
             &clock,
-        )
-        .unwrap();
+        );
         let actor_id = id!(world[1].actor);
         let proc_id_1 = actor_id.proc_id();
         sv.create(
@@ -1948,18 +1926,15 @@ mod tests {
             },
             ProcLifecycleMode::ManagedBySystem,
             &clock,
-        )
-        .unwrap();
+        );
         let world_id = id!(world);
 
         let unknown_world_id = id!(unknow_world);
-        let failures = sv
-            .get_world_with_failures(&unknown_world_id, &clock)
-            .unwrap();
+        let failures = sv.get_world_with_failures(&unknown_world_id, &clock);
         assert!(failures.is_none());
 
         // No supervision expiration yet.
-        let failures = sv.get_world_with_failures(&world_id, &clock).unwrap();
+        let failures = sv.get_world_with_failures(&world_id, &clock);
         assert!(failures.is_some());
         assert_eq!(failures.unwrap().procs.len(), 0);
 
@@ -1974,9 +1949,8 @@ mod tests {
                 failed_actors: HashMap::new(),
             },
             &clock,
-        )
-        .unwrap();
-        let failures = sv.get_world_with_failures(&world_id, &clock).unwrap();
+        );
+        let failures = sv.get_world_with_failures(&world_id, &clock);
         let procs = failures.unwrap().procs;
         assert_eq!(procs.len(), 1);
         assert!(procs.contains_key(&proc_id_0.1));
@@ -1994,10 +1968,9 @@ mod tests {
                     .collect(),
             },
             &clock,
-        )
-        .unwrap();
+        );
 
-        let failures = sv.get_world_with_failures(&world_id, &clock).unwrap();
+        let failures = sv.get_world_with_failures(&world_id, &clock);
         let procs = failures.unwrap().procs;
         assert_eq!(procs.len(), 2);
         assert!(procs.contains_key(&proc_id_0.1));
