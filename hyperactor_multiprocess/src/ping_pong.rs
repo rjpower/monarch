@@ -14,6 +14,7 @@ mod tests {
     use hyperactor::reference::WorldId;
     use hyperactor::simnet::NetworkConfig;
     use hyperactor::test_utils::pingpong::PingPongActor;
+    use hyperactor::test_utils::pingpong::PingPongActorParams;
     use hyperactor::test_utils::pingpong::PingPongMessage;
 
     use crate::System;
@@ -145,11 +146,12 @@ edges:
 
         let (undeliverable_msg_tx, _) = sys_mailbox.open_port();
 
+        let params = PingPongActorParams::new(undeliverable_msg_tx.bind(), None);
         spawn::<PingPongActor>(
             &sys_mailbox,
             &bootstrap.proc_actor.bind(),
             actor_index.to_string().as_str(),
-            &undeliverable_msg_tx.bind(),
+            &params,
         )
         .await
         .unwrap()

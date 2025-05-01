@@ -21,7 +21,26 @@ use crate::mailbox::Undeliverable;
 pub struct PingPongMessage(pub u64, pub ActorRef<PingPongActor>, pub OncePortRef<bool>);
 
 /// Initialization parameters for `PingPongActor`s.
-pub type PingPongActorParams = PortRef<Undeliverable<MessageEnvelope>>;
+#[derive(Debug, Named, Serialize, Deserialize, Clone)]
+pub struct PingPongActorParams {
+    /// A port to send undeliverable messages to.
+    undeliverable_port_ref: PortRef<Undeliverable<MessageEnvelope>>,
+    /// The TTL at which the actor will exit with error.
+    error_ttl: Option<u64>,
+}
+
+impl PingPongActorParams {
+    /// Create a new set of initialization parameters.
+    pub fn new(
+        undeliverable_port_ref: PortRef<Undeliverable<MessageEnvelope>>,
+        error_ttl: Option<u64>,
+    ) -> Self {
+        Self {
+            undeliverable_port_ref,
+            error_ttl,
+        }
+    }
+}
 
 /// A PingPong actor that can play the PingPong game by sending messages around.
 #[derive(Debug)]
@@ -48,7 +67,10 @@ impl Actor for PingPongActor {
     ) -> Result<(), anyhow::Error> {
         // Forward this undelivered message to the port ref given on
         // construction.
-        self.params.send(this, undelivered).unwrap();
+        self.params
+            .undeliverable_port_ref
+            .send(this, undelivered)
+            .unwrap();
 
         // For the purposes of testing we don't return `Err` here as
         // we normally would for an arbitrary actor. If we did the
@@ -69,8 +91,8 @@ impl Handler<PingPongMessage> for PingPongActor {
         PingPongMessage(ttl, pong_actor, done_port): PingPongMessage,
     ) -> anyhow::Result<()> {
         // PingPongActor sends the messages back and forth. When it's ttl = 0, it will stop.
-        // There are a few specific TTLs that can cause mocked problem: such as panic or error.
-        if ttl == 66 {
+        // User can set a preconfigured TTL that can cause mocked problem: such as an error.
+        if Some(ttl) == self.params.error_ttl {
             anyhow::bail!("PingPong handler encountered an Error");
         }
         if ttl == 0 {

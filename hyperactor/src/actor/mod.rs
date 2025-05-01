@@ -693,6 +693,7 @@ mod tests {
     use crate::checkpoint::CheckpointError;
     use crate::checkpoint::Checkpointable;
     use crate::test_utils::pingpong::PingPongActor;
+    use crate::test_utils::pingpong::PingPongActorParams;
     use crate::test_utils::pingpong::PingPongMessage;
     use crate::test_utils::proc_supervison::ProcSupervisionCoordinator;
 
@@ -740,12 +741,13 @@ mod tests {
         let client = proc.attach("client").unwrap();
         let (undeliverable_msg_tx, _) = client.open_port();
 
+        let ping_pong_actor_params = PingPongActorParams::new(undeliverable_msg_tx.bind(), None);
         let ping_handle = proc
-            .spawn::<PingPongActor>("ping", undeliverable_msg_tx.bind())
+            .spawn::<PingPongActor>("ping", ping_pong_actor_params.clone())
             .await
             .unwrap();
         let pong_handle = proc
-            .spawn::<PingPongActor>("pong", undeliverable_msg_tx.bind())
+            .spawn::<PingPongActor>("pong", ping_pong_actor_params)
             .await
             .unwrap();
 
@@ -768,12 +770,15 @@ mod tests {
         // be actor failure(s) in this test which trigger supervision.
         ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
+        let error_ttl = Some(66);
+        let ping_pong_actor_params =
+            PingPongActorParams::new(undeliverable_msg_tx.bind(), error_ttl);
         let ping_handle = proc
-            .spawn::<PingPongActor>("ping", undeliverable_msg_tx.bind())
+            .spawn::<PingPongActor>("ping", ping_pong_actor_params.clone())
             .await
             .unwrap();
         let pong_handle = proc
-            .spawn::<PingPongActor>("pong", undeliverable_msg_tx.bind())
+            .spawn::<PingPongActor>("pong", ping_pong_actor_params)
             .await
             .unwrap();
 
@@ -781,7 +786,7 @@ mod tests {
 
         ping_handle
             .send(PingPongMessage(
-                67, // will encounter an error at TTL=66
+                error_ttl.unwrap() + 1, // will encounter an error at TTL=66
                 pong_handle.bind(),
                 local_port.bind(),
             ))

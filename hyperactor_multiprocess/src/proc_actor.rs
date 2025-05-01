@@ -842,6 +842,7 @@ mod tests {
     use hyperactor::mailbox::Mailbox;
     use hyperactor::reference::ActorRef;
     use hyperactor::test_utils::pingpong::PingPongActor;
+    use hyperactor::test_utils::pingpong::PingPongActorParams;
     use hyperactor::test_utils::pingpong::PingPongMessage;
     use maplit::hashset;
     use rand::Rng;
@@ -1387,15 +1388,17 @@ mod tests {
         let proc_1_client = proc_1.attach("client").unwrap();
         let (proc_1_undeliverable_tx, mut _proc_1_undeliverable_rx) = proc_1_client.open_port();
 
+        let ping_params = PingPongActorParams::new(proc_0_undeliverable_tx.bind(), None);
         // Spawn two actors 'ping' and 'pong' where 'ping' runs on
         // 'world[0]' and 'pong' on 'world[1]' (that is, not on the
         // same proc).
         let ping_handle = proc_0
-            .spawn::<PingPongActor>("ping", proc_0_undeliverable_tx.bind())
+            .spawn::<PingPongActor>("ping", ping_params)
             .await
             .unwrap();
+        let pong_params = PingPongActorParams::new(proc_1_undeliverable_tx.bind(), None);
         let pong_handle = proc_1
-            .spawn::<PingPongActor>("pong", proc_1_undeliverable_tx.bind())
+            .spawn::<PingPongActor>("pong", pong_params)
             .await
             .unwrap();
 
@@ -1510,12 +1513,14 @@ mod tests {
         // Spawn two actors 'ping' and 'pong' where 'ping' runs on
         // 'world[0]' and 'pong' on 'world[1]' (that is, not on the
         // same proc).
+        let ping_params = PingPongActorParams::new(proc_0_undeliverable_tx.bind(), None);
         let ping_handle = proc_0
-            .spawn::<PingPongActor>("ping", proc_0_undeliverable_tx.bind())
+            .spawn::<PingPongActor>("ping", ping_params)
             .await
             .unwrap();
+        let pong_params = PingPongActorParams::new(proc_1_undeliverable_tx.bind(), None);
         let pong_handle = proc_1
-            .spawn::<PingPongActor>("pong", proc_1_undeliverable_tx.bind())
+            .spawn::<PingPongActor>("pong", pong_params)
             .await
             .unwrap();
 
@@ -1668,12 +1673,12 @@ mod tests {
         .await
         .unwrap();
         let (undeliverable_msg_tx, _) = system_client.open_port();
-
+        let params = PingPongActorParams::new(undeliverable_msg_tx.bind(), None);
         let actor_ref = spawn::<PingPongActor>(
             &system_client,
             &bootstrap.proc_actor.bind(),
             &actor_id.to_string(),
-            &undeliverable_msg_tx.bind(),
+            &params,
         )
         .await
         .unwrap();

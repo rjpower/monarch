@@ -1800,6 +1800,7 @@ mod tests {
     use hyperactor::mailbox::PortHandle;
     use hyperactor::mailbox::PortReceiver;
     use hyperactor::mailbox::monitored_return_handle;
+    use hyperactor::test_utils::pingpong::PingPongActorParams;
 
     use super::*;
     use crate::System;
@@ -2689,12 +2690,14 @@ mod tests {
         // Spawn two actors 'ping' and 'pong' where 'ping' runs on
         // 'world[0]' and 'pong' on 'world[1]' (that is, not on the
         // same proc).
+        let ping_params = PingPongActorParams::new(proc_0_undeliverable_tx.bind(), None);
         let ping_handle = proc_0
-            .spawn::<PingPongActor>("ping", proc_0_undeliverable_tx.bind())
+            .spawn::<PingPongActor>("ping", ping_params)
             .await
             .unwrap();
+        let pong_params = PingPongActorParams::new(proc_1_undeliverable_tx.bind(), None);
         let pong_handle = proc_1
-            .spawn::<PingPongActor>("pong", proc_1_undeliverable_tx.bind())
+            .spawn::<PingPongActor>("pong", pong_params)
             .await
             .unwrap();
 
