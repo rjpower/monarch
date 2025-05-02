@@ -31,16 +31,20 @@ jobs:
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
       gpu-arch-version: ${{ matrix.gpu-arch-version }}
       submodules: recursive
+
+      steps:
+        - name: Install Rust toolchain
+          run: |
+                  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+                  source $HOME/.cargo/env
+                  rustup toolchain install nightly
+                  rustup default nightly
+
       script: |
         conda create -n venv python=3.10 -y
         conda activate venv
         export PATH=/opt/rh/devtoolset-10/root/usr/bin/:$PATH
         python -m pip install --upgrade pip
-
-        # Install rust and setup nightly toolchain
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-        rustup toolchain install nightly
-        rustup default nightly
 
         # Install torch
         pip install ${{ matrix.torch-spec }}
