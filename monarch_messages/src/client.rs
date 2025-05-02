@@ -81,7 +81,7 @@ pub enum ClientMessage {
     /// Notify the client of a debugger event.
     DebuggerMessage {
         /// The actor id of the debugger.
-        debugger_actor_id: ActorId,
+         debugger_actor_id: ActorId,
         /// The action to take.
         action: DebuggerAction,
     },
