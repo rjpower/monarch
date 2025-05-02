@@ -988,7 +988,12 @@ impl Mailbox {
         );
         (
             PortHandle::new(self.clone(), port_index, UnboundedPortSender::Mpsc(sender)),
-            PortReceiver::new(receiver, port_id, self.state.clone()),
+            PortReceiver::new(
+                receiver,
+                port_id,
+                /*coalesce=*/ false,
+                self.state.clone(),
+            ),
         )
     }
 
@@ -1293,17 +1298,25 @@ impl<M: Message> fmt::Display for OncePortHandle<M> {
 pub struct PortReceiver<M> {
     receiver: mpsc::UnboundedReceiver<M>,
     port_id: PortId,
-
+    /// When multiple messages are put in channel, only receive the latest one
+    /// if coalesce is true. Other messages will be discarded.
+    coalesce: bool,
     /// State is used to remove the port from service when the receiver
     /// is dropped.
     state: Arc<State>,
 }
 
 impl<M> PortReceiver<M> {
-    fn new(receiver: mpsc::UnboundedReceiver<M>, port_id: PortId, state: Arc<State>) -> Self {
+    fn new(
+        receiver: mpsc::UnboundedReceiver<M>,
+        port_id: PortId,
+        coalesce: bool,
+        state: Arc<State>,
+    ) -> Self {
         Self {
             receiver,
             port_id,
+            coalesce,
             state,
         }
     }
@@ -1312,7 +1325,14 @@ impl<M> PortReceiver<M> {
     /// This function returns `Ok(None)` if the receiver is empty
     /// and returns a MailboxError if the receiver is disconnected.
     pub fn try_recv(&mut self) -> Result<Option<M>, MailboxError> {
-        match self.receiver.try_recv() {
+        let mut next = self.receiver.try_recv();
+        // To coalesce, drain the mpsc queue and only keep the last one.
+        if self.coalesce {
+            if let Some(latest) = self.drain().pop() {
+                next = Ok(latest);
+            }
+        }
+        match next {
             Ok(msg) => Ok(Some(msg)),
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
             Err(mpsc::error::TryRecvError::Disconnected) => Err(MailboxError::new(
@@ -1325,7 +1345,15 @@ impl<M> PortReceiver<M> {
     /// Receive the next message from the port corresponding with this
     /// receiver.
     pub async fn recv(&mut self) -> Result<M, MailboxError> {
-        self.receiver.recv().await.ok_or(MailboxError::new(
+        let mut next = self.receiver.recv().await;
+        // To coalesce, get the last message from the queue if there are
+        // more on the mspc queue.
+        if self.coalesce {
+            if let Some(latest) = self.drain().pop() {
+                next = Some(latest);
+            }
+        }
+        next.ok_or(MailboxError::new(
             self.actor_id().clone(),
             MailboxErrorKind::Closed,
         ))
@@ -1335,6 +1363,10 @@ impl<M> PortReceiver<M> {
     pub fn drain(&mut self) -> Vec<M> {
         let mut drained: Vec<M> = Vec::new();
         while let Ok(msg) = self.receiver.try_recv() {
+            // To coalesce, discard the old message if there is any.
+            if self.coalesce {
+                drained.pop();
+            }
             drained.push(msg);
         }
         drained
@@ -2366,5 +2398,150 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    async fn verify_receiver(coalesce: bool, drop_sender: bool) {
+        fn create_receiver<M>(coalesce: bool) -> (mpsc::UnboundedSender<M>, PortReceiver<M>) {
+            // Create dummy state and port_id to create PortReceiver. They are
+            // not used in the test.
+            let dummy_state =
+                State::new(id!(world[0].actor), BOXED_PANICKING_MAILBOX_SENDER.clone());
+            let dummy_port_id = PortId(id!(world[0].actor), 0);
+            let (sender, receiver) = mpsc::unbounded_channel::<M>();
+            let receiver = PortReceiver {
+                receiver,
+                port_id: dummy_port_id,
+                coalesce,
+                state: Arc::new(dummy_state),
+            };
+            (sender, receiver)
+        }
+
+        // verify fn drain
+        {
+            let (sender, mut receiver) = create_receiver::<u64>(coalesce);
+            assert!(receiver.drain().is_empty());
+
+            sender.send(0).unwrap();
+            sender.send(1).unwrap();
+            sender.send(2).unwrap();
+            sender.send(3).unwrap();
+            sender.send(4).unwrap();
+            sender.send(5).unwrap();
+            sender.send(6).unwrap();
+            sender.send(7).unwrap();
+
+            if drop_sender {
+                drop(sender);
+            }
+
+            if !coalesce {
+                assert_eq!(receiver.drain(), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+            } else {
+                assert_eq!(receiver.drain(), vec![7]);
+            }
+
+            assert!(receiver.drain().is_empty());
+            assert!(receiver.drain().is_empty());
+        }
+
+        // verify fn try_recv
+        {
+            let (sender, mut receiver) = create_receiver::<u64>(coalesce);
+            assert!(receiver.try_recv().unwrap().is_none());
+
+            sender.send(0).unwrap();
+            sender.send(1).unwrap();
+            sender.send(2).unwrap();
+            sender.send(3).unwrap();
+
+            if drop_sender {
+                drop(sender);
+            }
+
+            if !coalesce {
+                assert_eq!(receiver.try_recv().unwrap().unwrap(), 0);
+                assert_eq!(receiver.try_recv().unwrap().unwrap(), 1);
+                assert_eq!(receiver.try_recv().unwrap().unwrap(), 2);
+            }
+            assert_eq!(receiver.try_recv().unwrap().unwrap(), 3);
+            if drop_sender {
+                assert_matches!(
+                    receiver.try_recv().unwrap_err().kind(),
+                    MailboxErrorKind::Closed
+                );
+                // Still Closed error
+                assert_matches!(
+                    receiver.try_recv().unwrap_err().kind(),
+                    MailboxErrorKind::Closed
+                );
+            } else {
+                assert!(receiver.try_recv().unwrap().is_none());
+                // Still empty
+                assert!(receiver.try_recv().unwrap().is_none());
+            }
+        }
+        // verify fn recv
+        {
+            let (sender, mut receiver) = create_receiver::<u64>(coalesce);
+            assert!(
+                tokio::time::timeout(tokio::time::Duration::from_secs(1), receiver.recv())
+                    .await
+                    .is_err()
+            );
+
+            sender.send(4).unwrap();
+            sender.send(5).unwrap();
+            sender.send(6).unwrap();
+            sender.send(7).unwrap();
+
+            if drop_sender {
+                drop(sender);
+            }
+
+            if !coalesce {
+                assert_eq!(receiver.recv().await.unwrap(), 4);
+                assert_eq!(receiver.recv().await.unwrap(), 5);
+                assert_eq!(receiver.recv().await.unwrap(), 6);
+            }
+            assert_eq!(receiver.recv().await.unwrap(), 7);
+            if drop_sender {
+                assert_matches!(
+                    receiver.recv().await.unwrap_err().kind(),
+                    MailboxErrorKind::Closed
+                );
+                // Still None
+                assert_matches!(
+                    receiver.recv().await.unwrap_err().kind(),
+                    MailboxErrorKind::Closed
+                );
+            } else {
+                assert!(
+                    tokio::time::timeout(tokio::time::Duration::from_secs(1), receiver.recv())
+                        .await
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_receiver_basic_default() {
+        verify_receiver(/*coalesce=*/ false, /*drop_sender=*/ false).await
+    }
+
+    #[tokio::test]
+    async fn test_receiver_basic_latest() {
+        verify_receiver(/*coalesce=*/ true, /*drop_sender=*/ false).await
+    }
+
+    #[tokio::test]
+    async fn test_receiver_after_sender_drop_default() {
+        verify_receiver(/*coalesce=*/ false, /*drop_sender=*/ true).await
+    }
+
+    #[tokio::test]
+    async fn test_receiver_after_sender_drop_latest() {
+        verify_receiver(/*coalesce=*/ true, /*drop_sender=*/ true).await
     }
 }
