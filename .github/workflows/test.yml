@@ -38,7 +38,8 @@ jobs:
         python -m pip install --upgrade pip
 
         # Install rust and setup nightly toolchain
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source $HOME/.cargo/env
         rustup toolchain install nightly
         rustup default nightly
 
