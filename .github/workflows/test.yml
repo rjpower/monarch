@@ -37,7 +37,7 @@ jobs:
         export PATH=/opt/rh/devtoolset-10/root/usr/bin/:$PATH
         python -m pip install --upgrade pip
 
-        # Install dependencies
+        # Install native dependencies
         dnf update -y
         dnf install clang-devel libunwind libunwind-devel -y
 
@@ -49,8 +49,13 @@ jobs:
 
         # Install torch
         pip install ${{ matrix.torch-spec }}
-        # Build dependencies
+
+        # Install Python dependencies
         pip install setuptools-rust
-        # Install other deps
         pip install pyzmq requests numpy pyre-extensions
+
+        # Build and install monarch
         python setup.py install
+
+        # Run tests
+        pytest python/tests/ -v
