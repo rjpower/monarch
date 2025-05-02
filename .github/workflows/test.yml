@@ -39,7 +39,7 @@ jobs:
 
         # Install dependencies
         dnf update -y
-        dnf install clang-devel -y
+        dnf install clang-devel libunwind libunwind-devel -y
 
         # Install rust and setup nightly toolchain
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
