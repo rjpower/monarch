@@ -53,7 +53,9 @@ jobs:
         # Install Python dependencies
         pip install setuptools-rust
         pip install pyzmq requests numpy pyre-extensions
-        pip install pytest
+
+        # Test dependencies
+        pip install pytest cloudpickle
 
         # Build and install monarch
         python setup.py install
