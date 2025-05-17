@@ -1,0 +1,80 @@
+#![allow(unsafe_op_in_unsafe_fn)]
+
+mod client;
+mod controller;
+mod debugger;
+mod simulator_client;
+mod worker;
+
+use pyo3::prelude::*;
+
+fn get_or_add_new_module<'py>(
+    module: &Bound<'py, PyModule>,
+    module_name: &str,
+) -> PyResult<Bound<'py, pyo3::types::PyModule>> {
+    let mut current_module = module.clone();
+    let mut parts = Vec::new();
+    for part in module_name.split(".") {
+        parts.push(part);
+        let submodule = current_module.getattr(part).ok();
+        if let Some(submodule) = submodule {
+            current_module = submodule.extract()?;
+        } else {
+            let new_module = PyModule::new_bound(current_module.py(), part)?;
+            current_module.add_submodule(&new_module)?;
+            current_module
+                .py()
+                .import_bound("sys")?
+                .getattr("modules")?
+                .set_item(
+                    format!("monarch._rust_bindings.{}", parts.join(".")),
+                    new_module.clone(),
+                )?;
+            current_module = new_module;
+        }
+    }
+    Ok(current_module)
+}
+
+#[pymodule]
+#[pyo3(name = "_rust_bindings")]
+pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    ::hyperactor::initialize();
+    monarch_hyperactor::runtime::initialize(module.py())?;
+
+    monarch_hyperactor::shape::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.shape",
+    )?)?;
+
+    client::register_python_bindings(&get_or_add_new_module(module, "monarch_extension.client")?)?;
+    worker::register_python_bindings(&get_or_add_new_module(module, "monarch_extension.worker")?)?;
+
+    controller::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_extension.controller",
+    )?)?;
+    monarch_hyperactor::register_python_bindings(&get_or_add_new_module(module, "hyperactor")?)?;
+    monarch_hyperactor::runtime::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.runtime",
+    )?)?;
+    debugger::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_extension.debugger",
+    )?)?;
+    monarch_messages::debugger::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_messages.debugger",
+    )?)?;
+    simulator_client::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_extension.simulator_client",
+    )?)?;
+    hyperactor_extension::register_python_bindings(&get_or_add_new_module(
+        module,
+        "hyperactor_extension",
+    )?)?;
+
+    Ok(())
+}
