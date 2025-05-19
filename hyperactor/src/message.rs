@@ -75,7 +75,7 @@ impl Bindings {
     /// If the binding did not have this type present, None is returned.
     /// If the binding already had this type, replace the old values with new
     /// values, and the old value is returned.
-    fn insert<T: Serialize + Named>(
+    pub fn insert<T: Serialize + Named>(
         &mut self,
         values: impl IntoIterator<Item = &T>,
     ) -> anyhow::Result<Option<Vec<Serialized>>> {
@@ -88,8 +88,7 @@ impl Bindings {
 
     /// Get this type's values from the binding.
     /// If the binding did not have this type present, empty Vec is returned.
-    #[allow(dead_code)]
-    fn get<T: DeserializeOwned + Named>(&self) -> anyhow::Result<Vec<T>> {
+    pub fn get<T: DeserializeOwned + Named>(&self) -> anyhow::Result<Vec<T>> {
         match self.0.get(&T::typehash()) {
             None => Ok(vec![]),
             Some(ser) => {
@@ -102,8 +101,8 @@ impl Bindings {
         }
     }
 
-    #[allow(dead_code)]
-    fn bind_to<T: DeserializeOwned + Named>(
+    /// todo
+    pub fn bind_to<T: DeserializeOwned + Named>(
         &self,
         mut_refs: impl ExactSizeIterator<Item = &mut T>,
     ) -> anyhow::Result<()> {
@@ -177,8 +176,13 @@ impl ErasedUnbound {
         })
     }
 
-    #[allow(dead_code)] // Will be used when we split port in comm actor.
-    fn replace<T: Serialize + Named>(
+    /// Get ports inside bindings.
+    pub fn get<T: DeserializeOwned + Named>(&self) -> anyhow::Result<Vec<T>> {
+        self.bindings.get()
+    }
+
+    /// Update ports inside bindings.
+    pub fn replace<T: Serialize + Named>(
         &mut self,
         new_values: impl ExactSizeIterator<Item = &T>,
     ) -> anyhow::Result<()> {

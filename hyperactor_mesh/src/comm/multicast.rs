@@ -75,6 +75,10 @@ impl CastMessageEnvelope {
     pub(crate) fn data(&self) -> &ErasedUnbound {
         &self.data
     }
+
+    pub(crate) fn data_mut(&mut self) -> &mut ErasedUnbound {
+        &mut self.data
+    }
 }
 
 /// Destination port id of a message. It is a `PortId` with the rank masked out,

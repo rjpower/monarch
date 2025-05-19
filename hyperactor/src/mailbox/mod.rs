@@ -1176,6 +1176,21 @@ impl Mailbox {
             Entry::Occupied(_entry) => {}
         }
     }
+
+    fn bind_untyped(&self, port_id: &PortId, sender: UntypedUnboundedSender) {
+        assert_eq!(
+            port_id.actor_id(),
+            self.actor_id(),
+            "port does not belong to mailbox"
+        );
+
+        match self.state.ports.entry(port_id.index()) {
+            Entry::Vacant(entry) => {
+                entry.insert(Box::new(sender));
+            }
+            Entry::Occupied(_entry) => {}
+        }
+    }
 }
 
 // TODO: figure out what to do with these interfaces -- possibly these caps
@@ -1246,6 +1261,33 @@ impl cap::sealed::CanSend for Mailbox {
 impl cap::sealed::CanOpenPort for Mailbox {
     fn mailbox(&self) -> &Mailbox {
         self
+    }
+}
+
+impl cap::sealed::CanSplitPort for Mailbox {
+    fn split(&self, port_id: PortId) -> PortId {
+        let port_index = self.state.allocate_port();
+        let split_port = self.actor_id().port_id(port_index);
+        let mailbox = self.clone();
+        let enqueue = move |serialized: Serialized| {
+            mailbox.post(
+                MessageEnvelope::new(mailbox.actor_id().clone(), port_id.clone(), serialized),
+                // TODO(pzhang) figure out how to use upstream's return handle,
+                // instead of getting a new one like this.
+                // This is okay for now because upstream is currently also using
+                // the same handle singleton, but that could change in the future.
+                monitored_return_handle(),
+            );
+            Ok(())
+        };
+        self.bind_untyped(
+            &split_port,
+            UntypedUnboundedSender {
+                sender: Box::new(enqueue),
+                port_id: split_port.clone(),
+            },
+        );
+        split_port
     }
 }
 
@@ -1713,6 +1755,26 @@ impl<M: RemoteMessage> SerializedSender for OnceSender<M> {
                 ),
             }),
         }
+    }
+}
+
+/// Use the provided function to send untyped messages (i.e. Serialized objects).
+struct UntypedUnboundedSender {
+    sender: Box<dyn Fn(Serialized) -> Result<(), (Serialized, anyhow::Error)> + Send + Sync>,
+    port_id: PortId,
+}
+
+impl SerializedSender for UntypedUnboundedSender {
+    fn send_serialized(&self, serialized: Serialized) -> Result<bool, SerializedSenderError> {
+        (self.sender)(serialized).map_err(|(data, err)| SerializedSenderError {
+            data,
+            error: MailboxSenderError::new_bound(
+                self.port_id.clone(),
+                MailboxSenderErrorKind::Other(err),
+            ),
+        })?;
+
+        Ok(true)
     }
 }
 
@@ -2692,5 +2754,42 @@ mod tests {
     #[tokio::test]
     async fn test_receiver_after_sender_drop_latest() {
         verify_receiver(/*coalesce=*/ true, /*drop_sender=*/ true).await
+    }
+
+    #[tokio::test]
+    async fn test_split_port_id() {
+        fn post(mailbox: &Mailbox, port_id: PortId, msg: u64) {
+            mailbox.post(
+                MessageEnvelope::new_unknown(port_id.clone(), Serialized::serialize(&msg).unwrap()),
+                monitored_return_handle(),
+            );
+        }
+
+        let muxer = MailboxMuxer::new();
+        let actor0 = Mailbox::new(id!(test[0].actor), BoxedMailboxSender::new(muxer.clone()));
+        let actor1 = Mailbox::new(id!(test[1].actor1), BoxedMailboxSender::new(muxer.clone()));
+        muxer.bind_mailbox(actor0.clone());
+        muxer.bind_mailbox(actor1.clone());
+
+        // Open a port on actor0
+        let (port_handle, mut receiver) = actor0.open_port::<u64>();
+        let port_id = port_handle.bind().port_id().clone();
+
+        // Split it twice on actor1
+        let port_id1 = port_id.split(&actor1);
+        let port_id2 = port_id.split(&actor1);
+
+        // A split port id can also be split
+        let port_id2_1 = port_id2.split(&actor1);
+
+        // Can send messages to receiver from all port handles
+        post(&actor0, port_id.clone(), 1);
+        assert_eq!(receiver.recv().await.unwrap(), 1);
+        post(&actor1, port_id1.clone(), 2);
+        assert_eq!(receiver.recv().await.unwrap(), 2);
+        post(&actor1, port_id2.clone(), 3);
+        assert_eq!(receiver.recv().await.unwrap(), 3);
+        post(&actor1, port_id2_1.clone(), 4);
+        assert_eq!(receiver.recv().await.unwrap(), 4);
     }
 }

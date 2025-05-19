@@ -32,5 +32,6 @@ tracing = { version = "0.1.41", features = ["attributes", "valuable"] }
 
 [dev-dependencies]
 buck-resources = "1"
+maplit = "1.0"
 timed_test = { version = "0.0.0", path = "../timed_test" }
 tracing-test = { version = "0.2.3", features = ["no-env-filter"] }

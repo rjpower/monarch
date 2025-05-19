@@ -1122,6 +1122,12 @@ impl<A: Actor> cap::sealed::CanOpenPort for Instance<A> {
     }
 }
 
+impl<A: Actor> cap::sealed::CanSplitPort for Instance<A> {
+    fn split(&self, port_id: PortId) -> PortId {
+        self.mailbox.split(port_id)
+    }
+}
+
 #[async_trait]
 impl<A: Actor> cap::sealed::CanSpawn for Instance<A> {
     async fn spawn<C: Actor>(&self, params: C::Params) -> anyhow::Result<ActorHandle<C>> {

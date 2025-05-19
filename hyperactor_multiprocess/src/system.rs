@@ -176,16 +176,10 @@ mod tests {
 
     use anyhow::Context;
     use anyhow::Result;
-    use async_trait::async_trait;
-    use hyperactor::Actor;
-    use hyperactor::ActorHandle;
     use hyperactor::ActorId;
     use hyperactor::ActorRef;
     use hyperactor::GangId;
-    use hyperactor::Handler;
-    use hyperactor::Instance;
     use hyperactor::Named;
-    use hyperactor::PortRef;
     use hyperactor::ProcId;
     use hyperactor::WorldId;
     use hyperactor::actor::ActorStatus;
@@ -194,29 +188,21 @@ mod tests {
     use hyperactor::clock::Clock;
     use hyperactor::clock::RealClock;
     use hyperactor::id;
-    use hyperactor::mailbox::BoxedMailboxSender;
-    use hyperactor::mailbox::MailboxRouter;
     use hyperactor::mailbox::open_port;
-    use hyperactor::message::Bind;
-    use hyperactor::message::Bindings;
-    use hyperactor::message::IndexedErasedUnbound;
-    use hyperactor::message::Unbind;
-    use hyperactor::message::Unbound;
-    use hyperactor::proc::Proc;
-    use hyperactor::test_utils::proc_supervison::ProcSupervisionCoordinator;
     use hyperactor::test_utils::tracing::set_tracing_env_filter;
     use hyperactor_mesh::comm::CommActor;
-    use hyperactor_mesh::comm::CommActorParams;
     use hyperactor_mesh::comm::multicast::CastMessage;
     use hyperactor_mesh::comm::multicast::CastMessageEnvelope;
     use hyperactor_mesh::comm::multicast::DestinationPort;
     use hyperactor_mesh::comm::multicast::Uslice;
+    use hyperactor_mesh::comm::test_utils::TestActor;
+    use hyperactor_mesh::comm::test_utils::TestActorParams;
+    use hyperactor_mesh::comm::test_utils::TestMessage;
+    use hyperactor_mesh::comm::test_utils::spawn_comm_actors;
     use hyperactor_telemetry::env::execution_id;
     use maplit::hashset;
     use ndslice::Slice;
     use ndslice::selection;
-    use serde::Deserialize;
-    use serde::Serialize;
     use timed_test::async_timed_test;
     use tracing::Level;
 
@@ -920,73 +906,6 @@ mod tests {
         system_handle.await;
     }
 
-    #[derive(Debug, Named, Serialize, Deserialize, PartialEq)]
-    #[named(dump = false)]
-    enum TestMessage {
-        Forward(String),
-    }
-
-    // TODO(pzhang) add macro to auto implement these traits.
-    impl Unbind for TestMessage {
-        fn unbind(self) -> anyhow::Result<Unbound<Self>> {
-            Ok(Unbound::new(self, Bindings::default()))
-        }
-    }
-
-    impl Bind for TestMessage {
-        fn bind(self, _bindings: &Bindings) -> anyhow::Result<Self> {
-            Ok(self)
-        }
-    }
-
-    #[derive(Debug)]
-    #[hyperactor::export_spawn(TestMessage, IndexedErasedUnbound<TestMessage>)]
-    struct TestActor {
-        // Forward the received message to this port, so it can be inspected by
-        // the unit test.
-        forward_port: PortRef<TestMessage>,
-    }
-
-    #[derive(Debug, Clone, Named, Serialize, Deserialize)]
-    struct TestActorParams {
-        forward_port: PortRef<TestMessage>,
-    }
-
-    #[async_trait]
-    impl Actor for TestActor {
-        type Params = TestActorParams;
-
-        async fn new(params: Self::Params) -> Result<Self> {
-            let Self::Params { forward_port } = params;
-            Ok(Self { forward_port })
-        }
-    }
-
-    #[async_trait]
-    impl Handler<TestMessage> for TestActor {
-        async fn handle(&mut self, this: &Instance<Self>, msg: TestMessage) -> anyhow::Result<()> {
-            self.forward_port.send(this, msg)?;
-            Ok(())
-        }
-    }
-
-    async fn spawn_comm_actors(num: usize) -> Result<Vec<(Proc, ActorHandle<CommActor>)>> {
-        let mut comms = vec![];
-        let router = MailboxRouter::new();
-        for idx in 0..num {
-            let proc_id = ProcId(id!(local), idx);
-            let proc = Proc::new(proc_id, BoxedMailboxSender::new(router.clone()));
-            router.bind(proc.proc_id().clone().into(), proc.clone());
-            ProcSupervisionCoordinator::set(&proc).await?;
-
-            let comm = proc.spawn::<CommActor>("comm", CommActorParams {}).await?;
-            comm.bind::<CommActor>();
-            comms.push((proc, comm));
-        }
-
-        Ok(comms)
-    }
-
     #[tokio::test]
     async fn test_comm_actor_cast() -> Result<()> {
         set_tracing_env_filter(Level::INFO);
@@ -1105,8 +1024,7 @@ mod tests {
                 .proc_actor
                 .spawn(
                     &client,
-                    // Use explicit actor type to avoid the WorkActor dependency.
-                    "hyperactor_multiprocess::system::tests::TestActor".to_owned(),
+                    TestActor::typename().to_string(),
                     "actor".into(),
                     bincode::serialize(&TestActorParams {
                         forward_port: tx.bind(),

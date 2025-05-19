@@ -712,6 +712,12 @@ impl PortId {
     pub fn send(&self, caps: &impl cap::CanSend, serialized: &Serialized) {
         caps.post(self.clone(), serialized.clone());
     }
+
+    /// Split this port, returning a new port that relays messages to the port
+    /// through a local proxy, which may coalesce messages.
+    pub fn split(&self, caps: &impl cap::CanSplitPort) -> PortId {
+        caps.split(self.clone())
+    }
 }
 
 impl FromStr for PortId {

@@ -11,6 +11,11 @@ impl<T: sealed::CanSend> CanSend for T {}
 pub trait CanOpenPort: sealed::CanOpenPort {}
 impl<T: sealed::CanOpenPort> CanOpenPort for T {}
 
+/// CanOpenPort is a capability that confers the ability of the holder to
+/// split ports.
+pub trait CanSplitPort: sealed::CanSplitPort {}
+impl<T: sealed::CanSplitPort> CanSplitPort for T {}
+
 /// CanSpawn is a capability that confers the ability to spawn a child
 /// actor.
 pub trait CanSpawn: sealed::CanSpawn {}
@@ -31,6 +36,10 @@ pub(crate) mod sealed {
 
     pub trait CanOpenPort: Send + Sync {
         fn mailbox(&self) -> &Mailbox;
+    }
+
+    pub trait CanSplitPort: Send + Sync {
+        fn split(&self, port_id: PortId) -> PortId;
     }
 
     #[async_trait]
