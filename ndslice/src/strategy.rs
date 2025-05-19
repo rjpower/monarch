@@ -151,7 +151,7 @@ mod tests {
     use super::*;
     use crate::selection::EvalOpts;
     use crate::selection::routing::RoutingFrame;
-    use crate::selection::routing::collect_routed_paths;
+    use crate::selection::test_utils::collect_routed_paths;
 
     #[test]
     fn print_some_slices() {
