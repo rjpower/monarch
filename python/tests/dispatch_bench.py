@@ -7,13 +7,13 @@ import torch.utils.benchmark as benchmark
 
 # this function helps get a local device mesh for testing
 from monarch._testing import mock_mesh
+from monarch.builtins.log import set_logging_level_remote
 
 from monarch.common._coalescing import coalescing
 from monarch.common.remote import remote
 from monarch.fetch import fetch_shard
 from monarch.python_local_mesh import python_local_mesh
 from monarch_supervisor.logging import initialize_logging
-
 from tests.dispatch_bench_helper import run_loop, run_loop_local
 
 NITER = 10000
@@ -24,10 +24,6 @@ initialize_logging("dispatch_bench")
 
 # user-defined remote functions
 log = remote("monarch.worker._testing_function.log", propagate="inspect")
-
-set_worker_logging_level = remote(
-    "monarch.worker.worker.set_worker_logging_level", propagate="inspect"
-)
 
 
 def local_run():
@@ -66,7 +62,7 @@ def main():
 
     with device_mesh.activate():
         torch.set_default_device("cuda")
-        set_worker_logging_level(logging.WARNING)
+        set_logging_level_remote(logging.WARNING)
 
     # bench 1: local compute only
     t0 = benchmark.Timer(

@@ -54,10 +54,6 @@ except KeyError:
     CONTROLLER_COMPILED_REPEAT = True
 
 
-def set_worker_logging_level(level):
-    logger.setLevel(level)
-
-
 def set_random_seed_impl(seed, process_idx):
     torch.manual_seed(seed ^ process_idx)
 
