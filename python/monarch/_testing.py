@@ -181,3 +181,8 @@ def mock_mesh(hosts: int, gpus: int):
 
     dm.exit = create_exit(client)
     return dm
+
+
+class BackendType:
+    PY = "py"
+    RS = "rs"

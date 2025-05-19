@@ -22,7 +22,7 @@ from monarch import (
     RemoteException,
     Stream,
 )
-from monarch._testing import TestingContext
+from monarch._testing import BackendType, TestingContext
 from monarch.cached_remote_function import remote_autograd_function
 from monarch.common import remote as remote_module
 from monarch.common.device_mesh import DeviceMesh
@@ -148,11 +148,6 @@ def testing_context():
     global local
     with TestingContext() as local:
         yield
-
-
-class BackendType(Enum):
-    PY = "py"
-    RS = "rs"
 
 
 class RemoteFunctionsTestBase:

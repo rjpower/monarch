@@ -24,7 +24,7 @@ from monarch import (
     Tensor,
 )
 
-from monarch._testing import TestingContext
+from monarch._testing import BackendType, TestingContext
 from monarch.common.controller_api import LogMessage
 from monarch.common.invocation import DeviceException
 from monarch.common.remote import remote
@@ -55,11 +55,6 @@ def testing_context():
     global local
     with TestingContext() as local:
         yield
-
-
-class BackendType(Enum):
-    PY = "py"
-    RS = "rs"
 
 
 @contextmanager
