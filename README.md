@@ -6,6 +6,10 @@ TODO improve
 
 ```sh
 
+# Create and activate the conda environment
+conda create -n monarchenv python=3.10 -y
+conda activate monarchenv
+
 # Install nightly rust toolchain
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
