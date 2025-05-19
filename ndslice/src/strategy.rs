@@ -151,6 +151,7 @@ mod tests {
     use super::*;
     use crate::selection::EvalOpts;
     use crate::selection::routing::RoutingFrame;
+    use crate::selection::routing::collect_commactor_routing_tree;
     use crate::selection::test_utils::collect_routed_paths;
 
     #[test]
@@ -264,10 +265,10 @@ mod tests {
     // order.
     proptest! {
         #![proptest_config(ProptestConfig {
-            cases: 32, ..ProptestConfig::default()
+            cases: 128, ..ProptestConfig::default()
         })]
         #[test]
-        fn collect_routed_paths_determinism(
+        fn collect_routed_path_determinism(
             slice in gen_slice(4, 8)
         ) {
             let shape = slice.sizes().to_vec();
@@ -299,5 +300,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    // Test `collect_commactor_routing_tree` exhibits path
+    // determinism.
+    //
+    // This test instantiates the same routing path determinism
+    // property as in `collect_routed_path_determinism`, but uses the
+    // full CommActor-style routing simulation instead.
+    //
+    //   ∀ `S`, `T`, and `n`,
+    //     `n ∈ eval(S, slice)` ∧ `n ∈ eval(T, slice)` ⇒
+    //     `route(n, S) == route(n, T)`.
+    //
+    // This ensures that every destination rank reachable by both `S`
+    // and `T` receives its message along the same logical path, even
+    // when selection expressions differ structurally.
+    //
+    // The test avoids explicit calls to eval by intersecting the
+    // delivered ranks from both traversals. For each rank delivered
+    // to by both selections, it compares the delivery path recorded
+    // in `CommActorRoutingTree::delivered`. This validates that
+    // CommActor message routing is structurally deterministic.
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 128, ..ProptestConfig::default()
+        })]
+        #[test]
+        fn collect_commactor_routed_path_determinism(
+            slice in gen_slice(4, 8)
+        ) {
+            let extents = slice.sizes().to_vec();
+
+            let mut runner = TestRunner::default();
+            let s = gen_selection(4, extents.clone(), 0).new_tree(&mut runner).unwrap().current();
+            let t = gen_selection(4, extents.clone(), 0).new_tree(&mut runner).unwrap().current();
+
+            let tree_s = collect_commactor_routing_tree(&s, &slice);
+            let tree_t = collect_commactor_routing_tree(&t, &slice);
+
+            let ranks: Vec<_> = tree_s
+                .delivered
+                .keys()
+                .filter(|r| tree_t.delivered.contains_key(*r))
+                .cloned()
+                .collect();
+
+            if ranks.is_empty() {
+                println!("skipping empty intersection");
+            } else {
+                println!("testing {} nodes", ranks.len());
+                for rank in ranks {
+                    let path_s = &tree_s.delivered[&rank];
+                    let path_t = &tree_t.delivered[&rank];
+                    prop_assert_eq!(
+                        path_s.clone(),
+                        path_t.clone(),
+                        "path to {:?} differs under S and T\nS path: {:?}\nT path: {:?}",
+                        rank, path_s, path_t
+                    );
+                }
+            }
+        }
+
     }
 }

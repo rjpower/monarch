@@ -797,8 +797,10 @@ fn get_next_steps(
 #[allow(dead_code)]
 #[derive(Default)]
 pub(crate) struct CommActorRoutingTree {
-    // Ranks that were delivered the message (i.e. called `post`).
-    pub delivered: HashSet<usize>,
+    // Ranks that were delivered the message (i.e. called `post`). Map
+    // from rank → delivery path (flat rank indices) from root to that
+    // rank.
+    pub delivered: HashMap<usize, Vec<usize>>,
 
     // Ranks that participated in the multicast - either by delivering
     // the message or forwarding it to peers.
@@ -894,7 +896,9 @@ pub(crate) fn collect_commactor_routing_tree(
             resolve_routing(rank, dests, &mut |_| panic!("choice unexpected")).unwrap();
 
         if deliver_here {
-            tree.delivered.insert(rank);
+            let mut path = path.clone();
+            path.push(rank);
+            tree.delivered.insert(rank, path);
         }
 
         let messages: Vec<_> = forwards
@@ -992,7 +996,7 @@ mod tests {
             assert_routing_eq_with!($slice, $sel, |s, sl| {
                 collect_commactor_routing_tree(s, sl)
                     .delivered
-                    .into_iter()
+                    .into_keys()
                     .collect()
             });
         };
