@@ -35,8 +35,6 @@ from .scheduler import generate_schedule
 logger = getLogger()
 
 
-log = remote("monarch.worker.worker.log", propagate="inspect")
-
 run_forward_udf = remote(
     "monarch.parallel.pipelining.runtime.run_forward_impl",
     propagate=lambda stage, input_tensor, model_chunk_id, microbatch_id: input_tensor,

@@ -54,10 +54,6 @@ except KeyError:
     CONTROLLER_COMPILED_REPEAT = True
 
 
-def log(*args):
-    logger.warning(*args)
-
-
 def set_worker_logging_level(level):
     logger.setLevel(level)
 

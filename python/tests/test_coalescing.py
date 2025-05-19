@@ -35,8 +35,6 @@ do_bogus_tensor_work = remote(
     propagate=_do_bogus_tensor_work,
 )
 
-log = remote("monarch.worker.worker.log", propagate="inspect")
-
 
 def inspect(x):
     return fetch_shard(x).result().item()

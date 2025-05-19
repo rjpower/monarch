@@ -23,6 +23,7 @@ from monarch import (
     Stream,
 )
 from monarch._testing import BackendType, TestingContext
+from monarch.builtins.log import log_remote
 from monarch.cached_remote_function import remote_autograd_function
 from monarch.common import remote as remote_module
 from monarch.common.device_mesh import DeviceMesh
@@ -58,9 +59,6 @@ def custom_excepthook(exc_type, exc_value, exc_traceback):
 
 
 sys.excepthook = custom_excepthook
-
-
-log = remote("monarch.worker.worker.log", propagate="inspect")
 
 
 def _set_device_udf(*args):
@@ -306,7 +304,7 @@ class TestRemoteFunctions(RemoteFunctionsTestBase):
 
     def test_hello(self, backend_type):
         with self.local_device_mesh(2, 2, backend_type):
-            log("hello, world")
+            log_remote("hello, world")
 
     def test_eager_remote_function_failed(self, backend_type):
         if backend_type == BackendType.PY:
@@ -335,15 +333,15 @@ class TestRemoteFunctions(RemoteFunctionsTestBase):
         with self.local_device_mesh(2, 2, backend_type):
             x = torch.rand(3, 4)
             y = x + x
-            log("%s %s", x, y)
+            log_remote("%s %s", x, y)
             z = torch.std_mean(x)
-            log("%s", z)
+            log_remote("%s", z)
 
     def test_user_call(self, backend_type):
         with self.local_device_mesh(2, 2, backend_type) as _:
             x = torch.rand(3, 4)
             y = rlist((x + 1, x))
-            log("%s", y)
+            log_remote("%s", y)
 
             # resume monday:
             # 1. tensor ctor resource guard (done)
