@@ -9,6 +9,7 @@ pub mod ndslice;
 pub mod proc;
 pub mod proc_mesh;
 pub mod runtime;
+pub mod selection;
 pub mod shape;
 
 use pyo3::Bound;
@@ -47,6 +48,8 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     hyperactor_mod.add_class::<actor_mesh::PythonActorMesh>()?;
 
     hyperactor_mod.add_class::<shape::PyShape>()?;
+
+    hyperactor_mod.add_class::<selection::PySelection>()?;
 
     Ok(())
 }

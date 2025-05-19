@@ -6,6 +6,8 @@ import math
 import random
 from unittest import TestCase
 
+from monarch._monarch.selection import Selection
+
 from monarch._monarch.shape import Shape, Slice
 
 
@@ -183,3 +185,17 @@ class TestShape(TestCase):
             repr(shape),
             'Shape { labels: ["label0", "label1"], slice: Slice { offset: 0, sizes: [2, 3], strides: [3, 1] } }',
         )
+
+
+class TestSelection(TestCase):
+    def test_parse_repr(self) -> None:
+        sel = Selection.from_string("(*, 1:3) & (0, *)")
+        self.assertIsInstance(sel, Selection)
+        self.assertEqual(
+            repr(sel),
+            "Intersection(All(Range(Range(1, Some(3), 1), True)), Range(Range(0, Some(1), 1), All(True)))",
+        )
+
+    def test_parse_invalid(self) -> None:
+        with self.assertRaises(ValueError):
+            Selection.from_string("this is not valid selection syntax")

@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from monarch.common.opaque_ref import OpaqueRef
     from monarch.common.pipe import create_pipe, Pipe, remote_generator
     from monarch.common.remote import remote
+    from monarch.common.selection import Selection
     from monarch.common.shape import NDSlice, Shape
     from monarch.common.stream import get_active_stream, Stream
     from monarch.common.tensor import reduce, reduce_, Tensor

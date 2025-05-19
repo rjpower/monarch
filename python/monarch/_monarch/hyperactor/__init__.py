@@ -28,6 +28,10 @@ from monarch._rust_bindings.hyperactor_extension import (  # @manual=//monarch/m
     AllocSpec,
 )
 
+from monarch._rust_bindings.monarch_hyperactor.selection import (  # @manual=//monarch/monarch_extension:monarch_extension
+    Selection,
+)
+
 from monarch._rust_bindings.monarch_hyperactor.shape import (  # @manual=//monarch/monarch_extension:monarch_extension
     Shape,
 )
@@ -72,5 +76,6 @@ __all__ = [
     "PythonActorMesh",
     "ProcessAllocatorBase",
     "Shape",
+    "Selection",
     "LocalAllocatorBase",
 ]

@@ -47,6 +47,11 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "monarch_hyperactor.shape",
     )?)?;
 
+    monarch_hyperactor::selection::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.selection",
+    )?)?;
+
     client::register_python_bindings(&get_or_add_new_module(module, "monarch_extension.client")?)?;
     worker::register_python_bindings(&get_or_add_new_module(module, "monarch_extension.worker")?)?;
 
