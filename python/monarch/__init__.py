@@ -103,6 +103,7 @@ _public_api = {
     "ProcessAllocator": ("monarch.allocator", "ProcessAllocator"),
     "LocalAllocator": ("monarch.allocator", "LocalAllocator"),
     "ActorFuture": ("monarch.future", "ActorFuture"),
+    "builtins": ("monarch.builtins", "builtins"),
 }
 
 
@@ -124,7 +125,7 @@ except ImportError:
     IN_PAR = False
 
 # we have to explicitly list this rather than just take the keys of the _public_api
-# otherwise tools thing the imports are unused
+# otherwise tools think the imports are unused
 __all__ = [
     "coalescing",
     "DeviceMesh",
@@ -170,5 +171,6 @@ __all__ = [
     "ProcessAllocator",
     "LocalAllocator",
     "ActorFuture",
+    "builtins",
 ]
 assert sorted(__all__) == sorted(_public_api)
