@@ -53,11 +53,17 @@ def _result_to_references(result: object) -> List[worker.Ref | None]:
     """
     leaves = flattener(result, lambda x: True)(result)
     return [
-        worker.Ref(id=none_throws(leaf.ref))
-        if isinstance(leaf, Referenceable)
+        _ref(leaf)
+        if isinstance(leaf, Referenceable) or isinstance(leaf, worker.Ref)
         else None
         for leaf in leaves
     ]
+
+
+def _ref(r: Referenceable | worker.Ref) -> worker.Ref:
+    if isinstance(r, Referenceable):
+        return worker.Ref(id=none_throws(r.ref))
+    return r
 
 
 # We cant do inheritance with NamedTuple so we can use this protocol for
@@ -116,7 +122,7 @@ class CreateRemoteProcessGroup(NamedTuple):
 class CallFunction(NamedTuple):
     ident: int
     result: object  # pytree with tensors in it
-    mutates: Tuple[Tensor, ...]
+    mutates: Tuple[Tensor | worker.Ref, ...]
     function: ResolvableFunction
     args: Tuple[object, ...]
     kwargs: Dict[str, object]
@@ -128,7 +134,7 @@ class CallFunction(NamedTuple):
         return worker.CallFunction(
             seq=self.ident,
             results=_result_to_references(self.result),
-            mutates=[worker.Ref(id=none_throws(r.ref)) for r in self.mutates],
+            mutates=[_ref(r) for r in self.mutates],
             function=_to_rust_function(self.function),
             args=self.args,
             kwargs=self.kwargs,
@@ -172,26 +178,26 @@ class CommandGroup(NamedTuple):
 
 
 class RecordingFormal(NamedTuple):
-    result: "Tensor"
+    result: Tensor | worker.Ref
     argument_index: int
     stream: "StreamRef"
 
     def to_rust_message(self) -> worker.WorkerMessage:
         return worker.RecordingFormal(
-            result=worker.Ref(id=none_throws(self.result.ref)),
+            result=_ref(self.result),
             argument_index=self.argument_index,
             stream=worker.StreamRef(id=self.stream.ref),
         )
 
 
 class RecordingResult(NamedTuple):
-    input: "Tensor"
+    input: Tensor | worker.Ref
     output_index: int
     stream: StreamRef
 
     def to_rust_message(self) -> worker.WorkerMessage:
         return worker.RecordingResult(
-            result=worker.Ref(id=none_throws(self.input.ref)),
+            result=_ref(self.input),
             output_index=self.output_index,
             stream=worker.StreamRef(id=self.stream.ref),
         )
@@ -202,35 +208,54 @@ class DefineRecording(NamedTuple):
     nresults: int
     nformals: int
     commands: List[NamedTuple]
+    ntotal_messages: int
+    message_index: int
 
     def to_rust_message(self) -> worker.WorkerMessage:
-        rust_commands = []
-        for c in self.commands:
-            if hasattr(c, "to_rust_message"):
-                c = cast(SupportsToRustMessage, c)
-                rust_commands.append(c.to_rust_message())
-            else:
-                raise NotImplementedError(f"Unsupported command {c}")
-        return worker.DefineRecording(
+        define_recording = worker.DefineRecording(
             result=worker.Ref(id=none_throws(self.result.ref)),
             nresults=self.nresults,
             nformals=self.nformals,
-            commands=rust_commands,
+            commands=[],
+            ntotal_messages=self.ntotal_messages,
+            index=self.message_index,
         )
+        for c in self.commands:
+            if hasattr(c, "to_rust_message"):
+                c = cast(SupportsToRustMessage, c)
+                if isinstance(c, CallFunction):
+                    define_recording.append_call_function(
+                        seq=c.ident,
+                        results=_result_to_references(c.result),
+                        mutates=[_ref(r) for r in c.mutates],
+                        function=_to_rust_function(c.function),
+                        args=c.args,
+                        kwargs=c.kwargs,
+                        stream=worker.StreamRef(id=c.stream.ref),
+                        remote_process_groups=[
+                            worker.Ref(id=none_throws(remote_process_group.ref))
+                            for remote_process_group in c.remote_process_groups
+                        ],
+                    )
+                else:
+                    define_recording.append(c.to_rust_message())
+            else:
+                raise NotImplementedError(f"Unsupported command {c}")
+        return define_recording
 
 
 class CallRecording(NamedTuple):
     ident: int
     recording: Recording
-    results: List[Tensor]
-    actuals: List[Tensor]
+    results: List[Tensor | worker.Ref]
+    actuals: List[Tensor | worker.Ref]
 
     def to_rust_message(self) -> worker.WorkerMessage:
         return worker.CallRecording(
             seq=self.ident,
             recording=worker.Ref(id=none_throws(self.recording.ref)),
-            results=[worker.Ref(id=none_throws(r.ref)) for r in self.results],
-            actuals=[worker.Ref(id=none_throws(r.ref)) for r in self.actuals],
+            results=[_ref(r) for r in self.results],
+            actuals=[_ref(r) for r in self.actuals],
         )
 
 
@@ -250,7 +275,7 @@ class SendValue(NamedTuple):
     ident: int
     destination: Pipe | None  # if present the pipe along which to send the result,
     # otherwise send FetchResult to controller
-    mutates: Tuple[Tensor, ...]
+    mutates: Tuple[Tensor | worker.Ref, ...]
     function: ResolvableFunction | None  # None is equivalent to lambda x: x
     args: Tuple[object, ...]
     kwargs: Dict[str, object]
@@ -262,7 +287,7 @@ class SendValue(NamedTuple):
             destination=(
                 worker.Ref(id=self.destination.ref) if self.destination else None
             ),
-            mutates=[worker.Ref(id=none_throws(r.ref)) for r in self.mutates],
+            mutates=[_ref(r) for r in self.mutates],
             function=_to_rust_function(self.function) if self.function else None,
             args=self.args,
             kwargs=self.kwargs,
@@ -313,17 +338,17 @@ class RequestStatus(NamedTuple):
 
 
 class BorrowCreate(NamedTuple):
-    result: Tensor
+    result: Tensor | worker.Ref
     borrow: int
-    tensor: Tensor
+    tensor: Tensor | worker.Ref
     from_stream: StreamRef
     to_stream: StreamRef
 
     def to_rust_message(self) -> worker.WorkerMessage:
         return worker.BorrowCreate(
-            result=worker.Ref(id=none_throws(self.result.ref)),
+            result=_ref(self.result),
             borrow=self.borrow,
-            tensor=worker.Ref(id=none_throws(self.tensor.ref)),
+            tensor=_ref(self.tensor),
             from_stream=worker.StreamRef(id=self.from_stream.ref),
             to_stream=worker.StreamRef(id=self.to_stream.ref),
         )
@@ -357,17 +382,17 @@ class BorrowLastUse(NamedTuple):
 
 
 class SendTensor(NamedTuple):
-    result: Tensor
+    result: Tensor | worker.Ref
     from_ranks: NDSlice
     to_ranks: NDSlice
-    tensor: Tensor
+    tensor: Tensor | worker.Ref
     factory: TensorFactory
     from_stream: StreamRef
     to_stream: StreamRef
 
     def to_rust_message(self) -> worker.WorkerMessage:
         return worker.SendTensor(
-            result=worker.Ref(id=none_throws(self.result.ref)),
+            result=_ref(self.result),
             from_ranks=NDSlice(
                 offset=self.from_ranks.offset,
                 sizes=self.from_ranks.sizes,
@@ -378,7 +403,7 @@ class SendTensor(NamedTuple):
                 sizes=self.to_ranks.sizes,
                 strides=self.to_ranks.strides,
             ),
-            tensor=worker.Ref(id=none_throws(self.tensor.ref)),
+            tensor=_ref(self.tensor),
             factory=worker.TensorFactory(
                 size=self.factory.size,
                 dtype=self.factory.dtype,
@@ -415,8 +440,8 @@ class SplitCommForProcessGroup(NamedTuple):
 
 
 class Reduce(NamedTuple):
-    result: Tensor
-    local_tensor: Tensor
+    result: Tensor | worker.Ref
+    local_tensor: Tensor | worker.Ref
     factory: TensorFactory
     source_mesh: DeviceMesh
     stream: StreamRef
@@ -424,7 +449,7 @@ class Reduce(NamedTuple):
     reduction: str
     scatter: bool
     inplace: bool
-    out: Tensor | None
+    out: Tensor | worker.Ref | None
 
     def to_rust_message(self) -> worker.WorkerMessage:
         match self.reduction:
@@ -444,8 +469,8 @@ class Reduce(NamedTuple):
                 raise ValueError(f"Unsupported reduction {self.reduction}")
 
         return worker.Reduce(
-            result=worker.Ref(id=none_throws(self.result.ref)),
-            tensor=worker.Ref(id=none_throws(self.local_tensor.ref)),
+            result=_ref(self.result),
+            tensor=_ref(self.local_tensor),
             factory=worker.TensorFactory(
                 size=self.factory.size,
                 dtype=self.factory.dtype,
@@ -458,9 +483,7 @@ class Reduce(NamedTuple):
             reduction=reduction,
             scatter=self.scatter,
             in_place=self.inplace,
-            out=worker.Ref(id=none_throws(self.out.ref))
-            if self.out is not None
-            else None,
+            out=_ref(self.out) if self.out is not None else None,
         )
 
 

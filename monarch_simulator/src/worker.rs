@@ -615,6 +615,8 @@ impl WorkerMessageHandler for WorkerActor {
         _nresults: usize,
         _nformals: usize,
         _commands: Vec<WorkerMessage>,
+        _ntotal_messages: usize,
+        _index: usize,
     ) -> Result<()> {
         unimplemented!()
     }

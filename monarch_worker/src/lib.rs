@@ -29,6 +29,7 @@ pub mod stream;
 pub mod test_util;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
@@ -49,6 +50,7 @@ use hyperactor::Actor;
 use hyperactor::ActorRef;
 use hyperactor::Instance;
 use hyperactor::actor::ActorHandle;
+use hyperactor::cap;
 use hyperactor::forward;
 use hyperactor::message::IndexedErasedUnbound;
 use hyperactor::reference::ActorId;
@@ -106,6 +108,24 @@ impl RemoteProcessGroupState {
     }
 }
 
+#[derive(Debug)]
+enum Recording {
+    // In the process of receiving DefineRecording messages for this
+    // recording.
+    PartialRecording {
+        // The index of the last DefineRecording message received.
+        last_index: usize,
+        // The list of commands seen so far for this recording.
+        commands: Vec<WorkerMessage>,
+    },
+
+    // The recording is ready to be run.
+    CompleteRecording {
+        // The list of streams on which this recording is defined.
+        streams: HashSet<StreamRef>,
+    },
+}
+
 /// A PyTorch runtime instance, operating on a single accelerator device,
 /// controlled via hyperactor messaging.
 ///
@@ -141,6 +161,45 @@ pub struct WorkerActor {
     remote_process_groups: HashMap<Ref, RemoteProcessGroupState>,
     /// The comm actor for each pair of streams that need to send/recv tensors.
     send_recv_comms: HashMap<(StreamRef, StreamRef), Arc<ActorHandle<NcclCommActor>>>,
+    recordings: HashMap<Ref, Recording>,
+    defining_recording: Option<Ref>,
+}
+
+impl WorkerActor {
+    fn try_get_stream(&self, stream: StreamRef) -> Result<&Arc<ActorHandle<StreamActor>>> {
+        self.streams
+            .get(&stream)
+            .ok_or(anyhow::anyhow!("invalid stream id: {:#?}", stream))
+    }
+
+    async fn maybe_add_stream_to_recording(
+        &mut self,
+        caps: &impl cap::CanSend,
+        stream: StreamRef,
+    ) -> Result<()> {
+        // If we're defining a recording, add the stream to the list of streams that
+        // this recording uses, and call define_recording on the stream.
+        if let Some(defining_recording) = self.defining_recording {
+            let recording = self.recordings.get_mut(&defining_recording).unwrap();
+            let fut = match recording {
+                Recording::PartialRecording { .. } => panic!("unreachable, in theory"),
+                Recording::CompleteRecording { streams } => {
+                    streams.insert(stream).then(|| -> Result<_, anyhow::Error> {
+                        Ok(self
+                            .try_get_stream(stream)?
+                            .define_recording(caps, defining_recording))
+                    })
+                }
+            }
+            .transpose()?;
+            match fut {
+                Some(fut) => fut.await,
+                None => Ok(()),
+            }
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[async_trait]
@@ -167,6 +226,8 @@ impl Actor for WorkerActor {
             pipes: HashMap::new(),
             remote_process_groups: HashMap::new(),
             send_recv_comms: HashMap::new(),
+            recordings: HashMap::new(),
+            defining_recording: None,
         })
     }
 
@@ -274,11 +335,9 @@ impl WorkerMessageHandler for WorkerActor {
         this: &Instance<Self>,
         params: CallFunctionParams,
     ) -> Result<()> {
-        let stream = self
-            .streams
-            .get(&params.stream)
-            .ok_or_else(|| anyhow::anyhow!("invalid stream id: {:#?}", params.stream))?
-            .clone();
+        let stream = self.try_get_stream(params.stream)?.clone();
+        self.maybe_add_stream_to_recording(this, params.stream)
+            .await?;
 
         let device_meshes = if params.function.as_torch_op().is_some() {
             HashMap::new()
@@ -396,16 +455,11 @@ impl WorkerMessageHandler for WorkerActor {
         from_stream: StreamRef,
         to_stream: StreamRef,
     ) -> Result<()> {
-        let from_stream = self
-            .streams
-            .get(&from_stream)
-            .ok_or_else(|| anyhow::anyhow!("invalid stream id: {:#?}", &from_stream))?
-            .clone();
-        let to_stream = self
-            .streams
-            .get(&to_stream)
-            .ok_or_else(|| anyhow::anyhow!("invalid stream id: {:#?}", &to_stream))?
-            .clone();
+        self.maybe_add_stream_to_recording(this, from_stream)
+            .await?;
+        self.maybe_add_stream_to_recording(this, to_stream).await?;
+        let from_stream = self.try_get_stream(from_stream)?.clone();
+        let to_stream = self.try_get_stream(to_stream)?.clone();
 
         let borrow =
             Borrow::create(this, borrow_id, tensor_ref, result, from_stream, to_stream).await?;
@@ -502,13 +556,11 @@ impl WorkerMessageHandler for WorkerActor {
         in_place: bool,
         out: Option<Ref>,
     ) -> Result<()> {
+        self.maybe_add_stream_to_recording(this, stream_ref).await?;
+
         // Sort for stable indexing.
         let dims = SortedVec::from_unsorted(dims);
-        let stream = self
-            .streams
-            .get(&stream_ref)
-            .ok_or_else(|| anyhow::anyhow!("invalid stream id: {:#?}", stream_ref))?
-            .clone();
+        let stream = self.try_get_stream(stream_ref)?.clone();
 
         let (_, comm_map) = self
             .device_meshes
@@ -623,21 +675,10 @@ impl WorkerMessageHandler for WorkerActor {
             .ok()
             .flatten();
 
-        let stream = if to_rank.is_none() {
-            self.streams
-                .get(&to_stream)
-                .ok_or_else(|| anyhow::anyhow!("invalid stream id: {:#?}", to_stream))?
-                .clone()
-        } else if from_rank.is_none() {
-            self.streams
-                .get(&from_stream)
-                .ok_or_else(|| anyhow::anyhow!("invalid stream id: {:#?}", from_stream))?
-                .clone()
-        } else if from_stream == to_stream {
-            self.streams
-                .get(&from_stream)
-                .ok_or_else(|| anyhow::anyhow!("invalid stream id: {:#?}", from_stream))?
-                .clone()
+        let (stream, stream_ref) = if to_rank.is_none() {
+            (self.try_get_stream(to_stream)?.clone(), to_stream)
+        } else if from_rank.is_none() || from_stream == to_stream {
+            (self.try_get_stream(from_stream)?.clone(), from_stream)
         } else {
             unimplemented!(
                 "We haven't implemented to_mesh between streams if a rank participates as both a sender and receiver. \
@@ -645,6 +686,8 @@ impl WorkerMessageHandler for WorkerActor {
                 Then the send stream would do the nccl op, and then sync with sending stream again."
             );
         };
+
+        self.maybe_add_stream_to_recording(this, stream_ref).await?;
 
         stream
             .send_tensor(this, result, from_rank, to_rank, tensor, factory, comm)
@@ -714,10 +757,7 @@ impl WorkerMessageHandler for WorkerActor {
         stream: StreamRef,
     ) -> Result<()> {
         // Resolve the stream.
-        let stream = self
-            .streams
-            .get(&stream)
-            .ok_or_else(|| anyhow::anyhow!("invalid stream id: {:#?}", stream))?;
+        let stream = self.try_get_stream(stream)?;
 
         let device_meshes = if function.as_ref().is_none_or(|f| f.as_torch_op().is_some()) {
             HashMap::new()
@@ -872,6 +912,8 @@ impl WorkerMessageHandler for WorkerActor {
         pipe: Ref,
         stream: StreamRef,
     ) -> Result<()> {
+        self.maybe_add_stream_to_recording(this, stream).await?;
+
         // Get a port for the pipe
         let pipe = match self.pipes.get(&pipe) {
             None => Err(Arc::new(CallFunctionError::RefNotFound(pipe))),
@@ -882,10 +924,7 @@ impl WorkerMessageHandler for WorkerActor {
         };
 
         // Resolve the stream.
-        let stream = self
-            .streams
-            .get(&stream)
-            .ok_or_else(|| anyhow::anyhow!("invalid stream id: {:#?}", stream))?;
+        let stream = self.try_get_stream(stream)?;
 
         // Push result into the stream.
         stream.set_value(this, results, pipe).await
@@ -898,10 +937,7 @@ impl WorkerMessageHandler for WorkerActor {
         value: WireValue,
         stream: StreamRef,
     ) -> Result<()> {
-        let stream = self
-            .streams
-            .get(&stream)
-            .ok_or_else(|| anyhow::anyhow!("invalid stream id: {:#?}", &stream))?;
+        let stream = self.try_get_stream(stream)?;
 
         stream.set_ref_unit_tests_only(this, reference, value).await
     }
@@ -912,10 +948,7 @@ impl WorkerMessageHandler for WorkerActor {
         ref_id: Ref,
         stream: StreamRef,
     ) -> Result<Option<Result<WireValue, ValueError>>> {
-        let stream = self
-            .streams
-            .get(&stream)
-            .ok_or_else(|| anyhow::anyhow!("invalid stream id: {:#?}", &stream))?;
+        let stream = self.try_get_stream(stream)?;
         Ok(stream
             .get_ref_unit_tests_only(this, ref_id.clone())
             .await?
@@ -924,44 +957,152 @@ impl WorkerMessageHandler for WorkerActor {
 
     async fn define_recording(
         &mut self,
-        _this: &Instance<Self>,
-        _result: Ref,
+        this: &Instance<Self>,
+        result: Ref,
         _nresults: usize,
         _nformals: usize,
-        _commands: Vec<WorkerMessage>,
+        commands: Vec<WorkerMessage>,
+        ntotal_messages: usize,
+        index: usize,
     ) -> Result<()> {
-        unimplemented!()
+        if self.defining_recording.is_some() && self.defining_recording.unwrap() != result {
+            bail!("already defining a different recording");
+        }
+        self.defining_recording = Some(result);
+
+        match self.recordings.entry(result) {
+            Entry::Vacant(entry) => {
+                ensure!(
+                    index == 0,
+                    "got DefineRecording message with (index = {:?}) > 0 for previously unseen recording",
+                    index
+                );
+                entry.insert(Recording::PartialRecording {
+                    last_index: 0,
+                    commands,
+                });
+            }
+            Entry::Occupied(mut entry) => match entry.get_mut() {
+                Recording::CompleteRecording { .. } => {
+                    bail!("got DefineRecording message for already complete recording")
+                }
+                Recording::PartialRecording {
+                    last_index,
+                    commands: existing_commands,
+                } => {
+                    ensure!(
+                        index == *last_index + 1,
+                        "Got DefineRecording message with index = {:?}, but \
+                            last seen index for recording is {:?}",
+                        index,
+                        last_index
+                    );
+                    *last_index = index;
+                    existing_commands.extend(commands.into_iter());
+                }
+            },
+        };
+
+        if index < ntotal_messages - 1 {
+            return Ok(());
+        }
+        let commands = match self.recordings.remove(&result).unwrap() {
+            Recording::CompleteRecording { .. } => panic!("unreachable, in theory"),
+            Recording::PartialRecording { commands, .. } => {
+                self.recordings.insert(
+                    result,
+                    Recording::CompleteRecording {
+                        streams: HashSet::new(),
+                    },
+                );
+                commands
+            }
+        };
+
+        for command in commands {
+            WorkerMessageHandler::handle(self, this, command).await?;
+        }
+
+        match self.recordings.get(&result).unwrap() {
+            Recording::PartialRecording { .. } => panic!("unreachable, in theory"),
+            Recording::CompleteRecording { streams, .. } => {
+                for stream in streams {
+                    self.try_get_stream(*stream)?
+                        .finalize_recording(this, result)
+                        .await?;
+                }
+            }
+        }
+
+        self.defining_recording = None;
+        Ok(())
     }
 
     async fn recording_formal(
         &mut self,
-        _this: &Instance<Self>,
-        _result: Ref,
-        _argument_index: usize,
-        _stream: StreamRef,
+        this: &Instance<Self>,
+        result: Ref,
+        argument_index: usize,
+        stream: StreamRef,
     ) -> Result<()> {
-        unimplemented!()
+        ensure!(self.defining_recording.is_some());
+        self.maybe_add_stream_to_recording(this, stream).await?;
+        self.try_get_stream(stream)?
+            .recording_formal(this, result, argument_index)
+            .await
     }
 
     async fn recording_result(
         &mut self,
-        _this: &Instance<Self>,
-        _result: Ref,
-        _output_index: usize,
-        _stream: StreamRef,
+        this: &Instance<Self>,
+        result: Ref,
+        output_index: usize,
+        stream: StreamRef,
     ) -> Result<()> {
-        unimplemented!()
+        ensure!(self.defining_recording.is_some());
+        self.maybe_add_stream_to_recording(this, stream).await?;
+        self.try_get_stream(stream)?
+            .recording_result(this, result, output_index)
+            .await
     }
 
     async fn call_recording(
         &mut self,
-        _this: &Instance<Self>,
-        _seq: Seq,
-        _recording: Ref,
-        _results: Vec<Ref>,
-        _actuals: Vec<Ref>,
+        this: &Instance<Self>,
+        seq: Seq,
+        recording: Ref,
+        results: Vec<Ref>,
+        actuals: Vec<Ref>,
     ) -> Result<()> {
-        unimplemented!()
+        ensure!(self.defining_recording.is_none());
+        let recording_ref = recording;
+        let recording = self.recordings.get(&recording).ok_or(anyhow::anyhow!(
+            "could not find recording: {:#?}",
+            recording
+        ))?;
+        match recording {
+            Recording::PartialRecording { .. } => {
+                bail!("cannot call recording because it is incomplete")
+            }
+            Recording::CompleteRecording { streams } => try_join_all(
+                streams
+                    .iter()
+                    .map(|stream| self.try_get_stream(*stream))
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .map(|stream| {
+                        stream.call_recording(
+                            this,
+                            seq,
+                            recording_ref,
+                            results.clone(),
+                            actuals.clone(),
+                        )
+                    }),
+            )
+            .await
+            .map(|_| ()),
+        }
     }
 }
 

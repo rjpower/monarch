@@ -651,8 +651,8 @@ class Simulator:
         assert to_stream is not None
         borrow = Borrow(
             ident=msg.borrow,
-            tensor_src_id=cast(int, msg.tensor.ref),
-            tensor_dst_id=cast(int, msg.result.ref),
+            tensor_src_id=cast(int, cast(DTensorRef, msg.tensor).ref),
+            tensor_dst_id=cast(int, cast(DTensorRef, msg.result).ref),
             from_stream=from_stream,
             to_stream=to_stream,
         )

@@ -2,7 +2,9 @@
 import logging
 import traceback
 from collections import defaultdict
-from typing import Dict, Generator, List, NamedTuple, Tuple, TYPE_CHECKING, Union
+from typing import cast, Dict, Generator, List, NamedTuple, Tuple, TYPE_CHECKING, Union
+
+from monarch.common.reference import Ref
 
 from monarch.common.shape import iter_ranks
 
@@ -18,6 +20,8 @@ from .shape import NDSlice
 from .tensor import Tensor
 
 logger = logging.getLogger(__name__)
+
+_MAX_MESSAGES_PER_DEFINE_RECORDING = 1000
 
 
 def flatten_messages(
@@ -46,7 +50,7 @@ class Recording(Referenceable):
         self.uses = uses
         self.mutates = mutates
         # on future invocations of this recording, new aliases for our mutated tensors exists
-        # an we will technically mutate them as well. This would be simplified and faster if our
+        # and we will technically mutate them as well. This would be simplified and faster if our
         # node tracking worked with storages rather than tensors, but for now we have to collect
         # all the aliases on each invocation
         self.mutate_aliases = [m._aliases.aliases for m in self.mutates]
@@ -59,10 +63,27 @@ class Recording(Referenceable):
         flat_messages = flatten_messages(self.buffered_messages)
         self.ranks = NDSlice.from_list(sorted(flat_messages.keys()))
         for rank, msgs in flat_messages.items():
-            self.client.send_nocoalesce(
-                NDSlice(offset=rank, sizes=[], strides=[]),
-                messages.DefineRecording(self, nresults, nformals, msgs),
+            ndslice = NDSlice(offset=rank, sizes=[], strides=[])
+            ntotal_messages = len(msgs) // _MAX_MESSAGES_PER_DEFINE_RECORDING + (
+                1 if len(msgs) % _MAX_MESSAGES_PER_DEFINE_RECORDING else 0
             )
+            for enum_index, msg_index in enumerate(
+                range(0, len(msgs), _MAX_MESSAGES_PER_DEFINE_RECORDING)
+            ):
+                self.client.send_nocoalesce(
+                    ndslice,
+                    messages.DefineRecording(
+                        self,
+                        nresults,
+                        nformals,
+                        msgs[
+                            msg_index : msg_index  # noqa: E203
+                            + _MAX_MESSAGES_PER_DEFINE_RECORDING
+                        ],
+                        ntotal_messages,
+                        enum_index,
+                    ),
+                )
 
     def run(self, results: Generator[Tensor, None, None], actuals: List[Tensor]):
         all_uses: List[Tensor] = [*self.uses, *actuals]
@@ -85,7 +106,13 @@ class Recording(Referenceable):
             self.tracebacks,
         )
         self.client.send(
-            self.ranks, messages.CallRecording(seq, self, results_tuple, actuals)
+            self.ranks,
+            messages.CallRecording(
+                seq,
+                self,
+                cast(List[Tensor | Ref], results_tuple),
+                cast(List[Tensor | Ref], actuals),
+            ),
         )
         return results_tuple
 

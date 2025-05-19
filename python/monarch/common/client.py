@@ -10,6 +10,7 @@ import weakref
 from collections import defaultdict
 from typing import (
     Callable,
+    cast,
     Dict,
     List,
     NamedTuple,
@@ -442,7 +443,10 @@ def tree_map_refs(first_ref: int, tree):
             case Referenceable():
                 return None if obj.ref is None else translate_id(obj.ref)
             case messages.DeleteRefs():
-                return messages.DeleteRefs([translate_id(r) for r in obj.refs])
+                # Python destructors may not run in a deterministic order across
+                # traces of a recorded function, so we need to sort the refs to ensure
+                # a fair comparison during validation.
+                return messages.DeleteRefs(sorted([translate_id(r) for r in obj.refs]))
             case messages.BorrowCreate():
                 result, borrow, *rest = [translate_ref(x) for x in obj]
                 return messages.BorrowCreate(result, translate_id(borrow), *rest)
@@ -555,7 +559,7 @@ class Recorder:
 
     def add_message(self, ranks: Union[NDSlice, List[NDSlice]], msg: NamedTuple):
         if isinstance(msg, messages.RecordingFormal):
-            self.add_formal(msg.result, msg.argument_index)
+            self.add_formal(cast(Tensor, msg.result), msg.argument_index)
 
         # this is pretty expensive, but we can't hold tensor references without
         # extending their lifetime unnecessarily, so they must be converted to

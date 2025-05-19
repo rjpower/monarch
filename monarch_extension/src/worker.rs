@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
+use std::ops::DerefMut;
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
 
@@ -35,12 +36,7 @@ use pyo3::types::PyTuple;
 use torch_sys::nccl::ReduceOp;
 use torch_sys::nccl::UniqueId;
 
-#[pyclass(
-    name = "WorkerMessage",
-    subclass,
-    frozen,
-    module = "monarch._monarch.worker"
-)]
+#[pyclass(name = "WorkerMessage", subclass, module = "monarch._monarch.worker")]
 pub(crate) struct PyWorkerMessage {
     message: WorkerMessage,
 }
@@ -987,18 +983,20 @@ impl SplitCommForProcessGroup {
     }
 }
 
-#[pyclass(frozen, extends=PyWorkerMessage, module = "monarch._monarch.worker")]
+#[pyclass(extends=PyWorkerMessage, module = "monarch._monarch.worker")]
 struct DefineRecording;
 
 #[pymethods]
 impl DefineRecording {
     #[new]
-    #[pyo3(signature = (*, result, nresults, nformals, commands))]
+    #[pyo3(signature = (*, result, nresults, nformals, commands, ntotal_messages, index))]
     fn new(
         result: Ref,
         nresults: usize,
         nformals: usize,
         commands: Vec<PyRef<PyWorkerMessage>>,
+        ntotal_messages: usize,
+        index: usize,
     ) -> (Self, PyWorkerMessage) {
         (
             Self,
@@ -1011,9 +1009,55 @@ impl DefineRecording {
                         .into_iter()
                         .map(|command| command.message.clone())
                         .collect(),
+                    ntotal_messages,
+                    index,
                 },
             },
         )
+    }
+
+    fn append(mut self_: PyRefMut<'_, Self>, command: PyRef<PyWorkerMessage>) -> PyResult<()> {
+        self_
+            .as_super()
+            .deref_mut()
+            .message
+            .as_define_recording_mut()
+            .unwrap()
+            .3
+            .push(command.message.clone());
+        Ok(())
+    }
+
+    fn append_call_function(
+        mut self_: PyRefMut<'_, Self>,
+        seq: u64,
+        results: Vec<Option<Ref>>,
+        mutates: Vec<Ref>,
+        function: ResolvableFunction,
+        args: &Bound<'_, PyTuple>,
+        kwargs: &Bound<'_, PyDict>,
+        stream: StreamRef,
+        remote_process_groups: Vec<Ref>,
+    ) -> PyResult<()> {
+        let (args, kwargs) = func_call_args_to_wire_values(Some(&function), args, kwargs)?;
+        self_
+            .as_super()
+            .deref_mut()
+            .message
+            .as_define_recording_mut()
+            .unwrap()
+            .3
+            .push(WorkerMessage::CallFunction(CallFunctionParams {
+                seq: seq.into(),
+                results,
+                mutates,
+                function,
+                args,
+                kwargs,
+                stream,
+                remote_process_groups,
+            }));
+        Ok(())
     }
 }
 

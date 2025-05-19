@@ -937,9 +937,12 @@ class SplitCommForProcessGroup(WorkerMessage):
 @final
 class DefineRecording(WorkerMessage):
     """
-    Defines a new recording on the worker. This is a list of commands
+    Defines (part of) a new recording on the worker. This is a list of commands
     representing the execution of a function that was defined using
-    monarch.compile.
+    monarch.compile. If there are too many commands to send in a single
+    DefineRecording message, the commands may be chunked into `ntotal_messages`,
+    with the `index` field indicating how to order the DefineRecording messages
+    for a single recording.
 
     Args:
     - `result`: The ref associated with this recording that will be used to
@@ -947,6 +950,10 @@ class DefineRecording(WorkerMessage):
     - `nresults`: The number of output tensors.
     - `nformals`: The number of input tensors.
     - `commands`: The list of commands to run.
+    - `ntotal_messages`: How many total DefineRecording messages make up this
+        recording.
+    - `index`: This DefineRecording message's index in the set of messages
+        that make up this recording.
     """
 
     def __init__(
@@ -956,7 +963,44 @@ class DefineRecording(WorkerMessage):
         nresults: int,
         nformals: int,
         commands: Sequence[WorkerMessage],
+        ntotal_messages: int,
+        index: int,
     ) -> None: ...
+    def append(self, command: WorkerMessage) -> None:
+        """
+        Append a command to the DefineRecording.
+
+        Args:
+        - `command`: The WorkerMessage to append.
+        """
+        ...
+
+    def append_call_function(
+        self,
+        *,
+        seq: int,
+        results: Sequence[Ref | None],
+        mutates: Sequence[Ref],
+        function: ResolvableFunction,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+        stream: StreamRef,
+        remote_process_groups: Sequence[Ref],
+    ) -> None:
+        """
+        Append a CallFunction command to the DefineRecording.
+
+        Args:
+        - `seq`: Sequence number of the message.
+        - `results`: References to the values that the function returns.
+        - `mutates`: References to the values that the function mutates.
+        - `function`: Fully qualified path to the function.
+        - `args`: Pytree-serializable arguments to the function.
+        - `kwargs`: Pytree-serializable keyword arguments to the function.
+        - `stream`: Reference to the stream the worker should use to execute the function.
+        - `remote_process_groups`: References to the process groups the worker should use to execute the function.
+        """
+        ...
 
 @final
 class RecordingFormal(WorkerMessage):

@@ -209,6 +209,13 @@ rust::Vec<uint8_t> serialize_ivalue(const IValue& iv);
 IValue deserialize_ivalue(rust::Slice<const uint8_t> buf);
 
 inline IValue ivalue_deepcopy(const IValue& iv) {
+  if (iv.isTensor() && !iv.toTensor().defined()) {
+    // Attempting to clone an undefined tensor will throw an
+    // exception. If the input is an undefined tensor, then we
+    // manually construct a new IValue containing an undefined
+    // tensor, as in https://fburl.com/code/4zahw73b.
+    return IValue(torch::autograd::Variable());
+  }
   return iv.deepcopy();
 }
 

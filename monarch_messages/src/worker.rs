@@ -718,9 +718,12 @@ pub enum WorkerMessage {
         error: Option<(Option<ActorId>, String)>,
     },
 
-    /// Defines a new recording on the worker. This is a list of commands
+    /// Defines (part of) a new recording on the worker. This is a list of commands
     /// representing the execution of a function that was defined using
-    /// monarch.compile.
+    /// monarch.compile. If there are too many commands to send in a single
+    /// DefineRecording message, the commands may be chunked into `ntotal_messages`,
+    /// with the `index` field indicating how to order the DefineRecording messages
+    /// for a single recording.
     DefineRecording {
         /// The ref associated with this recording that will be used to
         /// call it in the future.
@@ -731,6 +734,11 @@ pub enum WorkerMessage {
         nformals: usize,
         /// The list of commands to run.
         commands: Vec<WorkerMessage>,
+        /// How many total DefineRecording messages make up this recording.
+        ntotal_messages: usize,
+        /// This DefineRecording message's index in the set of messages
+        /// that make up this recording.
+        index: usize,
     },
 
     /// Defines an input tensor for a recording.

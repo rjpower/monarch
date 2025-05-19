@@ -4,15 +4,18 @@
 
 import itertools
 from contextlib import contextmanager
-from typing import List
-from unittest import main, TestCase
+from enum import Enum
+from typing import ContextManager, List
 from unittest.mock import patch
 
 import monarch
 
+import pytest
+
 import torch
 from monarch import (
     coalescing,
+    DeviceMesh,
     fetch_shard,
     get_active_mesh,
     get_active_stream,
@@ -40,24 +43,39 @@ def inspect(x):
     return fetch_shard(x).result().item()
 
 
-def setUpModule():
+@pytest.fixture(scope="module", autouse=True)
+def testing_context():
     global local
-    local = TestingContext().__enter__()
+    with TestingContext() as local:
+        yield
 
 
-def tearDownModule():
-    global local
-    local.__exit__(None, None, None)
+class BackendType(Enum):
+    PY = "py"
+    RS = "rs"
 
 
-class TestCoalescing(TestCase):
-    def setUp(self) -> None:
-        print(f"Running test: {self._testMethodName}")
-        return super().setUp()
-
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Not enough GPUs, this test requires at least 2 GPUs",
+)
+@pytest.mark.parametrize("backend_type", [BackendType.PY, BackendType.RS])
+class TestCoalescing:
     @classmethod
-    def local_device_mesh(cls, N, gpu_per_host, activate=True):
-        return local.local_device_mesh(N, gpu_per_host, activate)
+    def local_device_mesh(
+        cls,
+        num_hosts: int,
+        gpu_per_host: int,
+        backend_type: BackendType,
+        activate: bool = True,
+    ) -> ContextManager[DeviceMesh]:
+        # pyre-fixme[10]: pytest defines this fixture.
+        return local.local_device_mesh(
+            num_hosts,
+            gpu_per_host,
+            activate,
+            rust=backend_type == BackendType.RS,
+        )
 
     @property
     def num_outstanding_messages(self) -> int:
@@ -66,19 +84,19 @@ class TestCoalescing(TestCase):
             for msgs in get_active_mesh().client.recorder.flat_messages.values()
         )
 
-    def test_basic_coalescing(self) -> None:
-        with self.local_device_mesh(1, 1):
+    def test_basic_coalescing(self, backend_type) -> None:
+        with self.local_device_mesh(1, 1, backend_type):
             with coalescing():
                 a = torch.zeros(3, 4)
                 for _ in range(1, 10):
                     a = a + torch.ones(3, 4)
                 # no messages should have been sient since coalescing is enabled
-                self.assertGreaterEqual(self.num_outstanding_messages, 10)
+                assert self.num_outstanding_messages >= 10
             # now that the coalesce is done we should have flushed the messages
-            self.assertEqual(self.num_outstanding_messages, 0)
+            assert self.num_outstanding_messages == 0
 
-    def test_repeat_simple(self) -> None:
-        with self.local_device_mesh(1, 1):
+    def test_repeat_simple(self, backend_type) -> None:
+        with self.local_device_mesh(1, 1, backend_type):
             a = torch.zeros(())
 
             @compile(verify=False)
@@ -92,11 +110,11 @@ class TestCoalescing(TestCase):
             for _ in range(3):
                 z = fn()
 
-            self.assertEqual(inspect(a), 3)
-            self.assertEqual(inspect(z), 1)
+            assert inspect(a) == 3
+            assert inspect(z) == 1
 
-    def test_repeat_formals(self) -> None:
-        with self.local_device_mesh(1, 1):
+    def test_repeat_formals(self, backend_type) -> None:
+        with self.local_device_mesh(1, 1, backend_type):
             a = torch.rand(3, 4)
 
             @compile(verify=False)
@@ -110,7 +128,7 @@ class TestCoalescing(TestCase):
                 assert isinstance(la, torch.Tensor)
                 assert isinstance(lb, torch.Tensor)
                 with no_mesh.activate():
-                    self.assertTrue(torch.allclose(lz, 2 * la + lb))
+                    assert torch.allclose(lz, 2 * la + lb)
 
             @compile(verify=False)
             def fn(b):
@@ -123,10 +141,10 @@ class TestCoalescing(TestCase):
                 assert isinstance(la, torch.Tensor)
                 assert isinstance(lb, torch.Tensor)
                 with no_mesh.activate():
-                    self.assertTrue(torch.allclose(lz, 2 * la + lb))
+                    assert torch.allclose(lz, 2 * la + lb)
 
-    def test_repeat_error_inside(self) -> None:
-        with self.local_device_mesh(1, 1):
+    def test_repeat_error_inside(self, backend_type) -> None:
+        with self.local_device_mesh(1, 1, backend_type):
             a = torch.zeros(())
 
             @compile(verify=False)
@@ -139,11 +157,11 @@ class TestCoalescing(TestCase):
 
             z = fn()
             # recorded coalescing will lump errors together so check that
-            with self.assertRaisesRegex(Exception, "both arguments to matmul"):
+            with pytest.raises(Exception, match="both arguments to matmul"):
                 inspect(z)
 
-    def test_repeat_inner_borrow(self) -> None:
-        with self.local_device_mesh(1, 1):
+    def test_repeat_inner_borrow(self, backend_type) -> None:
+        with self.local_device_mesh(1, 1, backend_type):
             a = torch.zeros(())
             other = Stream("other")
             with other.activate():
@@ -159,10 +177,10 @@ class TestCoalescing(TestCase):
             for _ in range(3):
                 fn()
 
-            self.assertEqual(inspect(a), 3)
+            assert inspect(a) == 3
 
-    def test_repeat_outer_borrow(self) -> None:
-        with self.local_device_mesh(1, 1):
+    def test_repeat_outer_borrow(self, backend_type) -> None:
+        with self.local_device_mesh(1, 1, backend_type):
             a = torch.zeros(())
             other = Stream("other")
             with other.activate():
@@ -185,32 +203,29 @@ class TestCoalescing(TestCase):
             result = fetch_shard(a).result()
             fetch_shard(z).result()
             with no_mesh.activate():
-                self.assertEqual(result.item(), 3)
+                assert result.item() == 3
 
-    def test_nested_coalescing(self) -> None:
-        with self.local_device_mesh(1, 1):
+    def test_nested_coalescing(self, backend_type) -> None:
+        with self.local_device_mesh(1, 1, backend_type):
             with coalescing():
                 a = torch.zeros(3, 4)
                 with coalescing():
                     for _ in range(1, 10):
                         a = a + torch.ones(3, 4)
                     # confirm that there are messages awaiting to be send
-                    self.assertGreaterEqual(
-                        self.num_outstanding_messages,
-                        10,
-                    )
+                    assert self.num_outstanding_messages >= 10
                 # since we are in the nested block we shouldn't have flushed the messages yet
-                self.assertGreaterEqual(self.num_outstanding_messages, 10)
+                assert self.num_outstanding_messages >= 10
             # now that the outer coalesce is done we should have flushed the messages
-            self.assertEqual(self.num_outstanding_messages, 0)
+            assert self.num_outstanding_messages == 0
 
-    def test_no_coalescing(self) -> None:
-        with self.local_device_mesh(1, 1):
+    def test_no_coalescing(self, backend_type) -> None:
+        with self.local_device_mesh(1, 1, backend_type):
             a = torch.zeros(3, 4)
             for _ in range(1, 10):
                 a = a + torch.ones(3, 4)
             # without coalescing the messages should be sent with nothing outstanding
-            self.assertEqual(self.num_outstanding_messages, 0)
+            assert self.num_outstanding_messages == 0
 
     @contextmanager
     def assertRecorded(self, times: int):
@@ -219,7 +234,7 @@ class TestCoalescing(TestCase):
             side_effect=_record_and_define,
         ) as m:
             yield
-            self.assertEqual(m.call_count, times)
+            assert m.call_count == times
 
     def assertAliases(self, tensors: List[Tensor], aliasing: List[int]):
         group = TensorGroup([t._fake for t in tensors])
@@ -233,10 +248,10 @@ class TestCoalescing(TestCase):
                     actual.append(offset)
                 case Storage():
                     actual.append(next(c))
-        self.assertEqual(aliasing, actual)
+        assert aliasing == actual
 
-    def test_compile_aliasing(self) -> None:
-        with self.local_device_mesh(1, 1):
+    def test_compile_aliasing(self, backend_type) -> None:
+        with self.local_device_mesh(1, 1, backend_type):
 
             @compile(verify=False)
             def add(a, b):
@@ -253,7 +268,7 @@ class TestCoalescing(TestCase):
             b = torch.rand(3, 4)
             with self.assertRecorded(1):
                 r = add(a, b)
-                self.assertEqual(r.size(), (3, 4))
+                assert r.size() == (3, 4)
                 r2 = add(b, a)
                 self.assertAliases([a, b, r2, r], [0, 1, 2, 3])
 
@@ -261,9 +276,9 @@ class TestCoalescing(TestCase):
             d = torch.rand(4, 4)
             with self.assertRecorded(1):
                 e = add(c, d)
-                self.assertEqual(e.size(), (4, 4))
+                assert e.size() == (4, 4)
                 e = add(c, torch.rand(4, 4))
-                self.assertEqual(e.size(), (4, 4))
+                assert e.size() == (4, 4)
 
             with self.assertRecorded(1):
                 r = add(a, 4)
@@ -289,7 +304,7 @@ class TestCoalescing(TestCase):
                 r = captured(b)
                 self.assertAliases([a, b, r], [0, 1, 2])
                 r = captured(torch.rand(3, 4))
-                self.assertEqual(r.size(), (3, 4))
+                assert r.size() == (3, 4)
 
             with self.assertRecorded(1):
                 # input aliased with capture
@@ -307,8 +322,8 @@ class TestCoalescing(TestCase):
                     [c, d, a, r0, r1, r2, r3, r4], [0, 1, 2, 3, 3, 0, 1, 2]
                 )
 
-    def test_compile_input_permissions(self):
-        with self.local_device_mesh(1, 1):
+    def test_compile_input_permissions(self, backend_type):
+        with self.local_device_mesh(1, 1, backend_type):
             a = torch.rand(3, 4)
 
             @compile(verify=False)
@@ -322,7 +337,7 @@ class TestCoalescing(TestCase):
             ab, borrow = other.borrow(a, mutable=True)
 
             with borrow:
-                with self.assertRaisesRegex(TypeError, "BORROWED"):
+                with pytest.raises(TypeError, match="BORROWED"):
                     add(torch.rand(3, 4))
 
             # test we can read it again
@@ -341,11 +356,11 @@ class TestCoalescing(TestCase):
 
             a.drop()
 
-            with self.assertRaisesRegex(TypeError, "DROPPED"):
+            with pytest.raises(TypeError, match="DROPPED"):
                 add(torch.rand(3, 4))
 
-    def test_compile_verify(self):
-        with self.local_device_mesh(1, 1):
+    def test_compile_verify(self, backend_type):
+        with self.local_device_mesh(1, 1, backend_type):
             a = torch.rand(3, 4)
 
             @compile(verify=True)
@@ -369,12 +384,12 @@ class TestCoalescing(TestCase):
                 add(torch.rand(3, 4))
 
             add_broken(torch.rand(3, 4))
-            with self.assertRaisesRegex(RuntimeError, "diverges"):
+            with pytest.raises(RuntimeError, match="diverges"):
                 c = True
                 add_broken(torch.rand(3, 4))
 
-    def test_dropped(self):
-        with self.local_device_mesh(1, 1):
+    def test_dropped(self, backend_type):
+        with self.local_device_mesh(1, 1, backend_type):
             a = torch.rand(3, 4)
             b = None
 
@@ -384,11 +399,11 @@ class TestCoalescing(TestCase):
                 b = a + a
 
             foo()
-            with self.assertRaisesRegex(TypeError, "DROPPED"):
+            with pytest.raises(TypeError, match="DROPPED"):
                 b.add(4)
 
-    def test_across_mesh(self):
-        with self.local_device_mesh(2, 1) as m:
+    def test_across_mesh(self, backend_type):
+        with self.local_device_mesh(2, 1, backend_type) as m:
             m0 = m(host=0)
             m1 = m(host=1)
 
@@ -411,8 +426,8 @@ class TestCoalescing(TestCase):
             with m1.activate():
                 monarch.inspect(r0)
 
-    def test_grad_not_supported(self):
-        with self.local_device_mesh(1, 1):
+    def test_grad_not_supported(self, backend_type):
+        with self.local_device_mesh(1, 1, backend_type):
 
             @compile
             def foo(x):
@@ -424,14 +439,14 @@ class TestCoalescing(TestCase):
             def returnit():
                 return y
 
-            with self.assertRaisesRegex(TypeError, "REQUIRES_GRAD"):
+            with pytest.raises(TypeError, match="REQUIRES_GRAD"):
                 foo(torch.rand(3, requires_grad=True))
 
-            with self.assertRaisesRegex(TypeError, "REQUIRES_GRAD"):
+            with pytest.raises(TypeError, match="REQUIRES_GRAD"):
                 returnit()
 
-    def test_mutate_inputs(self):
-        with self.local_device_mesh(1, 1) as mesh:
+    def test_mutate_inputs(self, backend_type):
+        with self.local_device_mesh(1, 1, backend_type) as mesh:
 
             @compile(verify=False)
             def foo(x_not_mutated, w_not_mutated, y, y_alias, z, z_alias):
@@ -467,12 +482,7 @@ class TestCoalescing(TestCase):
                 for _ in range(2):
                     u, v = foo(*all_inputs)
                     (mutated, used, _, _), _ = new_node.call_args
-                    self.assertEqual(
-                        mutated_aliases.union(u._aliases.aliases, v._aliases.aliases),
-                        set(mutated),
-                    )
-                    self.assertEqual(set(all_inputs), set(used))
-
-
-if __name__ == "__main__":
-    main()
+                    assert mutated_aliases.union(
+                        u._aliases.aliases, v._aliases.aliases
+                    ) == set(mutated)
+                    assert set(all_inputs) == set(used)

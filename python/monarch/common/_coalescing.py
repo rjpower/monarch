@@ -67,7 +67,8 @@ class CoalescingState:
         finally:
             ctrl = self.controller
             if ctrl is not None:
-                ctrl.flush_deletes()
+                if finished:
+                    ctrl.flush_deletes()
                 self.recorder = ctrl.reset_recorder()
                 if not finished:
                     self.recorder.abandon()
