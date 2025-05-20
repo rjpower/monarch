@@ -279,8 +279,8 @@ mod tests {
 
             let paths_s = collect_routed_paths(&s, &slice);
             let paths_t = collect_routed_paths(&t, &slice);
-            let ranks: Vec<_> = paths_s.keys()
-                .filter(|r| paths_t.contains_key(*r))
+            let ranks: Vec<_> = paths_s.delivered.keys()
+                .filter(|r| paths_t.delivered.contains_key(*r))
                 .cloned()
                 .collect();
 
@@ -289,8 +289,8 @@ mod tests {
             } else {
                 println!("testing {} nodes", ranks.len());
                 for rank in ranks {
-                    let path_s = paths_s.get(&rank).unwrap();
-                    let path_t = paths_t.get(&rank).unwrap();
+                    let path_s = paths_s.delivered.get(&rank).unwrap();
+                    let path_t = paths_t.delivered.get(&rank).unwrap();
                     prop_assert_eq!(
                         path_s.clone(),
                         path_t.clone(),

@@ -83,6 +83,16 @@ impl<T> RoutedMessage<T> {
     }
 }
 
+#[derive(Default)]
+pub struct RoutedPathTree {
+    // Map from rank → delivery path (flat indices).
+    pub delivered: HashMap<usize, Vec<usize>>,
+
+    // Map from rank → set of direct predecessor ranks (flat
+    // indices).
+    pub predecessors: HashMap<usize, HashSet<usize>>,
+}
+
 /// Simulates routing from the origin through a slice using a
 /// `Selection`, collecting all delivery destinations **along with
 /// their routing paths**.
@@ -101,15 +111,13 @@ impl<T> RoutedMessage<T> {
 //
 ///   Useful in tests for verifying full routing paths and ensuring
 ///   correctness.
-pub fn collect_routed_paths(
-    selection: &Selection,
-    slice: &Slice,
-) -> std::collections::HashMap<usize, Vec<usize>> {
+pub fn collect_routed_paths(selection: &Selection, slice: &Slice) -> RoutedPathTree {
     use std::collections::VecDeque;
 
     let mut pending = VecDeque::new();
     let mut delivered = HashMap::new();
     let mut seen = HashSet::new();
+    let mut predecessors: HashMap<usize, HashSet<usize>> = HashMap::new();
 
     let root_frame = RoutingFrame::root(selection.clone(), slice.clone());
     let origin = slice.location(&root_frame.here).unwrap();
@@ -121,6 +129,12 @@ pub fn collect_routed_paths(
                 let key = RoutingFrameKey::new(&next_frame);
                 if seen.insert(key) {
                     let next_rank = slice.location(&next_frame.here).unwrap();
+                    let parent_rank = *path.last().unwrap();
+                    predecessors
+                        .entry(next_rank)
+                        .or_default()
+                        .insert(parent_rank);
+
                     let mut next_path = path.clone();
                     next_path.push(next_rank);
 
@@ -143,7 +157,10 @@ pub fn collect_routed_paths(
         );
     }
 
-    delivered
+    RoutedPathTree {
+        delivered,
+        predecessors,
+    }
 }
 
 /// Simulates routing from the origin and returns the set of
@@ -155,6 +172,7 @@ pub fn collect_routed_paths(
 /// routing results against selection evaluation.
 pub fn collect_routed_nodes(selection: &Selection, slice: &Slice) -> Vec<usize> {
     collect_routed_paths(selection, slice)
+        .delivered
         .keys()
         .cloned()
         .collect()

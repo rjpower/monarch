@@ -739,6 +739,7 @@ mod tests {
             // Get the paths used in casting
             let sel_paths = PathToLeaves(
                 collect_routed_paths(&uslice.selection, &uslice.slice)
+                    .delivered
                     .into_iter()
                     .map(|(d, mut path)| {
                         path.dedup();
