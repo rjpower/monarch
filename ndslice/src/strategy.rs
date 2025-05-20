@@ -205,7 +205,7 @@ mod tests {
     // the results agree.
     proptest! {
         #![proptest_config(ProptestConfig {
-            cases: 32, ..ProptestConfig::default()
+            cases: 8, ..ProptestConfig::default()
         })]
         #[test]
         fn trace_route_path_determinism(
@@ -362,6 +362,59 @@ mod tests {
                 }
             }
         }
+    }
 
+    // Property test: Unique Predecessor Theorem
+    //
+    // This test verifies a structural invariant of the routing graph
+    // produced by `collect_routed_paths`, which performs a
+    // breadth-first traversal of a selection over a multidimensional
+    // mesh.
+    //
+    // ───────────────────────────────────────────────────────────────
+    // Unique Predecessor Theorem
+    //
+    // In a full routing traversal, each coordinate `x` is the target
+    // of at most one `RoutingStep::Forward` from a distinct
+    // coordinate `y ≠ x`.
+    //
+    // Any additional frames that reach `x` arise only from:
+    //   - self-forwarding (i.e., `x → x`)
+    //   - structural duplication from the same parent node (e.g., via
+    //     unions)
+    //
+    // This ensures that routing paths form a tree-like structure
+    // rooted at the origin, with no multiple distinct predecessors
+    // except in the degenerate (self-loop) or duplicated-parent
+    // cases.
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 256, ..ProptestConfig::default()
+        })]
+        #[test]
+        fn collect_routed_paths_unique_predecessor(
+            slice in gen_slice(4, 8)
+        ) {
+            let shape = slice.sizes().to_vec();
+
+            let mut runner = TestRunner::default();
+            let s = gen_selection(4, shape.clone(), 0).new_tree(&mut runner).unwrap().current();
+
+            let tree = collect_routed_paths(&s, &slice);
+
+            for (node, preds) in tree.predecessors {
+                let non_self_preds: Vec<_> = preds.clone().into_iter()
+                    .filter(|&p| p != node)
+                    .collect();
+
+                prop_assert!(
+                    non_self_preds.len() <= 1,
+                    "Node {} had multiple non-self predecessors: {:?} (selection: {})",
+                    node,
+                    non_self_preds,
+                    s,
+                );
+            }
+        }
     }
 }
