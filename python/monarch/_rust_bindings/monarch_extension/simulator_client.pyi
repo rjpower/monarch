@@ -31,3 +31,9 @@ class SimulatorClient:
         - `worker_world`: World of the worker to spawn the mesh in.
         """
         ...
+
+def bootstrap_simulator_backend(system_addr: str, world_size: int) -> None:
+    """
+    Bootstrap the simulator backend on the current process
+    """
+    ...

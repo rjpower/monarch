@@ -11,8 +11,6 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
-from monarch._monarch.simulator_client import SimulatorClient
-
 from monarch._rust_bindings.hyperactor import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
     init_proc,
@@ -21,6 +19,10 @@ from monarch._rust_bindings.hyperactor import (  # @manual=//monarch/monarch_ext
 
 from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monarch/monarch_extension:monarch_extension
     ClientActor,
+)
+from monarch._rust_bindings.monarch_extension.simulator_client import (  # @manual=//monarch/monarch_extension:monarch_extension
+    bootstrap_simulator_backend,
+    SimulatorClient,
 )
 from monarch.common.client import Client
 from monarch.common.constants import (
@@ -52,8 +54,12 @@ def sim_mesh(
                               Default: the number of GPUs this machine has.
     """
     mesh_world_state: Dict[MeshWorld, Optional[DeviceMesh]] = {}
-    # TODO: pass hosts and gpus_per_host to Bootstrap to simulate the case of multiple workers per mesh.
-    bootstrap: Bootstrap = Bootstrap(n_meshes, mesh_world_state, proxy_addr=proxy_addr)
+    bootstrap: Bootstrap = Bootstrap(
+        n_meshes,
+        mesh_world_state,
+        proxy_addr=proxy_addr,
+        world_size=hosts * gpus_per_host,
+    )
 
     def create_exit(
         dm: DeviceMesh, bootstrap: Bootstrap
@@ -73,7 +79,7 @@ def sim_mesh(
     client_proc_id = "client[0]"
     client_proc: Proc = init_proc(
         proc_id=client_proc_id,
-        bootstrap_addr=bootstrap.client_bootstrap_addr,
+        bootstrap_addr=bootstrap.bootstrap_addr,
         timeout=SIM_MESH_CLIENT_TIMEOUT,  # unused
         supervision_update_interval=SIM_MESH_CLIENT_SUPERVISION_UPDATE_INTERVAL,
     )
@@ -121,6 +127,7 @@ class Bootstrap:
         num_meshes: int,
         mesh_world_state: Dict[MeshWorld, Optional[DeviceMesh]],
         proxy_addr: Optional[str] = None,
+        world_size: int = 1,
     ) -> None:
         """
         Bootstraps a SimMesh.
@@ -131,14 +138,6 @@ class Bootstrap:
         """
         # do a fake call to instantiate ThreadPoolExecutor so we don't block GIL later
         fake_call(lambda: 0)
-        with (
-            importlib.resources.path("monarch", "monarch_simulator") as controller_main,
-        ):
-            if not controller_main.exists():
-                raise ImportError(
-                    "simulator main not found in monarch.monarch_simulator"
-                )
-            self.controller_main: Path = controller_main
 
         env = os.environ.copy()
         env["HYPERACTOR_MANAGED_SUBPROCESS"] = "1"
@@ -151,32 +150,7 @@ class Bootstrap:
         self.bootstrap_addr: str = (
             f"sim!unix!@system,{proxy_addr},unix!@system,{proxy_addr}"
         )
-        client_proxy_addr = f"unix!@{_random_id()}-proxy"
-        # client lives on a different process so it uses a different proxy as system.
-        # the src (unix!@client) is just a placeholder and will get changed by the client.
-        self.client_bootstrap_addr: str = (
-            f"sim!unix!@client,{client_proxy_addr},unix!@system,{proxy_addr}"
-        )
-        logging_dir = tempfile.mkdtemp(prefix="sim_mesh_")
-        os.makedirs(logging_dir, exist_ok=True)
-        print(f"\n*** Simulator backend logging to {logging_dir} ***\n")
-        stdout_file = open(os.path.join(logging_dir, "log.stdout"), "w")
-        stderr_file = open(os.path.join(logging_dir, "log.stderr"), "w")
-        process = subprocess.Popen(
-            [
-                self.controller_main,
-                "--system-addr",
-                self.bootstrap_addr,
-            ],
-            stdout=stdout_file,
-            stderr=stderr_file,
-            env=self.env,
-        )
-        running = _validate_proccesses_end([process])
-        if len(running) != 1:
-            raise RuntimeError(
-                f"System process did not end properly. Running processes: {running}"
-            )
+        bootstrap_simulator_backend(self.bootstrap_addr, world_size)
 
         self._simulator_client = SimulatorClient(proxy_addr)
         for i in range(num_meshes):
@@ -325,7 +299,7 @@ def sim_mesh_provider(
     client_proc_id = "client[0]"
     client_proc: Proc = init_proc(
         proc_id=client_proc_id,
-        bootstrap_addr=bootstrap.client_bootstrap_addr,
+        bootstrap_addr=bootstrap.bootstrap_addr,
         timeout=SIM_MESH_CLIENT_TIMEOUT,  # unused
         supervision_update_interval=SIM_MESH_CLIENT_SUPERVISION_UPDATE_INTERVAL,
     )

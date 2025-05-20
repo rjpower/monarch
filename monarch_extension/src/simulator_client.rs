@@ -9,6 +9,9 @@ use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::simnet::OperationalMessage;
 use hyperactor::simnet::ProxyMessage;
 use hyperactor::simnet::SpawnMesh;
+use monarch_hyperactor::runtime::signal_safe_block_on;
+use monarch_simulator_lib::bootstrap::bootstrap;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -36,6 +39,16 @@ fn wrap_operational_message(operational_message: OperationalMessage) -> MessageE
     // The port ID is not used.
     let port_id = PortId(id!(simulator[0].actor), 0);
     MessageEnvelope::new(sender_id, port_id, serialized_proxy_message)
+}
+
+#[pyfunction]
+fn bootstrap_simulator_backend(py: Python, system_addr: String, world_size: i32) -> PyResult<()> {
+    signal_safe_block_on(py, async move {
+        match bootstrap(system_addr.parse().unwrap(), world_size as usize).await {
+            Ok(_) => Ok(()),
+            Err(err) => Err(PyRuntimeError::new_err(err.to_string())),
+        }
+    })?
 }
 
 #[pymethods]
@@ -78,5 +91,9 @@ impl SimulatorClient {
 
 pub(crate) fn register_python_bindings(simulator_client_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     simulator_client_mod.add_class::<SimulatorClient>()?;
+    simulator_client_mod.add_function(wrap_pyfunction!(
+        bootstrap_simulator_backend,
+        simulator_client_mod
+    )?)?;
     Ok(())
 }
