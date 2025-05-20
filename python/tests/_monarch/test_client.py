@@ -6,7 +6,8 @@ from unittest import TestCase
 
 import torch
 
-from monarch._monarch import client, hyperactor
+from monarch._monarch import hyperactor
+from monarch._rust_bindings.monarch_extension import client
 from pyre_extensions import none_throws
 
 

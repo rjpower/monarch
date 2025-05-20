@@ -7,7 +7,8 @@ import pdb  # noqa
 import sys
 from typing import cast, Optional
 
-from monarch._monarch import debugger
+from monarch._rust_bindings.monarch_extension import debugger
+from monarch._rust_bindings.monarch_messages.debugger import DebuggerAction
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ class PdbWrapper(pdb.Pdb):
         if not self.breaks:
             # no more breakpoints so this debugger will not
             # be used again, and we detach from the controller io.
-            self._actor.send(debugger.DebuggerAction.Detach())
+            self._actor.send(DebuggerAction.Detach())
             self._actor.drain_and_stop()
             # break cycle with itself before we exit
             self.stdin = sys.stdin
@@ -52,13 +53,13 @@ class PdbWrapper(pdb.Pdb):
         return r
 
     def set_trace(self):
-        self._actor.send(debugger.DebuggerAction.Paused())
+        self._actor.send(DebuggerAction.Paused())
         message = self._actor.receive()
         # we give the controller the option to ignore this request to debug
         # by issuing a "detach" message immediately.
-        if isinstance(message, debugger.DebuggerAction.Detach):
+        if isinstance(message, DebuggerAction.Detach):
             return
-        elif isinstance(message, debugger.DebuggerAction.Attach):
+        elif isinstance(message, DebuggerAction.Attach):
             pass
         else:
             raise RuntimeError(f"unexpected debugger message {message}")
@@ -67,7 +68,7 @@ class PdbWrapper(pdb.Pdb):
         super().set_trace()
 
     def set_quit(self):
-        self._actor.send(debugger.DebuggerAction.Detach())
+        self._actor.send(DebuggerAction.Detach())
         self._actor.drain_and_stop()
         super().set_quit()
 
@@ -77,12 +78,12 @@ class ReadWrapper(io.RawIOBase):
         self._actor = actor
 
     def readinto(self, b):
-        self._actor.send(debugger.DebuggerAction.Read(len(b)))
+        self._actor.send(DebuggerAction.Read(len(b)))
         response = self._actor.receive()
-        if isinstance(response, debugger.DebuggerAction.Detach):
+        if isinstance(response, DebuggerAction.Detach):
             raise bdb.BdbQuit
-        assert isinstance(response, debugger.DebuggerAction.Write)
-        response = cast(debugger.DebuggerAction.Write, response)
+        assert isinstance(response, DebuggerAction.Write)
+        response = cast(DebuggerAction.Write, response)
         payload = debugger.get_bytes_from_write_action(response)
         assert len(payload) <= len(b)
         b[: len(payload)] = payload
@@ -104,7 +105,7 @@ class WriteWrapper:
         return True
 
     def write(self, s: str):
-        self._actor.send(debugger.DebuggerAction.Write(s.encode()))
+        self._actor.send(DebuggerAction.Write(s.encode()))
 
     def flush(self):
         pass

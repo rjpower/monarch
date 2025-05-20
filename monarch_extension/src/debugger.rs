@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
     frozen,
     get_all,
     name = "DebuggerMessage",
-    module = "monarch._monarch.debugger"
+    module = "monarch._rust_bindings.monarch_extension.debugger"
 )]
 pub struct PyDebuggerMessage {
     action: DebuggerAction,
@@ -61,7 +61,7 @@ pub fn get_bytes_from_write_action(
     }
 }
 
-#[pyclass(module = "monarch._monarch.debugger")]
+#[pyclass(module = "monarch._rust_bindings.monarch_extension.debugger")]
 pub struct PdbActor {
     instance: Arc<Mutex<InstanceWrapper<DebuggerMessage>>>,
     controller_actor_ref: ActorRef<ControllerActor>,
@@ -126,7 +126,12 @@ impl PdbActor {
 pub fn register_python_bindings(debugger: &Bound<'_, PyModule>) -> PyResult<()> {
     debugger.add_class::<PdbActor>()?;
     debugger.add_class::<PyDebuggerMessage>()?;
-    debugger.add_function(wrap_pyfunction!(get_bytes_from_write_action, debugger)?)?;
+    let f = wrap_pyfunction!(get_bytes_from_write_action, debugger)?;
+    f.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_extension.debugger",
+    )?;
+    debugger.add_function(f)?;
     Ok(())
 }
 

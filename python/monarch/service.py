@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import contextvars
 import inspect
 
@@ -31,7 +32,6 @@ from typing import (
 
 import monarch
 from monarch import ActorFuture as Future
-from monarch._monarch.shape import Point
 
 from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
@@ -42,6 +42,7 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     PortReceiver as HyPortReceiver,
 )
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
+from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
 from monarch.common.pickle_flatten import flatten, unflatten
 from monarch.common.shape import MeshTrait, NDSlice, Shape
 
@@ -58,6 +59,10 @@ except ImportError:
 
 T1 = TypeVar("T1")
 T2 = TypeVar("T2")
+
+
+class Point(HyPoint, collections.abc.Mapping):
+    pass
 
 
 @dataclass

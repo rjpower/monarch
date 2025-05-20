@@ -23,7 +23,7 @@ use pyo3::prelude::*;
 #[pyclass(
     name = "SimulatorClient",
     frozen,
-    module = "monarch._monarch.simulator_client"
+    module = "monarch._rust_bindings.monarch_extension.simulator_client"
 )]
 #[derive(Clone)]
 pub(crate) struct SimulatorClient {
@@ -91,9 +91,11 @@ impl SimulatorClient {
 
 pub(crate) fn register_python_bindings(simulator_client_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     simulator_client_mod.add_class::<SimulatorClient>()?;
-    simulator_client_mod.add_function(wrap_pyfunction!(
-        bootstrap_simulator_backend,
-        simulator_client_mod
-    )?)?;
+    let f = wrap_pyfunction!(bootstrap_simulator_backend, simulator_client_mod)?;
+    f.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_extension.simulator_client",
+    )?;
+    simulator_client_mod.add_function(f)?;
     Ok(())
 }
