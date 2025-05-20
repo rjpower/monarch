@@ -6,11 +6,9 @@ See: https://pytorch.org/torchx/main/basics.html#components
 """
 
 # pyre-strict
-import copy
 import getpass
 from typing import Dict, List, Optional
 
-import torchx.components.fb.conda as conda
 import torchx.components.fb.conda_transforms as conda_transforms
 import torchx.specs as specs
 from monarch.tools.mesh_spec import (
@@ -18,7 +16,7 @@ from monarch.tools.mesh_spec import (
     mesh_spec_from_str,
     tag_as_metadata,
 )
-from torchx.specs.fb.component_helpers import Packages
+from torchx.specs.fb.component_helpers import fbpkg, Packages, run_as, ttls
 
 _TAGS = ["monarch"]
 
@@ -59,46 +57,37 @@ def hyperactor(
     packages = additional_packages
     packages.add_python_lib(hyperactor_fbpkg)
 
-    launch_cmd = "/packages/" + hyperactor_fbpkg.split(":")[0] + "/hyperactor"
-    # TODO it might not always be &&
+    launch_cmd = f"/packages/{fbpkg.from_id(hyperactor_fbpkg).name}/hyperactor"
+    # TODO kiuk@: refactor pre_launch_cmd and && + ; into ChainedEntrypoint in torchx/specs/fb/component_helpers.py
     entrypoint = (
-        launch_cmd if pre_launch_cmd is None else pre_launch_cmd + " && " + launch_cmd
+        launch_cmd if pre_launch_cmd is None else f"{pre_launch_cmd} && {launch_cmd}"
     )
 
-    # get conda-on-mast role template
-    appdef = conda.run(
-        *[entrypoint],
-        name=name,
-        h="IGNORED",  # overridden later
-        num_nodes=_IGNORED,  # overridden later
-        env=env,
-        run_as_root=True,
-        enable_ttls=True,
-    )
-    template_role = appdef.roles[0]
-    template_role.image = packages.image
-    template_role.port_map |= {"mesh": port}
+    appdef = specs.AppDef(name=name)
 
-    mesh_roles = []
-    mesh_specs = [mesh_spec_from_str(mesh) for mesh in meshes]
-    for mesh in mesh_specs:
-        mesh_role = copy.deepcopy(template_role)
-        mesh_role.name = mesh.name
-        mesh_role.resource = specs.resource(h=mesh.host_type)
-        mesh_role.num_replicas = mesh.num_hosts
-        mesh_role.args = [
-            # not needed for mesh-worker subcmd but is a global arg
-            # TODO extract mesh-worker subcmd into its own entrypoint
-            f"--num-hosts={_IGNORED}",
-            "mesh-worker",
-            f"--port={port}",
-            f"--program={program}",
-        ]
+    for mesh in [mesh_spec_from_str(mesh) for mesh in meshes]:
+        mesh_role = specs.Role(
+            name=mesh.name,
+            image=packages.image,
+            entrypoint=entrypoint,
+            args=[
+                # not needed for mesh-worker subcmd but is a global arg
+                # TODO kiuk@: extract mesh-worker subcmd into its own entrypoint
+                f"--num-hosts={_IGNORED}",
+                "mesh-worker",
+                f"--port={port}",
+                f"--program={program}",
+            ],
+            num_replicas=mesh.num_hosts,
+            resource=specs.resource(h=mesh.host_type),
+            env=env,
+            port_map={"mesh": port},
+        )
+        ttls(mesh_role, enable=True)
+        run_as(mesh_role, root_user=True)
         tag_as_metadata(mesh, appdef)
-        mesh_roles.append(mesh_role)
 
-    # overwrite appdef's roles with the mesh roles we created
-    appdef.roles = mesh_roles
+        appdef.roles.append(mesh_role)
 
     conda_transforms.append_tb_logdir_metadata(appdef)
     appdef.metadata["tags"] = ",".join(_TAGS)

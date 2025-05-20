@@ -8,9 +8,23 @@ from monarch.tools.mesh_spec import DEFAULT_REMOTE_ALLOCATOR_PORT
 from torchx import specs
 
 from torchx.components.component_test_base import ComponentTestCase
+from torchx.specs.fb.named_resources import MAST_SERVER_SUBTYPE
 
 
 class ComponentsTest(unittest.TestCase):
+    def assertResourceEqual(
+        self, resource1: specs.Resource, resource2: specs.Resource
+    ) -> None:
+        # checks that the resources are the same up to cpu, gpu, memMB and host type (server subtype)
+        # fields that do not affect the host type of the job are not checked for equality
+        self.assertEqual(resource1.cpu, resource2.cpu)
+        self.assertEqual(resource1.gpu, resource2.gpu)
+        self.assertEqual(resource1.memMB, resource2.memMB)
+        self.assertEqual(
+            resource1.capabilities[MAST_SERVER_SUBTYPE],
+            resource2.capabilities[MAST_SERVER_SUBTYPE],
+        )
+
     def test_create_default(self) -> None:
         appdef = conda.hyperactor()
         job_name = f"monarch-{getpass.getuser()}"
@@ -27,7 +41,7 @@ class ComponentsTest(unittest.TestCase):
         # defaults to a single host mesh on gtt_any
         self.assertEqual(mesh.name, "mesh_0")
         self.assertEqual(1, mesh.num_replicas)
-        self.assertEqual(mesh.resource, specs.resource(h="gtt_any"))
+        self.assertResourceEqual(mesh.resource, specs.resource(h="gtt_any"))
 
         # --- check port settings ---
         default_port = DEFAULT_REMOTE_ALLOCATOR_PORT
@@ -77,7 +91,7 @@ class ComponentsTest(unittest.TestCase):
             mesh_role = appdef.roles[i]
             self.assertEqual(name, mesh_role.name)
             self.assertEqual(int(num_hosts), mesh_role.num_replicas)
-            self.assertEqual(specs.resource(h=host_type), mesh_role.resource)
+            self.assertResourceEqual(specs.resource(h=host_type), mesh_role.resource)
 
     def test_bad_mesh_spec(self) -> None:
         missing_field_msg = r"not of the form 'NAME:NUM_HOSTS:HOST_TYPE'"
