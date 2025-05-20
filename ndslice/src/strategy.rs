@@ -142,6 +142,7 @@ pub fn gen_selection(depth: u32, shape: Vec<usize>, dim: usize) -> BoxedStrategy
 }
 
 mod tests {
+    use std::collections::HashMap;
     use std::collections::HashSet;
 
     use proptest::strategy::ValueTree;
@@ -404,6 +405,75 @@ mod tests {
 
             for (node, preds) in tree.predecessors {
                 let non_self_preds: Vec<_> = preds.clone().into_iter()
+                    .filter(|&p| p != node)
+                    .collect();
+
+                prop_assert!(
+                    non_self_preds.len() <= 1,
+                    "Node {} had multiple non-self predecessors: {:?} (selection: {})",
+                    node,
+                    non_self_preds,
+                    s,
+                );
+            }
+        }
+    }
+
+    // Property test: Unique Predecessor Theorem (CommActor Routing)
+    //
+    // This test verifies structural invariants of the routing graph
+    // produced by `collect_commactor_routing_tree`, which simulates
+    // CommActor-style peer-to-peer multicast forwarding.
+    //
+    // ───────────────────────────────────────────────────────────────
+    // Unique Predecessor Theorem
+    //
+    // In a full routing traversal, each coordinate `x` is the target
+    // of at most one `RoutingStep::Forward` from a distinct
+    // coordinate `y ≠ x`.
+    //
+    // Any additional frames that reach `x` arise only from:
+    //   - structural duplication from the same parent node (e.g., via
+    //     unions)
+    //
+    // Unlike the general `collect_routed_paths`, CommActor routing
+    // never performs self-forwarding (`x → x`). This test confirms
+    // that as well.
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 256, ..ProptestConfig::default()
+        })]
+        #[test]
+        fn commactor_routed_paths_unique_predecessor(
+            slice in gen_slice(4, 8)
+        ) {
+            let shape = slice.sizes().to_vec();
+
+            let mut runner = TestRunner::default();
+            let s = gen_selection(4, shape.clone(), 0).new_tree(&mut runner).unwrap().current();
+
+            let tree = collect_commactor_routing_tree(&s, &slice);
+
+            let mut preds: HashMap<usize, HashSet<usize>> = HashMap::new();
+
+            for (from, frames) in &tree.forwards {
+                for frame in frames {
+                    let to = slice.location(&frame.here).unwrap();
+
+                    // We assert that a CommActor never forwards to
+                    // itself.
+                    prop_assert_ne!(
+                        *from, to,
+                        "CommActor forwarded to itself: {} → {} (selection: {})",
+                        from, to, s
+                    );
+
+                    preds.entry(to).or_default().insert(*from);
+                }
+            }
+
+            for (node, parents) in preds {
+                let non_self_preds: Vec<_> = parents.into_iter()
                     .filter(|&p| p != node)
                     .collect();
 
