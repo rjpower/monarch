@@ -18,3 +18,4 @@ requires-python = ">= 3.10"
 markers = [
     "oss_skip: marks tests to skip in OSS CI",
 ]
+asyncio_mode = "auto"

@@ -132,7 +132,11 @@ impl PyMailbox {
     }
 }
 
-#[pyclass(frozen, name = "PortId", module = "monarch._monarch.hyperactor")]
+#[pyclass(
+    frozen,
+    name = "PortId",
+    module = "monarch._rust_bindings.monarch_hyperactor.mailbox"
+)]
 #[derive(Clone)]
 pub struct PyPortId {
     inner: PortId,
@@ -308,4 +312,15 @@ impl PythonOncePortReceiver {
         signal_safe_block_on(py, async move { receiver.recv().await })?
             .map_err(|err| PyErr::new::<PyEOFError, _>(format!("Port closed: {}", err)))
     }
+}
+
+pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
+    hyperactor_mod.add_class::<PyMailbox>()?;
+    hyperactor_mod.add_class::<PyPortId>()?;
+    hyperactor_mod.add_class::<PythonPortHandle>()?;
+    hyperactor_mod.add_class::<PythonPortReceiver>()?;
+    hyperactor_mod.add_class::<PythonOncePortHandle>()?;
+    hyperactor_mod.add_class::<PythonOncePortReceiver>()?;
+
+    Ok(())
 }

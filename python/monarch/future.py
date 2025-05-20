@@ -1,5 +1,5 @@
 import asyncio
-from typing import Generic, TypeVar
+from typing import Generator, Generic, TypeVar
 
 R = TypeVar("R")
 
@@ -15,5 +15,5 @@ class ActorFuture(Generic[R]):
             return self._blocking_impl()
         return asyncio.run(self._impl())
 
-    def __await__(self):
+    def __await__(self) -> Generator[R, None, R]:
         return self._impl().__await__()

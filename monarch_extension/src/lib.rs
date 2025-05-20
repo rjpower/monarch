@@ -59,7 +59,40 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module,
         "monarch_extension.controller",
     )?)?;
-    monarch_hyperactor::register_python_bindings(&get_or_add_new_module(module, "hyperactor")?)?;
+
+    monarch_hyperactor::bootstrap::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.bootstrap",
+    )?)?;
+
+    monarch_hyperactor::proc::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.proc",
+    )?)?;
+
+    monarch_hyperactor::actor::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.actor",
+    )?)?;
+
+    monarch_hyperactor::mailbox::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.mailbox",
+    )?)?;
+
+    monarch_hyperactor::alloc::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.alloc",
+    )?)?;
+    monarch_hyperactor::actor_mesh::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.actor_mesh",
+    )?)?;
+    monarch_hyperactor::proc_mesh::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_hyperactor.proc_mesh",
+    )?)?;
+
     monarch_hyperactor::runtime::register_python_bindings(&get_or_add_new_module(
         module,
         "monarch_hyperactor.runtime",

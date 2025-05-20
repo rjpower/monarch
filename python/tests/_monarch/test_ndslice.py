@@ -6,9 +6,9 @@ import math
 import random
 from unittest import TestCase
 
-from monarch._monarch.selection import Selection
-
 from monarch._monarch.shape import Shape, Slice
+
+from monarch._rust_bindings.monarch_hyperactor.selection import Selection
 
 
 class TestNdslice(TestCase):

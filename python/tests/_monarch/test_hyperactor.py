@@ -12,34 +12,30 @@ import pytest
 
 from monarch._monarch.hyperactor import Actor
 
-from monarch._rust_bindings import (  # @manual=//monarch/monarch_extension:monarch_extension
-    hyperactor,
-)
-
 from monarch._rust_bindings.hyperactor_extension import (  # @manual=//monarch/monarch_extension:monarch_extension
-    Alloc,
     AllocConstraints,
     AllocSpec,
 )
+from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
+
+from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
+from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
+from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
 
 
 class MyActor(Actor):
-    async def handle(
-        self, mailbox: hyperactor.Mailbox, message: hyperactor.PythonMessage
-    ) -> None:
+    async def handle(self, mailbox: Mailbox, message: PythonMessage) -> None:
         return None
 
     async def handle_cast(
         self,
-        mailbox: hyperactor.Mailbox,
+        mailbox: Mailbox,
         rank: int,
         coordinates: list[tuple[str, int]],
-        message: hyperactor.PythonMessage,
+        message: PythonMessage,
     ) -> None:
         reply_port = pickle.loads(message.message)
-        mailbox.post(
-            reply_port, hyperactor.PythonMessage("echo", pickle.dumps(coordinates))
-        )
+        mailbox.post(reply_port, PythonMessage("echo", pickle.dumps(coordinates)))
 
 
 def test_import() -> None:
@@ -50,7 +46,7 @@ def test_import() -> None:
 
 
 def test_actor_id() -> None:
-    actor_id = hyperactor.ActorId(world_name="test", rank=0, actor_name="actor")
+    actor_id = ActorId(world_name="test", rank=0, actor_name="actor")
     assert actor_id.pid == 0
     assert str(actor_id) == "test[0].actor[0]"
 
@@ -83,7 +79,7 @@ async def test_proc_mesh() -> None:
     spec = AllocSpec(AllocConstraints(), replica=2)
     allocator = monarch.LocalAllocator()
     alloc = await allocator.allocate(spec)
-    proc_mesh = await hyperactor.ProcMesh.allocate_nonblocking(alloc)
+    proc_mesh = await ProcMesh.allocate_nonblocking(alloc)
     assert str(proc_mesh) == "<ProcMesh { shape: {replica=2} }>"
 
 
@@ -91,14 +87,14 @@ async def test_actor_mesh() -> None:
     spec = AllocSpec(AllocConstraints(), replica=2)
     allocator = monarch.LocalAllocator()
     alloc = await allocator.allocate(spec)
-    proc_mesh = await hyperactor.ProcMesh.allocate_nonblocking(alloc)
+    proc_mesh = await ProcMesh.allocate_nonblocking(alloc)
     actor_mesh = await proc_mesh.spawn_nonblocking("test", MyActor)
 
     assert actor_mesh.get(0) is not None
     assert actor_mesh.get(1) is not None
     assert actor_mesh.get(2) is None
 
-    assert isinstance(actor_mesh.client, hyperactor.Mailbox)
+    assert isinstance(actor_mesh.client, Mailbox)
 
 
 # oss_skip: hangs when run through pytest but not when run through buck
@@ -111,10 +107,10 @@ async def test_proc_mesh_process_allocator() -> None:
     env["HYPERACTOR_MANAGED_SUBPROCESS"] = "1"
     allocator = monarch.ProcessAllocator(sys.argv[0], None, env)
     alloc = await allocator.allocate(spec)
-    proc_mesh = await hyperactor.ProcMesh.allocate_nonblocking(alloc)
+    proc_mesh = await ProcMesh.allocate_nonblocking(alloc)
     actor_mesh = await proc_mesh.spawn_nonblocking("test", MyActor)
     handle, receiver = actor_mesh.client.open_port()
-    actor_mesh.cast(hyperactor.PythonMessage("hello", pickle.dumps(handle.bind())))
+    actor_mesh.cast(PythonMessage("hello", pickle.dumps(handle.bind())))
     coords = {await receiver.recv(), await receiver.recv()}
     # `coords` is a pair of messages. logically:
     # assert coords == {(("replica", 0)), (("replica", 1))}

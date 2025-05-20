@@ -4,13 +4,13 @@ import traceback
 from collections import deque
 from typing import Generator, List, NamedTuple, Optional, Sequence, Tuple, Union
 
-from monarch._rust_bindings.hyperactor import (  # @manual=//monarch/monarch_extension:monarch_extension
-    ActorId,
-)
-
 from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monarch/monarch_extension:monarch_extension
     DebuggerMessage,
     WorldState,
+)
+
+from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
+    ActorId,
 )
 
 from monarch.common import messages

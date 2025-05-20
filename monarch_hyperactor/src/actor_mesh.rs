@@ -47,3 +47,7 @@ impl PythonActorMesh {
         PyShape::from(self.inner.shape().clone())
     }
 }
+pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
+    hyperactor_mod.add_class::<PythonActorMesh>()?;
+    Ok(())
+}

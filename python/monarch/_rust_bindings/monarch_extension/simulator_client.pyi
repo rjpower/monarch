@@ -1,4 +1,4 @@
-from typing import final, Iterator, overload
+from typing import final
 
 @final
 class SimulatorClient:

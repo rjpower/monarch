@@ -11,18 +11,18 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
-from monarch._rust_bindings.hyperactor import (  # @manual=//monarch/monarch_extension:monarch_extension
-    ActorId,
-    init_proc,
-    Proc,
-)
-
-from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monarch/monarch_extension:monarch_extension
+from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monarch/monarch_extension:monarch_extension  # @manual=//monarch/monarch_extension:monarch_extension
     ClientActor,
 )
 from monarch._rust_bindings.monarch_extension.simulator_client import (  # @manual=//monarch/monarch_extension:monarch_extension
     bootstrap_simulator_backend,
     SimulatorClient,
+)
+
+from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
+    ActorId,
+    init_proc,
+    Proc,
 )
 from monarch.common.client import Client
 from monarch.common.constants import (

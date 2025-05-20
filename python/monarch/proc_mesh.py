@@ -3,7 +3,6 @@ import sys
 from typing import Any, cast, Optional, Type, TypeVar
 
 import monarch
-import monarch._rust_bindings.hyperactor as hyperactor  # @manual=//monarch/monarch_extension:monarch_extension
 from monarch import ActorFuture as Future
 
 from monarch._rust_bindings.hyperactor_extension import (  # @manual=//monarch/monarch_extension:monarch_extension  # @manual=//monarch/monarch_extension:monarch_extension
@@ -11,6 +10,8 @@ from monarch._rust_bindings.hyperactor_extension import (  # @manual=//monarch/m
     AllocConstraints,
     AllocSpec,
 )
+from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
+from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
 
 from monarch.python_local_mesh import _local_device_count
 from monarch.rdma import RDMAManager
@@ -26,17 +27,17 @@ except ImportError:
 
 
 async def _allocate_nonblocking(alloc: Alloc) -> "ProcMesh":
-    return ProcMesh(await hyperactor.ProcMesh.allocate_nonblocking(alloc))
+    return ProcMesh(await HyProcMesh.allocate_nonblocking(alloc))
 
 
 def _allocate_blocking(alloc: Alloc) -> "ProcMesh":
-    return ProcMesh(hyperactor.ProcMesh.allocate_blocking(alloc))
+    return ProcMesh(HyProcMesh.allocate_blocking(alloc))
 
 
 class ProcMesh:
-    def __init__(self, hy_proc_mesh: hyperactor.ProcMesh) -> None:
+    def __init__(self, hy_proc_mesh: HyProcMesh) -> None:
         self._proc_mesh = hy_proc_mesh
-        self._mailbox: hyperactor.Mailbox = self._proc_mesh.client
+        self._mailbox: Mailbox = self._proc_mesh.client
         self._rdma_manager = self._spawn_blocking("rdma_manager", RDMAManager)
 
     def spawn(self, name: str, Class: Type[T], *args: Any, **kwargs: Any) -> Future[T]:

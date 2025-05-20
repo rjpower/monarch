@@ -2,7 +2,7 @@
 import traceback
 from typing import Any, List, Optional, Tuple
 
-from monarch._rust_bindings.hyperactor import (  # @manual=//monarch/monarch_extension:monarch_extension
+from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
 

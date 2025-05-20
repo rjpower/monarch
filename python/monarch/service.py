@@ -6,7 +6,6 @@ import itertools
 import logging
 import random
 import traceback
-import warnings
 
 from dataclasses import dataclass
 from traceback import extract_tb, StackSummary
@@ -31,9 +30,18 @@ from typing import (
 )
 
 import monarch
-import monarch._monarch.hyperactor as hyperactor
 from monarch import ActorFuture as Future
 from monarch._monarch.shape import Point
+
+from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
+from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
+from monarch._rust_bindings.monarch_hyperactor.mailbox import (
+    Mailbox,
+    OncePortReceiver,
+    PortId,
+    PortReceiver as HyPortReceiver,
+)
+from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch.common.pickle_flatten import flatten, unflatten
 from monarch.common.shape import MeshTrait, NDSlice, Shape
 
@@ -54,7 +62,7 @@ T2 = TypeVar("T2")
 
 @dataclass
 class MonarchContext:
-    mailbox: hyperactor.Mailbox
+    mailbox: Mailbox
     proc_id: str
     point: Point
 
@@ -120,10 +128,10 @@ Selection = Literal["all", "choose"]  # TODO: replace with real selection object
 class ActorMeshRef:
     def __init__(
         self,
-        mailbox: hyperactor.Mailbox,
-        hy_actor_mesh: Optional[hyperactor.PythonActorMesh],
+        mailbox: Mailbox,
+        hy_actor_mesh: Optional[PythonActorMesh],
         shape: Shape,
-        actor_ids: List[hyperactor.ActorId],
+        actor_ids: List[ActorId],
     ) -> None:
         self._mailbox = mailbox
         self._actor_mesh = hy_actor_mesh
@@ -132,23 +140,18 @@ class ActorMeshRef:
 
     @staticmethod
     def from_hyperactor_mesh(
-        mailbox: hyperactor.Mailbox, hy_actor_mesh: hyperactor.PythonActorMesh
+        mailbox: Mailbox, hy_actor_mesh: PythonActorMesh
     ) -> "ActorMeshRef":
         shape: Shape = hy_actor_mesh.shape
         return ActorMeshRef(
             mailbox,
             hy_actor_mesh,
             hy_actor_mesh.shape,
-            [
-                cast(hyperactor.ActorId, hy_actor_mesh.get(i))
-                for i in range(len(shape.ndslice))
-            ],
+            [cast(ActorId, hy_actor_mesh.get(i)) for i in range(len(shape.ndslice))],
         )
 
     @staticmethod
-    def from_actor_id(
-        mailbox: hyperactor.Mailbox, actor_id: hyperactor.ActorId
-    ) -> "ActorMeshRef":
+    def from_actor_id(mailbox: Mailbox, actor_id: ActorId) -> "ActorMeshRef":
         return ActorMeshRef(mailbox, None, singleton_shape, [actor_id])
 
     @staticmethod
@@ -157,23 +160,23 @@ class ActorMeshRef:
 
     def __getstate__(
         self,
-    ) -> Tuple[Shape, List[hyperactor.ActorId], hyperactor.Mailbox]:
+    ) -> Tuple[Shape, List[ActorId], Mailbox]:
         return self._shape, self._please_replace_me_actor_ids, self._mailbox
 
     def __setstate__(
         self,
-        state: Tuple[Shape, List[hyperactor.ActorId], hyperactor.Mailbox],
+        state: Tuple[Shape, List[ActorId], Mailbox],
     ) -> None:
         self._actor_mesh = None
         self._shape, self._please_replace_me_actor_ids, self._mailbox = state
 
-    def send(self, rank: int, message: hyperactor.PythonMessage) -> None:
+    def send(self, rank: int, message: PythonMessage) -> None:
         actor = self._please_replace_me_actor_ids[rank]
         self._mailbox.post(actor, message)
 
     def cast(
         self,
-        message: hyperactor.PythonMessage,
+        message: PythonMessage,
         selection: Selection,
     ) -> None:
         if selection == "choose":
@@ -210,7 +213,7 @@ class Endpoint(Generic[P, R]):
         actor_mesh_ref: ActorMeshRef,
         name: str,
         impl: Callable[Concatenate[Any, P], Coroutine[Any, Any, R]],
-        mailbox: hyperactor.Mailbox,
+        mailbox: Mailbox,
     ) -> None:
         self._actor_mesh = actor_mesh_ref
         self._name = name
@@ -344,7 +347,7 @@ def send(
     This sends the message to all actors but does not wait for any result.
     """
     endpoint._signature.bind(None, *args, **kwargs)
-    message = hyperactor.PythonMessage(endpoint._name, _pickle((args, kwargs, port)))
+    message = PythonMessage(endpoint._name, _pickle((args, kwargs, port)))
     endpoint._actor_mesh.cast(message, selection)
 
 
@@ -366,14 +369,14 @@ def endpoint(
 
 
 class Port:
-    def __init__(self, port: hyperactor.PortId, mailbox: hyperactor.Mailbox) -> None:
+    def __init__(self, port: PortId, mailbox: Mailbox) -> None:
         self._port = port
         self._mailbox = mailbox
 
     def send(self, method: str, obj: object) -> None:
         self._mailbox.post(
             self._port,
-            hyperactor.PythonMessage(method, _pickle(obj)),
+            PythonMessage(method, _pickle(obj)),
         )
 
 
@@ -386,15 +389,15 @@ def port(
     handle, receiver = (
         endpoint._mailbox.open_once_port() if once else endpoint._mailbox.open_port()
     )
-    port_id: hyperactor.PortId = handle.bind()
+    port_id: PortId = handle.bind()
     return kind(port_id, endpoint._mailbox), PortReceiver(endpoint._mailbox, receiver)
 
 
 class PortReceiver(Generic[R]):
     def __init__(
         self,
-        mailbox: hyperactor.Mailbox,
-        receiver: hyperactor.PortReceiver | hyperactor.OncePortReceiver,
+        mailbox: Mailbox,
+        receiver: HyPortReceiver | OncePortReceiver,
     ):
         self._mailbox = mailbox
         self._receiver = receiver
@@ -405,7 +408,7 @@ class PortReceiver(Generic[R]):
     def _blocking_recv(self) -> R:
         return self._process(self._receiver.blocking_recv())
 
-    def _process(self, msg: hyperactor.PythonMessage):
+    def _process(self, msg: PythonMessage):
         # TODO: Try to do something more structured than a cast here
         payload = cast(R, _unpickle(msg.message, self._mailbox))
         if msg.method == "result":
@@ -434,16 +437,16 @@ class _Actor:
         self.complete_task: object | None = None
 
     def handle(
-        self, mailbox: hyperactor.Mailbox, message: hyperactor.PythonMessage
+        self, mailbox: Mailbox, message: PythonMessage
     ) -> Optional[Coroutine[Any, Any, Any]]:
         return self.handle_cast(mailbox, 0, singleton_shape, message)
 
     def handle_cast(
         self,
-        mailbox: hyperactor.Mailbox,
+        mailbox: Mailbox,
         rank: int,
         shape: Shape,
-        message: hyperactor.PythonMessage,
+        message: PythonMessage,
     ) -> Optional[Coroutine[Any, Any, Any]]:
         port = None
         try:
@@ -497,7 +500,7 @@ class _Actor:
 
 
 def _is_mailbox(x: object) -> bool:
-    return isinstance(x, hyperactor.Mailbox)
+    return isinstance(x, Mailbox)
 
 
 def _pickle(obj: object) -> bytes:
@@ -505,7 +508,7 @@ def _pickle(obj: object) -> bytes:
     return msg
 
 
-def _unpickle(data: bytes, mailbox: hyperactor.Mailbox) -> Any:
+def _unpickle(data: bytes, mailbox: Mailbox) -> Any:
     # regardless of the mailboxes of the remote objects
     # they all become the local mailbox.
     return unflatten(data, itertools.repeat(mailbox))
@@ -532,7 +535,7 @@ class Actor(MeshTrait):
 
 class Service(MeshTrait):
     def __init__(
-        self, Class: Type[T], actor_mesh_ref: ActorMeshRef, mailbox: hyperactor.Mailbox
+        self, Class: Type[T], actor_mesh_ref: ActorMeshRef, mailbox: Mailbox
     ) -> None:
         self._class = Class
         self._actor_mesh_ref = actor_mesh_ref

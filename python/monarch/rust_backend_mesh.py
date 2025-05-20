@@ -4,15 +4,15 @@ import time
 from logging import Logger
 from typing import Any, Callable, Optional, Protocol
 
-from monarch._rust_bindings.hyperactor import (  # @manual=//monarch/monarch_extension:monarch_extension
-    ActorId,
-    init_proc,
-    Proc,
-)
-
 from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monarch/monarch_extension:monarch_extension
     ClientActor,
     SystemSnapshotFilter,
+)
+
+from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
+    ActorId,
+    init_proc,
+    Proc,
 )
 from monarch.common.client import Client
 from monarch.common.device_mesh import DeviceMesh, DeviceMeshStatus

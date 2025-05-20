@@ -1,6 +1,6 @@
 from typing import final, Optional, Union
 
-from monarch._rust_bindings.hyperactor import Serialized
+from monarch._rust_bindings.monarch_hyperactor.proc import Serialized
 from monarch._rust_bindings.monarch_messages.debugger import (
     DebuggerAction,
     DebuggerActionType,

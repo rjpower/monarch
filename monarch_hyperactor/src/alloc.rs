@@ -123,3 +123,10 @@ impl PyProcessAllocator {
         })?
     }
 }
+
+pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
+    hyperactor_mod.add_class::<PyProcessAllocator>()?;
+    hyperactor_mod.add_class::<PyLocalAllocator>()?;
+
+    Ok(())
+}

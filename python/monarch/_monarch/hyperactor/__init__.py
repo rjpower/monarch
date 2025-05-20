@@ -1,35 +1,25 @@
 # pyre-strict
 import abc
 
-from monarch._rust_bindings.hyperactor import (  # @manual=//monarch/monarch_extension:monarch_extension
-    ActorId,
-    init_proc,
-    LocalAllocatorBase,
-    Mailbox,
-    OncePortHandle,
-    OncePortReceiver,
-    PickledMessage,
-    PickledMessageClientActor,
-    PortHandle,
-    PortId,
-    PortReceiver,
-    Proc,
-    ProcessAllocatorBase,
-    ProcMesh,
-    PythonActorHandle as ActorHandle,
-    PythonActorMesh,
-    PythonMessage,
-    Serialized,
-)
-
 from monarch._rust_bindings.hyperactor_extension import (  # @manual=//monarch/monarch_extension:monarch_extension
     Alloc,
     AllocConstraints,
     AllocSpec,
 )
 
-from monarch._rust_bindings.monarch_hyperactor.selection import (  # @manual=//monarch/monarch_extension:monarch_extension
-    Selection,
+from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
+
+from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
+    LocalAllocatorBase,
+)
+
+from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox, PortId
+
+from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
+    ActorId,
+    init_proc,
+    Proc,
+    Serialized,
 )
 
 from monarch._rust_bindings.monarch_hyperactor.shape import (  # @manual=//monarch/monarch_extension:monarch_extension

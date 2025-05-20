@@ -1,14 +1,14 @@
 from typing import final
 
 from monarch import ActorFuture as Future
-
-from monarch._rust_bindings.hyperactor import (  # @manual=//monarch/monarch_extension:monarch_extension
-    LocalAllocatorBase,
-    ProcessAllocatorBase,
-)
 from monarch._rust_bindings.hyperactor_extension import (  # @manual=//monarch/monarch_extension:monarch_extension
     Alloc,
     AllocSpec,
+)
+
+from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
+    LocalAllocatorBase,
+    ProcessAllocatorBase,
 )
 
 

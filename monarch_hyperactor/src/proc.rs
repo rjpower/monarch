@@ -638,3 +638,12 @@ async fn check_actor_supervision_state(
     }
     Ok(())
 }
+
+pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
+    hyperactor_mod.add_function(wrap_pyfunction!(init_proc, hyperactor_mod)?)?;
+
+    hyperactor_mod.add_class::<PyProc>()?;
+    hyperactor_mod.add_class::<PyActorId>()?;
+    hyperactor_mod.add_class::<PySerialized>()?;
+    Ok(())
+}

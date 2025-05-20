@@ -130,3 +130,8 @@ impl PyProcMesh {
         Ok(format!("<ProcMesh {}>", self.inner))
     }
 }
+
+pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
+    hyperactor_mod.add_class::<PyProcMesh>()?;
+    Ok(())
+}

@@ -1,7 +1,7 @@
 from typing import Callable, final, Optional, Sequence, Tuple
 
 import torch
-from monarch._rust_bindings.hyperactor import ActorId
+from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._rust_bindings.monarch_hyperactor.shape import Slice
 
 @final

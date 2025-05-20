@@ -1,4 +1,4 @@
-from typing import final, Optional, Union
+from typing import final, Union
 
 @final
 class DebuggerAction:

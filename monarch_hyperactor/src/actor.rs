@@ -331,3 +331,12 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
         Ok(())
     }
 }
+
+pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
+    hyperactor_mod.add_class::<PickledMessage>()?;
+    hyperactor_mod.add_class::<PickledMessageClientActor>()?;
+    hyperactor_mod.add_class::<PythonActorHandle>()?;
+    hyperactor_mod.add_class::<PythonMessage>()?;
+    hyperactor_mod.add_class::<PythonActorHandle>()?;
+    Ok(())
+}

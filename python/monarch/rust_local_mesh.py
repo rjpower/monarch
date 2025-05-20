@@ -40,7 +40,7 @@ from monarch._monarch.controller import (
 )
 from monarch._monarch.worker import WorkerServerRequest, WorkerServerResponse
 
-from monarch._rust_bindings.hyperactor import (  # @manual=//monarch/monarch_extension:monarch_extension
+from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
 

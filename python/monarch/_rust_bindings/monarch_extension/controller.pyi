@@ -1,9 +1,9 @@
 from enum import Enum
 from typing import Any, final, List, Optional, Tuple, Union
 
-from monarch._rust_bindings.hyperactor import ActorId, Serialized
-
 from monarch._rust_bindings.monarch_extension.worker import Ref, WorkerMessage
+
+from monarch._rust_bindings.monarch_hyperactor.proc import Serialized
 
 from monarch._rust_bindings.monarch_hyperactor.shape import Slice
 

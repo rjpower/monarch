@@ -8,17 +8,13 @@ import os
 
 
 async def main():
-    await hyperactor.bootstrap_main()
+    await bootstrap_main()
 
 
 def invoke_main() -> None:
-    global hyperactor
+    global bootstrap_main
     # TODO: figure out what from worker_main.py we should reproduce here.
-
-    # pyre-ignore[21]
-    from ..._rust_bindings import (  # @manual=//monarch/monarch_extension:monarch_extension
-        hyperactor,
-    )
+    from monarch._rust_bindings.monarch_hyperactor.bootstrap import bootstrap_main
 
     with (
         importlib.resources.path("monarch", "py-spy") as pyspy,
