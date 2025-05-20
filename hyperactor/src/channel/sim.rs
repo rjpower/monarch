@@ -398,6 +398,7 @@ impl Default for SimDispatcher {
 
 #[derive(Debug)]
 pub(crate) struct SimTx<M: RemoteMessage> {
+    src_addr: Option<SimAddr>,
     addr: SimAddr,
     status: watch::Receiver<TxStatus>, // Default impl. Always reports `Active`.
     _phantom: PhantomData<M>,
@@ -434,12 +435,24 @@ impl<M: RemoteMessage> Tx<M> for SimTx<M> {
 
 /// Dial a peer and return a transmitter. The transmitter can retrieve from the
 /// network the link latency.
-pub(crate) fn dial<M: RemoteMessage>(sim_addr: SimAddr) -> Result<SimTx<M>, ChannelError> {
+pub(crate) fn dial<M: RemoteMessage>(
+    addr: SimAddr,
+    dialer: Option<ChannelAddr>,
+) -> Result<SimTx<M>, ChannelError> {
     // This watch channel always reports active. The sender is
     // dropped.
     let (_, status) = watch::channel(TxStatus::Active);
+    let dialer = match dialer {
+        Some(ChannelAddr::Sim(sim_dialer)) => Ok(Some(sim_dialer)),
+        Some(_) => Err(ChannelError::InvalidAddress(
+            "sim address must but be dialed from a sim address".into(),
+        )),
+        None => Ok(None),
+    }?;
+
     Ok(SimTx {
-        addr: sim_addr,
+        src_addr: dialer,
+        addr,
         status,
         _phantom: PhantomData,
     })
@@ -524,7 +537,7 @@ mod tests {
 
             // reverse src and dst since `sim::serve()` will reverse it.
             let (_, mut rx) = sim::serve::<u64>(sim_addr.reversed().clone()).unwrap();
-            let tx = sim::dial::<u64>(sim_addr).unwrap();
+            let tx = sim::dial::<u64>(sim_addr, None).unwrap();
             tx.try_post(123, oneshot::channel().0).unwrap();
             assert_eq!(rx.recv().await.unwrap(), 123);
         }

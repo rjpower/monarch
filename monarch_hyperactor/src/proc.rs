@@ -169,7 +169,8 @@ impl PyProc {
     ) -> Result<Self> {
         let proc_id: ProcId = proc_id.parse()?;
         let bootstrap_addr: ChannelAddr = bootstrap_addr.parse()?;
-        let chan = channel::dial(bootstrap_addr.clone())?;
+        let listen_addr = ChannelAddr::any(bootstrap_addr.transport());
+        let chan = channel::dial_from_address(bootstrap_addr.clone(), listen_addr.clone())?;
         let system_sender = BoxedMailboxSender::new(MailboxClient::new(chan));
         let proc_forwarder =
             BoxedMailboxSender::new(DialMailboxRouter::new_with_default(system_sender));
@@ -185,7 +186,7 @@ impl PyProc {
         let bootstrap = ProcActor::bootstrap_for_proc(
             proc.clone().clone(),
             proc.clone().proc_id().world_id().clone(), // REFACTOR(marius): factor out world id
-            ChannelAddr::any(bootstrap_addr.transport()),
+            listen_addr,
             bootstrap_addr.clone(),
             system_supervision_ref,
             Duration::from_secs(supervision_update_interval_in_sec),

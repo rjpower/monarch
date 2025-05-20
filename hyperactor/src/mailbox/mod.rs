@@ -2153,6 +2153,7 @@ mod tests {
     use crate::PortId;
     use crate::accum;
     use crate::channel::ChannelTransport;
+    use crate::channel::dial;
     use crate::channel::sim;
     use crate::channel::sim::SimAddr;
     use crate::clock::Clock;
@@ -2345,7 +2346,7 @@ mod tests {
         .unwrap();
 
         let (_, rx) = sim::serve::<MessageEnvelope>(sim_addr.reversed().clone()).unwrap();
-        let tx = sim::dial::<MessageEnvelope>(sim_addr).unwrap();
+        let tx = dial::<MessageEnvelope>(ChannelAddr::Sim(sim_addr)).unwrap();
         let mbox = Mailbox::new_detached(id!(test[0].actor0));
         let serve_handle = mbox.clone().serve(rx, monitored_return_handle());
         let client = MailboxClient::new(tx);
