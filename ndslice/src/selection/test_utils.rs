@@ -55,6 +55,29 @@ macro_rules! assert_round_trip {
     }};
 }
 
+/// Determines whether routing frame deduplication is enabled.
+///
+/// By default, deduplication is enabled to reduce redundant routing
+/// steps and improve performance. However, correctness must not
+/// depend on deduplication.
+///
+/// This behavior can be disabled for debugging or testing purposes by
+/// setting the environment variable:
+/// ```ignore
+/// HYPERACTOR_SELECTION_DISABLE_ROUTING_FRAME_DEDUPLICATION = 1
+/// ```
+/// When disabled, all routing steps—including structurally redundant
+/// ones—will be visited, potentially causing re-entry into previously
+/// seen coordinates. This switch helps validate that correctness
+/// derives from the routing algebra itself—not from memoization or
+/// key-based filtering.
+fn allow_frame_dedup() -> bool {
+    // Default: true (deduplication via memoization and normalization
+    // is enabled unless explicitly disabled).
+    std::env::var("HYPERACTOR_SELECTION_DISABLE_ROUTING_FRAME_DEDUPLICATION")
+        .map_or(true, |val| val != "1")
+}
+
 // == Testing (`collect_routed_paths` mesh simulation) ===
 
 /// Message type used in the `collect_routed_paths` mesh routing
@@ -127,7 +150,12 @@ pub fn collect_routed_paths(selection: &Selection, slice: &Slice) -> RoutedPathT
         let mut visitor = |step: RoutingStep| {
             if let RoutingStep::Forward(next_frame) = step {
                 let key = RoutingFrameKey::new(&next_frame);
-                if seen.insert(key) {
+                let should_insert = if allow_frame_dedup() {
+                    seen.insert(key) // true → not seen before
+                } else {
+                    true // unconditionally insert
+                };
+                if should_insert {
                     let next_rank = slice.location(&next_frame.here).unwrap();
                     let parent_rank = *path.last().unwrap();
                     predecessors
@@ -140,7 +168,12 @@ pub fn collect_routed_paths(selection: &Selection, slice: &Slice) -> RoutedPathT
 
                     match next_frame.action() {
                         RoutingAction::Deliver => {
-                            delivered.insert(next_rank, next_path);
+                            if let Some(previous) = delivered.insert(next_rank, next_path.clone()) {
+                                panic!(
+                                    "over-delivery detected: node {} delivered twice\nfirst: {:?}\nsecond: {:?}",
+                                    next_rank, previous, next_path
+                                );
+                            }
                         }
                         RoutingAction::Forward => {
                             pending.push_back(RoutedMessage::new(next_path, next_frame));

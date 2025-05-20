@@ -945,6 +945,7 @@ mod tests {
     use crate::selection::dsl::*;
     use crate::selection::test_utils::RoutedMessage;
     use crate::selection::test_utils::collect_routed_nodes;
+    use crate::selection::test_utils::collect_routed_paths;
     use crate::shape;
 
     // A test slice: (zones = 2, hosts = 4, gpus = 8).
@@ -1620,5 +1621,79 @@ mod tests {
 
         // Inner selection should still be All(All(True))
         assert!(matches!(hop.selection, Selection::All(_)));
+    }
+
+    // This test relies on a deep structural property of the routing
+    // semantics:
+    //
+    //   Overdelivery is prevented not by ad hoc guards, but by the
+    //   structure of the traversal itself — particularly in the
+    //   presence of routing frame deduplication.
+    //
+    // When a frame reaches the final dimension with `selection ==
+    // True`, it becomes a delivery frame. If multiple such frames
+    // target the same coordinate, then:
+    //
+    //   - They must share the same coordinate `here`
+    //   - They must have reached it via the same routing path (by the
+    //     Unique Path Theorem)
+    //   - Their `RoutingFrame` state is thus structurally identical:
+    //       - Same `here`
+    //       - Same `dim` (equal to `slice.num_dim()`)
+    //       - Same residual `selection == True`
+    //
+    // The deduplication logic (via `RoutingFrameKey`) collapses such
+    // structurally equivalent frames. As a result, only one frame
+    // delivers to the target coordinate, and overdelivery is
+    // structurally ruled out.
+    //
+    // This test verifies that behavior holds as expected — and, when
+    // deduplication is disabled, confirms that overdelivery becomes
+    // observable.
+    #[test]
+    fn test_routing_deduplication_precludes_overdelivery() {
+        // Ensure the environment is clean — this test depends on a
+        // known configuration of deduplication behavior.
+        let var = "HYPERACTOR_SELECTION_DISABLE_ROUTING_FRAME_DEDUPLICATION";
+        assert!(
+            std::env::var_os(var).is_none(),
+            "env var `{}` should not be set prior to test",
+            var
+        );
+        let slice = test_slice();
+
+        // Construct a structurally duplicated selection.
+        //
+        // The union duplicates a singleton selection expression.
+        // Without deduplication, this would result in two logically
+        // identical frames targeting the same node — which should
+        // trigger an over-delivery panic in the simulation.
+        let a = range(0, range(0, range(0, true_())));
+        let sel = union(a.clone(), a.clone());
+
+        // Sanity check: with deduplication enabled (default), this
+        // selection does not cause overdelivery.
+        let result = std::panic::catch_unwind(|| {
+            let _ = collect_routed_paths(&sel, &slice);
+        });
+        assert!(result.is_ok(), "Unexpected panic due to overdelivery");
+
+        // Now explicitly disable deduplication.
+        std::env::set_var(var, "1");
+
+        // Expect overdelivery: the duplicated union arms will each
+        // produce a delivery to the same coordinate.
+        let result = std::panic::catch_unwind(|| {
+            let _ = collect_routed_paths(&sel, &slice);
+        });
+
+        // Clean up: restore environment to avoid affecting other
+        // tests.
+        std::env::remove_var(var);
+
+        assert!(
+            result.is_err(),
+            "Expected panic due to overdelivery, but no panic occurred"
+        );
     }
 }
