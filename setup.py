@@ -123,6 +123,11 @@ setup(
         controller_C,
         common_C,
     ],
+    entry_points={
+        "console_scripts": [
+            "monarch=monarch.tools.cli:main",
+        ],
+    },
     rust_extensions=[
         RustExtension(
             "monarch._rust_bindings",
