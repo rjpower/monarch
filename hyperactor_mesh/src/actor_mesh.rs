@@ -57,7 +57,7 @@ impl Deref for ProcMeshRef<'_> {
     fn deref(&self) -> &Self::Target {
         match self {
             Self::Shared(p) => p,
-            Self::Borrowed(p) => p.deref(),
+            Self::Borrowed(p) => p, // p: &ProcMesh
         }
     }
 }
