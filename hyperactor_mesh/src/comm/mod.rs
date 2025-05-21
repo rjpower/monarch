@@ -449,7 +449,7 @@ mod tests {
     use maplit::btreemap;
     use maplit::hashmap;
     use ndslice::selection;
-    use ndslice::selection::test_utils::collect_routed_paths;
+    use ndslice::selection::test_utils::collect_commactor_routing_tree;
     use test_utils::*;
     use timed_test::async_timed_test;
     use tracing::Level;
@@ -583,8 +583,8 @@ mod tests {
     //     * verify all remaining ports are comm actor ports;
     //     * remove the actor information and return a rank-based tree representation.
     //
-    //  The rank-based tree representation is what [collect_routed_paths] returns.
-    //  This conversion enables us to compare the path against [collect_routed_paths]'s result.
+    //  The rank-based tree representation is what [collect_commactor_routing_tree] returns.
+    //  This conversion enables us to compare the path against [collect_commactor_routing_tree]'s result.
     //
     //      For example, for a 2x2 slice, the port tree could look like:
     //      dest[0].comm[0][1028] -> [client[0].client_user[0][1025], dest[0].comm[0][1028]]
@@ -746,13 +746,9 @@ mod tests {
         {
             // Get the paths used in casting
             let sel_paths = PathToLeaves(
-                collect_routed_paths(&uslice.selection, &uslice.slice)
+                collect_commactor_routing_tree(&uslice.selection, &uslice.slice)
                     .delivered
                     .into_iter()
-                    .map(|(d, mut path)| {
-                        path.dedup();
-                        (d, path)
-                    })
                     .collect(),
             );
 
