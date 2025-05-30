@@ -64,6 +64,12 @@ jobs:
 
         # Build wheel
         python setup.py bdist_wheel
+    - name: Store the distribution packages
+      uses: actions/upload-artifact@v4
+      with:
+        name: python-package-distributions
+        path: dist/Add comment
+
   publish-to-pypi:
     name: >-
       Publish Python 🐍 distribution 📦 to PyPI
