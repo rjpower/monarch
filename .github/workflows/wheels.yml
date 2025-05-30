@@ -4,10 +4,15 @@ on:
   push:
     branches:
       - main
+    paths:
+      - .github/workflows/wheels.yml
   pull_request:
     branches:
       - main
-      - gh/**
+    paths:
+      - .github/workflows/wheels.yml
+  schedule:
+    - cron: '0 0 * * *'  # Daily at midnight UTC
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
@@ -56,9 +61,6 @@ jobs:
         # Install Python dependencies
         pip install setuptools-rust
         pip install pyzmq requests numpy pyre-extensions
-
-        # Test dependencies
-        pip install pytest cloudpickle pytest-timeout pytest-asyncio
 
         # Build wheel
         python setup.py bdist_wheel
