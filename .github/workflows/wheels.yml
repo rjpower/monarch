@@ -68,7 +68,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: python-package-distributions
-        path: dist/Add comment
+        path: dist/
 
   publish-to-pypi:
     name: >-
