@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  build:
     name: cuda12.6-py${{ matrix.python-version }}-${{ matrix.name }}
     strategy:
       fail-fast: false  # Changed to false to see results from all Python versions
@@ -64,3 +64,26 @@ jobs:
 
         # Build wheel
         python setup.py bdist_wheel
+  publish-to-pypi:
+    name: >-
+      Publish Python 🐍 distribution 📦 to PyPI
+    needs:
+    - build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/torchmonarch/
+    permissions:
+      id-token: write  # IMPORTANT: mandatory for trusted publishing
+
+    steps:
+    - name: Download all the dists
+      uses: actions/download-artifact@v4
+      with:
+        name: python-package-distributions
+        path: dist/
+    - name: Publish distribution 📦 to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+
+
+
