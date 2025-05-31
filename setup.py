@@ -116,7 +116,7 @@ setup(
     package_dir={"": "python"},
     python_requires=">= 3.10",
     install_requires=reqs.strip().split("\n"),
-    license="BSD",
+    license="BSD-3-Clause",
     author="Meta",
     author_email="oncall+monarch@xmail.facebook.com",
     description="Monarch: Single controller library",
