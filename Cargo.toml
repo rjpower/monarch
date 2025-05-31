@@ -14,3 +14,5 @@ members = [
     "nccl-sys",
     "torch-sys",
 ]
+
+resolver = "3"
