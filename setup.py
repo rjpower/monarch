@@ -108,7 +108,7 @@ with open("README.md", encoding="utf8") as f:
 
 setup(
     name="monarch",
-    version="1.0",
+    version="0.0.1",
     packages=find_packages(
         where="python",
         exclude=["python/tests.*", "python/tests"],
