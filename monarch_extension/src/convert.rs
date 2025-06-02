@@ -452,13 +452,6 @@ pub fn convert<'py>(m: Bound<'py, PyAny>) -> PyResult<WorkerMessage> {
     converter(MessageParser::new(m))
 }
 
-#[pyfunction]
-pub fn print_convert(m: Bound<'_, PyAny>) -> PyResult<()> {
-    convert(m)?;
-    Ok(())
-}
-
-pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
-    hyperactor_mod.add_function(wrap_pyfunction!(print_convert, hyperactor_mod)?)?;
+pub fn register_python_bindings(_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
