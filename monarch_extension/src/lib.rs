@@ -10,6 +10,7 @@
 
 mod client;
 mod controller;
+pub mod convert;
 mod debugger;
 mod simulator_client;
 mod worker;
@@ -133,6 +134,11 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
     ::monarch_worker::bootstrap::register_python_bindings(&get_or_add_new_module(
         module,
         "monarch_worker.bootstrap",
+    )?)?;
+
+    crate::convert::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_extension.convert",
     )?)?;
 
     Ok(())

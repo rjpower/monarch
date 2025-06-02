@@ -270,6 +270,12 @@ impl From<ActorId> for PyActorId {
     }
 }
 
+impl Into<ActorId> for PyActorId {
+    fn into(self) -> ActorId {
+        self.inner
+    }
+}
+
 #[pymethods]
 impl PyActorId {
     #[new]

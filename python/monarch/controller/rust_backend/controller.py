@@ -10,7 +10,7 @@ import logging
 import traceback
 from collections import deque
 from logging import Logger
-from typing import cast, List, NamedTuple, Optional, Sequence, Union
+from typing import List, NamedTuple, Optional, Sequence, Union
 
 from monarch._rust_bindings.monarch_extension import (
     client,
@@ -27,6 +27,7 @@ from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarc
     ActorId,
     Proc,
 )
+
 from monarch._rust_bindings.monarch_messages.debugger import DebuggerAction
 from monarch.common.controller_api import LogMessage, MessageResult
 from monarch.common.device_mesh import no_mesh
@@ -69,14 +70,7 @@ class RustController:
         msg: NamedTuple,
     ) -> None:
         if hasattr(msg, "to_rust_message"):
-            casted_msg = cast(SupportsToRustMessage, msg)
-
-            self._actor.send(
-                self._controller_actor,
-                controller.Send(
-                    ranks=ranks, message=casted_msg.to_rust_message()
-                ).serialize(),
-            )
+            self._actor.send_obj(self._controller_actor, ranks, msg)
         else:
             raise RuntimeError(
                 f"Message {msg} does not have a to_rust_message method. "
