@@ -13,7 +13,7 @@ mod controller;
 pub mod convert;
 mod debugger;
 mod simulator_client;
-mod worker;
+mod tensor_worker;
 
 use pyo3::prelude::*;
 
@@ -62,7 +62,10 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
 
     client::register_python_bindings(&get_or_add_new_module(module, "monarch_extension.client")?)?;
-    worker::register_python_bindings(&get_or_add_new_module(module, "monarch_extension.worker")?)?;
+    tensor_worker::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_extension.tensor_worker",
+    )?)?;
 
     controller::register_python_bindings(&get_or_add_new_module(
         module,
@@ -131,9 +134,9 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "controller.bootstrap",
     )?)?;
 
-    ::monarch_worker::bootstrap::register_python_bindings(&get_or_add_new_module(
+    ::monarch_tensor_worker::bootstrap::register_python_bindings(&get_or_add_new_module(
         module,
-        "monarch_worker.bootstrap",
+        "monarch_tensor_worker.bootstrap",
     )?)?;
 
     crate::convert::register_python_bindings(&get_or_add_new_module(
