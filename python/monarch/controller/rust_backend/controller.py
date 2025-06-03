@@ -69,13 +69,7 @@ class RustController:
         ranks: Union[NDSlice, List[NDSlice]],
         msg: NamedTuple,
     ) -> None:
-        if hasattr(msg, "to_rust_message"):
-            self._actor.send_obj(self._controller_actor, ranks, msg)
-        else:
-            raise RuntimeError(
-                f"Message {msg} does not have a to_rust_message method. "
-                "Please implement it to send the message to the controller."
-            )
+        self._actor.send_obj(self._controller_actor, ranks, msg)
 
     def drop_refs(self, refs: Sequence[tensor_worker.Ref]) -> None:
         self._actor.drop_refs(self._controller_actor, list(refs))
