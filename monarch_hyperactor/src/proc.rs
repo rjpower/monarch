@@ -186,12 +186,10 @@ impl PyProc {
         } else {
             ChannelAddr::any(bootstrap_addr.transport())
         };
-        let chan = channel::dial_from_address(bootstrap_addr.clone(), listen_addr.clone())?;
+        let chan = channel::dial(bootstrap_addr.clone())?;
         let system_sender = BoxedMailboxSender::new(MailboxClient::new(chan));
-        let proc_forwarder = BoxedMailboxSender::new(DialMailboxRouter::new_with_default(
-            listen_addr.clone(),
-            system_sender,
-        ));
+        let proc_forwarder =
+            BoxedMailboxSender::new(DialMailboxRouter::new_with_default(system_sender));
         let proc = Proc::new_with_clock(
             proc_id.clone(),
             proc_forwarder,
@@ -270,9 +268,9 @@ impl From<ActorId> for PyActorId {
     }
 }
 
-impl Into<ActorId> for PyActorId {
-    fn into(self) -> ActorId {
-        self.inner
+impl From<PyActorId> for ActorId {
+    fn from(val: PyActorId) -> Self {
+        val.inner
     }
 }
 
