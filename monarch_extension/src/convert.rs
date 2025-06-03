@@ -166,12 +166,6 @@ impl<'a> MessageParser<'a> {
             Ok(Some(create_function(f)?))
         }
     }
-    fn parse_args(&self, name: &str) -> PyResult<Bound<'a, PyTuple>> {
-        self.parse(name)
-    }
-    fn parse_kwargs(&self, name: &str) -> PyResult<Bound<'a, PyDict>> {
-        self.parse(name)
-    }
     #[allow(non_snake_case)]
     fn parseNDSlice(&self, name: &str) -> PyResult<Slice> {
         let slice: PySlice = self.parse(name)?;
@@ -229,8 +223,8 @@ fn create_map(py: Python) -> HashMap<u64, FnType> {
     });
     m.insert(key("CallFunction"), |p| {
         let function = p.parseFunction("function")?;
-        let args = p.parse_args("args")?;
-        let kwargs = p.parse_kwargs("kwargs")?;
+        let args = p.parse("args")?;
+        let kwargs = p.parse("kwargs")?;
 
         let (args, kwargs) = func_call_args_to_wire_values(Some(&function), &args, &kwargs)?;
         Ok(WorkerMessage::CallFunction(CallFunctionParams {
@@ -341,8 +335,8 @@ fn create_map(py: Python) -> HashMap<u64, FnType> {
     });
     m.insert(key("CreatePipe"), |p| {
         let function = p.parseFunction("function")?;
-        let args = p.parse_args("args")?;
-        let kwargs = p.parse_kwargs("kwargs")?;
+        let args = p.parse("args")?;
+        let kwargs = p.parse("kwargs")?;
         let (args, kwargs) = func_call_args_to_wire_values(Some(&function), &args, &kwargs)?;
         Ok(WorkerMessage::CreatePipe {
             result: p.parseRef("result")?,
@@ -356,8 +350,8 @@ fn create_map(py: Python) -> HashMap<u64, FnType> {
     });
     m.insert(key("SendValue"), |p|  {
             let function = p.parseOptionalFunction("function")?;
-            let args = p.parse_args("args")?;
-            let kwargs = p.parse_kwargs("kwargs")?;
+            let args: Bound<'_, PyTuple> = p.parse("args")?;
+            let kwargs: Bound<'_, PyDict> = p.parse("kwargs")?;
 
             if function.is_none() && (args.len() != 1 || !kwargs.is_empty()) {
                 return Err(PyValueError::new_err(
