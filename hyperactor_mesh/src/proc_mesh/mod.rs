@@ -376,6 +376,9 @@ impl ProcMesh {
                 .collect(),
         })
     }
+    pub fn shape(&self) -> &Shape {
+        &self.shape
+    }
 }
 
 /// Proc lifecycle events.
