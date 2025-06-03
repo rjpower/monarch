@@ -5,9 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import pytest
+from monarch.actor_mesh import Actor, ActorMeshRefCallFailedException, endpoint
 
 from monarch.proc_mesh import proc_mesh
-from monarch.service import Actor, endpoint, ServiceCallFailedException
 
 
 class ExceptionActor(Actor):
@@ -43,7 +43,9 @@ async def test_actor_exception(actor_class, actor_name, num_procs):
     proc = await proc_mesh(gpus=num_procs)
     exception_actor = await proc.spawn(actor_name, actor_class)
 
-    with pytest.raises(ServiceCallFailedException, match="This is a test exception"):
+    with pytest.raises(
+        ActorMeshRefCallFailedException, match="This is a test exception"
+    ):
         if num_procs == 1:
             await exception_actor.raise_exception.call_one()
         else:
@@ -65,7 +67,9 @@ def test_actor_exception_sync(actor_class, actor_name, num_procs):
     proc = proc_mesh(gpus=num_procs).get()
     exception_actor = proc.spawn(actor_name, actor_class).get()
 
-    with pytest.raises(ServiceCallFailedException, match="This is a test exception"):
+    with pytest.raises(
+        ActorMeshRefCallFailedException, match="This is a test exception"
+    ):
         if num_procs == 1:
             exception_actor.raise_exception.call_one().get()
         else:

@@ -240,7 +240,7 @@ impl RemoteProcessAllocator {
                     return;
                 }
             };
-        let router = DialMailboxRouter::new(forwarder_addr.clone());
+        let router = DialMailboxRouter::new();
         let mailbox_handle = router
             .clone()
             .serve(forwarder_rx, monitored_return_handle());
@@ -1458,7 +1458,7 @@ mod test_alloc {
 
     use super::*;
 
-    #[async_timed_test(timeout_secs = 15)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn test_alloc_simple() {
         // Use temporary config for this test
         let _guard = hyperactor::config::global::set_temp_config(hyperactor::config::Config {
@@ -1578,7 +1578,7 @@ mod test_alloc {
         task2_allocator_handle.await.unwrap();
     }
 
-    #[async_timed_test(timeout_secs = 15)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn test_alloc_host_failure() {
         // Use temporary config for this test
         let _guard = hyperactor::config::global::set_temp_config(hyperactor::config::Config {

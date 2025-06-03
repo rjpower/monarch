@@ -7,21 +7,18 @@
 import operator
 from types import ModuleType
 
-import pytest
-
 import torch
-
-from monarch.proc_mesh import local_proc_mesh, proc_mesh
-from monarch.rdma import RDMABuffer
-from monarch.service import (
+from monarch.actor_mesh import (
     Accumulator,
     Actor,
     current_actor_name,
     current_rank,
     current_size,
     endpoint,
-    ServiceCallFailedException,
 )
+
+from monarch.proc_mesh import local_proc_mesh, proc_mesh
+from monarch.rdma import RDMABuffer
 
 
 class Counter(Actor):
