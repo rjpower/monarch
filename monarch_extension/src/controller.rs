@@ -19,7 +19,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::worker::PyWorkerMessage;
+use crate::tensor_worker::PyWorkerMessage;
 
 #[pyclass(
     frozen,
@@ -62,7 +62,7 @@ impl Node {
 }
 
 #[derive(Clone, FromPyObject)]
-enum PyRanks {
+pub enum PyRanks {
     Slice(PySlice),
     SliceList(Vec<PySlice>),
 }
@@ -87,6 +87,7 @@ impl Send {
                 Ranks::SliceList(r.into_iter().map(|r| r.into()).collect())
             }
         };
+        // println!("send: {:?}", &message.message);
         Ok(Self {
             ranks,
             message: message.to_serialized()?,
@@ -106,14 +107,15 @@ impl Send {
         let worker_message = self.message.deserialized().map_err(|err| {
             PyRuntimeError::new_err(format!("Failed to deserialize worker message: {}", err))
         })?;
-        crate::worker::worker_message_to_py(py, &worker_message)
+        crate::tensor_worker::worker_message_to_py(py, &worker_message)
     }
 
     fn serialize(&self) -> PyResult<PySerialized> {
-        PySerialized::new(&ControllerMessage::Send {
+        let msg = ControllerMessage::Send {
             ranks: self.ranks.clone(),
             message: self.message.clone(),
-        })
+        };
+        PySerialized::new(&msg)
     }
 
     #[staticmethod]
