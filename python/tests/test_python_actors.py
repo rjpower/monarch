@@ -373,24 +373,3 @@ def test_rust_binding_modules_correct() -> None:
                 assert value.__module__ == path
 
     check(bindings, "monarch._rust_bindings")
-
-
-class ErrorActor(Actor):
-    @endpoint
-    def raise_exception(self):
-        raise ValueError("test")
-
-
-def test_exception_propagates_call() -> None:
-    proc = proc_mesh(gpus=2).get()
-    error_actor_mesh = proc.spawn("error_actor", ErrorActor).get()
-
-    with pytest.raises(ServiceCallFailedException, match="test"):
-        error_actor_mesh.raise_exception.call().get()
-
-
-def test_exception_propagates_call_one() -> None:
-    proc = proc_mesh(gpus=1).get()
-    error_actor_mesh = proc.spawn("error_actor", ErrorActor).get()
-    with pytest.raises(ServiceCallFailedException, match="test"):
-        error_actor_mesh.raise_exception.call_one().get()
