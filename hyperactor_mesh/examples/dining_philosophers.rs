@@ -21,6 +21,7 @@ use hyperactor::PortRef;
 use hyperactor::message::IndexedErasedUnbound;
 use hyperactor_mesh::Mesh;
 use hyperactor_mesh::ProcMesh;
+use hyperactor_mesh::RootActorMesh;
 use hyperactor_mesh::actor_mesh::ActorMesh;
 use hyperactor_mesh::actor_mesh::Cast;
 use hyperactor_mesh::alloc::AllocSpec;
