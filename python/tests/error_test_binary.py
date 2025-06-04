@@ -74,6 +74,8 @@ def _run_error_test_sync(num_procs, sync_endpoint, endpoint_name):
     else:
         raise ValueError(f"Unknown endpoint name: {endpoint_name}")
 
+    # Exercise both call() and call_one() in our tests, to check that error
+    # aggregation behavior is consistent.
     if num_procs == 1:
         endpoint.call_one().get()
     else:
@@ -103,6 +105,8 @@ def _run_error_test(num_procs, sync_endpoint, endpoint_name):
         else:
             raise ValueError(f"Unknown endpoint name: {endpoint_name}")
 
+        # Exercise both call() and call_one() in our tests, to check that error
+        # aggregation behavior is consistent.
         if num_procs == 1:
             await endpoint.call_one()
         else:
