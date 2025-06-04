@@ -7,11 +7,13 @@
 import ctypes
 import sys
 
+from monarch._rust_bindings.monarch_extension.panic import panicking_function
+
 from monarch.actor_mesh import Actor, endpoint
 from monarch.proc_mesh import proc_mesh
 
 
-class SegfaultActor(Actor):
+class ErrorActor(Actor):
     """An actor that has endpoints cause segfaults."""
 
     @endpoint
@@ -26,8 +28,13 @@ class SegfaultActor(Actor):
         # Calling this function will cause a segfault
         invalid_function()
 
+    @endpoint
+    async def cause_panic(self) -> None:
+        """Endpoint that calls a Rust function that panics."""
+        panicking_function()
 
-class SegfaultActorSync(Actor):
+
+class ErrorActorSync(Actor):
     """An actor that has endpoints cause segfaults."""
 
     @endpoint  # pyre-ignore
@@ -42,45 +49,64 @@ class SegfaultActorSync(Actor):
         # Calling this function will cause a segfault
         invalid_function()
 
+    @endpoint  # pyre-ignore
+    def cause_panic(self) -> None:
+        """Endpoint that calls a Rust function that panics."""
+        panicking_function()
 
-def _run_segfault_test_sync(num_procs, sync_endpoint):
+
+def _run_error_test_sync(num_procs, sync_endpoint, endpoint_name):
     proc = proc_mesh(gpus=num_procs).get()
     if sync_endpoint:
-        actor_class = SegfaultActorSync
+        actor_class = ErrorActorSync
     else:
-        actor_class = SegfaultActor
-    segfault_actor = proc.spawn("segfault_actor", actor_class).get()
+        actor_class = ErrorActor
+    error_actor = proc.spawn("error_actor", actor_class).get()
 
     # This output is checked in the test to make sure that the process actually got here
     print("I actually ran")
     sys.stdout.flush()
 
-    if num_procs == 1:
-        segfault_actor.cause_segfault.call_one().get()
+    if endpoint_name == "cause_segfault":
+        endpoint = error_actor.cause_segfault
+    elif endpoint_name == "cause_panic":
+        endpoint = error_actor.cause_panic
     else:
-        segfault_actor.cause_segfault.call().get()
+        raise ValueError(f"Unknown endpoint name: {endpoint_name}")
+
+    if num_procs == 1:
+        endpoint.call_one().get()
+    else:
+        endpoint.call().get()
 
 
-def _run_segfault_test(num_procs, sync_endpoint):
+def _run_error_test(num_procs, sync_endpoint, endpoint_name):
     import asyncio
 
     if sync_endpoint:
-        actor_class = SegfaultActorSync
+        actor_class = ErrorActorSync
     else:
-        actor_class = SegfaultActor
+        actor_class = ErrorActor
 
     async def run_test():
         proc = await proc_mesh(gpus=num_procs)
-        segfault_actor = await proc.spawn("segfault_actor", actor_class)
+        error_actor = await proc.spawn("error_actor", actor_class)
 
         # This output is checked in the test to make sure that the process actually got here
         print("I actually ran")
         sys.stdout.flush()
 
-        if num_procs == 1:
-            await segfault_actor.cause_segfault.call_one()
+        if endpoint_name == "cause_segfault":
+            endpoint = error_actor.cause_segfault
+        elif endpoint_name == "cause_panic":
+            endpoint = error_actor.cause_panic
         else:
-            await segfault_actor.cause_segfault.call()
+            raise ValueError(f"Unknown endpoint name: {endpoint_name}")
+
+        if num_procs == 1:
+            await endpoint.call_one()
+        else:
+            await endpoint.call()
 
     asyncio.run(run_test())
 
@@ -92,16 +118,17 @@ def main():
     parser.add_argument("--num-procs", type=int)
     parser.add_argument("--sync-test-impl", type=bool)
     parser.add_argument("--sync-endpoint", type=bool)
+    parser.add_argument("--endpoint-name", type=str)
     args = parser.parse_args()
 
     print(
-        f"Running segfault test: {args.num_procs=} {args.sync_test_impl=} {args.sync_endpoint=}"
+        f"Running segfault test: {args.num_procs=} {args.sync_test_impl=} {args.sync_endpoint=}, {args.endpoint_name=}"
     )
 
     if args.sync_test_impl:
-        _run_segfault_test_sync(args.num_procs, args.sync_endpoint)
+        _run_error_test_sync(args.num_procs, args.sync_endpoint, args.endpoint_name)
     else:
-        _run_segfault_test(args.num_procs, args.sync_endpoint)
+        _run_error_test(args.num_procs, args.sync_endpoint, args.endpoint_name)
 
 
 if __name__ == "__main__":
