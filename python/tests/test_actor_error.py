@@ -80,6 +80,7 @@ def test_actor_exception_sync(actor_class, actor_name, num_procs):
 
 
 # oss_skip: importlib not pulling resource correctly in git CI, needs to be revisited
+@pytest.mark.oss_skip
 @pytest.mark.parametrize("num_procs", [1, 2])
 @pytest.mark.parametrize("sync_endpoint", [False, True])
 @pytest.mark.parametrize("sync_test_impl", [False, True])
