@@ -55,6 +55,8 @@ def _run_segfault_test_sync(num_procs, sync_endpoint):
     print("I actually ran")
     sys.stdout.flush()
 
+    # Exercise both call() and call_one() in our tests, to check that error
+    # aggregation behavior is consistent.
     if num_procs == 1:
         segfault_actor.cause_segfault.call_one().get()
     else:
@@ -77,6 +79,8 @@ def _run_segfault_test(num_procs, sync_endpoint):
         print("I actually ran")
         sys.stdout.flush()
 
+        # Exercise both call() and call_one() in our tests, to check that error
+        # aggregation behavior is consistent.
         if num_procs == 1:
             await segfault_actor.cause_segfault.call_one()
         else:
