@@ -317,6 +317,17 @@ impl Slice {
         let view_elems: usize = new_sizes.iter().product();
         let base_elems: usize = self.sizes().iter().product();
 
+        // TODO: This version of `view` requires that `self` be
+        // "dense":
+        //
+        //   - `self.offset == 0`
+        //   - `self.strides` match the row-major layout for
+        //     `self.sizes`
+        //   - `self.len() == self.sizes.iter().product::<usize>()`
+        //
+        // Future iterations of this function will aim to relax or
+        // remove the "dense" requirement where possible.
+
         if view_elems != base_elems {
             return Err(SliceError::IncompatibleView {
                 reason: format!(
@@ -325,7 +336,6 @@ impl Slice {
                 ),
             });
         }
-        // TODO:
         if self.offset != 0 {
             return Err(SliceError::IncompatibleView {
                 reason: format!("view requires base offset = 0, but found {}", self.offset),
@@ -674,6 +684,30 @@ mod tests {
         assert_eq!(flat.strides(), &[1]);
         assert_eq!(
             flat.location(&[23]).unwrap(),
+            base.location(&[1, 2, 3]).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_view_of_view_when_dense() {
+        // Start with a dense base: 2 × 3 × 4 = 24 elements.
+        let base = Slice::new_row_major([2, 3, 4]);
+
+        // First view: flatten to 1D.
+        let flat = base.view(&[24]).unwrap();
+        assert_eq!(flat.sizes(), &[24]);
+        assert_eq!(flat.strides(), &[1]);
+        assert_eq!(flat.offset(), 0); // Still dense.
+
+        // Second view: reshape 1D to 6 × 4.
+        let reshaped = flat.view(&[6, 4]).unwrap();
+        assert_eq!(reshaped.sizes(), &[6, 4]);
+        assert_eq!(reshaped.strides(), &[4, 1]);
+        assert_eq!(reshaped.offset(), 0);
+
+        // Location agreement check
+        assert_eq!(
+            reshaped.location(&[5, 3]).unwrap(),
             base.location(&[1, 2, 3]).unwrap()
         );
     }
