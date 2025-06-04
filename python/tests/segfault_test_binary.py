@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import ctypes
+import sys
 
 from monarch.actor_mesh import Actor, endpoint
 from monarch.proc_mesh import proc_mesh
@@ -52,6 +53,7 @@ def _run_segfault_test_sync(num_procs, sync_endpoint):
 
     # This output is checked in the test to make sure that the process actually got here
     print("I actually ran")
+    sys.stdout.flush()
 
     if num_procs == 1:
         segfault_actor.cause_segfault.call_one().get()
@@ -73,6 +75,7 @@ def _run_segfault_test(num_procs, sync_endpoint):
 
         # This output is checked in the test to make sure that the process actually got here
         print("I actually ran")
+        sys.stdout.flush()
 
         if num_procs == 1:
             await segfault_actor.cause_segfault.call_one()
