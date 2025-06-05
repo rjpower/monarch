@@ -39,7 +39,7 @@ from typing import (
 import monarch
 from monarch import ActorFuture as Future
 
-from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
+from monarch._rust_bindings.monarch_hyperactor.actor import PanicFlag, PythonMessage
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
@@ -463,7 +463,7 @@ class _Actor:
         self.complete_task: asyncio.Task | None = None
 
     def handle(
-        self, mailbox: Mailbox, message: PythonMessage, panic_flag: Any
+        self, mailbox: Mailbox, message: PythonMessage, panic_flag: PanicFlag
     ) -> Optional[Coroutine[Any, Any, Any]]:
         return self.handle_cast(mailbox, 0, singleton_shape, message, panic_flag)
 
@@ -473,7 +473,7 @@ class _Actor:
         rank: int,
         shape: Shape,
         message: PythonMessage,
-        panic_flag: Any,
+        panic_flag: PanicFlag,
     ) -> Optional[Coroutine[Any, Any, Any]]:
         port = None
         try:
