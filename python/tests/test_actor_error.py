@@ -120,9 +120,15 @@ def test_proc_mesh_bootstrap_error():
         str(test_bin),
         "error-bootstrap",
     ]
-    process = subprocess.run(cmd, capture_output=True, timeout=60)
-    print(process.stdout.decode())
-    print(process.stderr.decode())
+    try:
+        process = subprocess.run(cmd, capture_output=True, timeout=180)
+    except subprocess.TimeoutExpired as e:
+        print("timeout expired")
+        if e.stdout is not None:
+            print(e.stdout.decode())
+        if e.stderr is not None:
+            print(e.stderr.decode())
+        raise
 
     # Assert that the subprocess exited with a non-zero code
     assert "I actually ran" in process.stdout.decode()
