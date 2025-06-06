@@ -1016,13 +1016,9 @@ impl Selection {
     /// ...
     /// ```
     pub fn of_slice(slice: &Slice) -> Selection {
-        let mut acc = dsl::false_();
-        for coord in CartesianIterator::new(slice.sizes()) {
-            let sel = coord
-                .iter()
-                .rev()
-                .fold(dsl::true_(), |acc, &i| dsl::range(i..=i, acc));
-            acc = dsl::union(acc, sel);
+        let mut acc = dsl::true_();
+        for d in (0..slice.num_dim()).rev() {
+            acc = dsl::range(0..slice.sizes()[d], acc);
         }
         acc
     }
@@ -2123,11 +2119,6 @@ mod tests {
         );
     }
 
-    // This view is non-contiguous.
-    //
-    // Note in the view `Slice { offset: 2, sizes: [2, 1], strides:
-    // [4, 1] }`, `strides[0] > 1` - this means there's space between
-    // the elements in the outer dimension.
     #[test]
     fn test_of_slice_handles_non_contiguous_view() {
         let shape = shape!(host = 2, gpu = 4); // shape [2, 4]
@@ -2137,11 +2128,37 @@ mod tests {
         let selected = select!(shape, gpu = 2).unwrap(); // (0, 2) and (1, 2)
         let view = selected.slice();
 
-        let sel = Selection::of_slice(view);
-        let expected = vec![2, 6];
+        // In the base slice, the selected coordinates are (0, 2), (1,
+        // 2).
+        //
+        // In the view, offset and strides are calculated such that
+        // these same elements are now addressed as (0, 0), (1, 0) i.e.,
+        // view coords -> base coords:
+        //   (0, 0) -> (0, 2)
+        //   (1, 0) -> (1, 2)
+        let sel = Selection::of_slice(view); // range(0:2, range(0:1, true_()))
+
+        // When we eval the selection against the view, we should get
+        // back the flat indices of (0, 0) and (1, 0) in the view’s
+        // layout. These map to (0, 2) and (1, 2) in the base, and so
+        // have flat offsets 2 and 6, respectively.
         let actual: Vec<_> = sel.eval(&EvalOpts::strict(), view).unwrap().collect();
 
-        assert_eq!(actual, expected);
+        assert_eq!(actual, &[2, 6]);
+        assert_eq!(
+            actual,
+            vec![
+                view.location(&[0, 0]).unwrap(),
+                view.location(&[1, 0]).unwrap()
+            ]
+        );
+        assert_eq!(
+            actual,
+            vec![
+                base.location(&[0, 2]).unwrap(),
+                base.location(&[1, 2]).unwrap()
+            ]
+        );
     }
 
     #[test]
