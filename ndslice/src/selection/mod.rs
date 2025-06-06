@@ -992,41 +992,32 @@ impl Selection {
     }
 
     /// Constructs a `Selection` expression that symbolically matches
-    /// all coordinates in the given `slice`.
+    /// all coordinates in the given `view`, expressed in the
+    /// coordinate system of the provided `base` slice.
     ///
-    /// This is useful when the `slice` is a derived view obtained by
-    /// applying labeled dimension restrictions via the [`select!`]
-    /// macro. For example:
+    /// This is a convenience wrapper around
+    /// [`Selection::union_of_slices`] for the common case of a single
+    /// view.
+    ///
+    /// # Example
     ///
     /// ```rust
-    /// use ndslice::selection::Selection;
     /// let shape = ndslice::shape!(host = 2, gpu = 4);
     /// let selected = ndslice::select!(shape, host = 1).unwrap();
-    /// let view = selected.slice();
-    /// let sel = Selection::of_slice(view);
+    /// let base = shape.slice();
+    /// let sel = Selection::of_slice(&base, selected.slice()).unwrap();
     /// ```
     ///
-    /// The result is a compact, symbolic `Selection` that matches the
-    /// full rectangular extent of the slice. Internally, it
-    /// constructs a nested sequence of `range(0..size_d, ...)`
-    /// constraints, one per dimension:
+    /// The resulting selection can be safely evaluated against `base`
+    /// and will match exactly the elements present in the view.
     ///
-    /// ```text
-    /// sizes = [2, 1]
-    /// result = range(0..2, range(0..1, true))
-    /// ```
+    /// # Errors
     ///
-    /// **Note:** The returned `Selection` is expressed in the
-    /// coordinate system of the given `slice`. It is valid when
-    /// evaluated against that slice or any other slice that shares
-    /// the same coordinate interpretation and fully contains the
-    /// selection's domain.
-    pub fn of_slice(slice: &Slice) -> Selection {
-        let mut acc = dsl::true_();
-        for d in (0..slice.num_dim()).rev() {
-            acc = dsl::range(0..slice.sizes()[d], acc);
-        }
-        acc
+    /// Returns an error if the view’s contents cannot be projected
+    /// into the coordinate system of the base (e.g., if the view lies
+    /// outside bounds).
+    pub fn of_slice(base: &Slice, view: &Slice) -> Result<Selection, SliceError> {
+        Selection::union_of_slices(base, &[view])
     }
 
     /// Converts a list of views into a symbolic `Selection`
@@ -2064,9 +2055,7 @@ mod tests {
     #[test]
     fn test_of_slice_empty() {
         let slice = Slice::new_row_major([0]);
-        let selection = Selection::of_slice(&slice);
-        let expected = range(0..0, true_());
-        assert_normalized_eq!(&selection, &expected);
+        let selection = Selection::of_slice(&slice, &slice).unwrap();
         assert_eq!(
             selection
                 .eval(&EvalOpts::lenient(), &slice)
@@ -2079,9 +2068,7 @@ mod tests {
     #[test]
     fn test_of_slice_1d() {
         let slice = Slice::new_row_major([3]);
-        let selection = Selection::of_slice(&slice);
-        let expected = range(0..3, true_());
-        assert_normalized_eq!(&selection, &expected);
+        let selection = Selection::of_slice(&slice, &slice).unwrap();
         assert_eq!(
             selection
                 .eval(&EvalOpts::strict(), &slice)
@@ -2094,9 +2081,7 @@ mod tests {
     #[test]
     fn test_of_slice_2d() {
         let slice = Slice::new_row_major([2, 2]);
-        let selection = Selection::of_slice(&slice);
-        let expected = range(0..2, range(0..2, true_()));
-        assert_normalized_eq!(&selection, &expected);
+        let selection = Selection::of_slice(&slice, &slice).unwrap();
         assert_eq!(
             selection
                 .eval(&EvalOpts::strict(), &slice)
@@ -2116,30 +2101,10 @@ mod tests {
         let view = selected.slice();
 
         // In the base slice, the selected coordinates are (0, 2), (1,
-        // 2).
-        //
-        // In the view, offset and strides are calculated such that
-        // these same elements are now addressed as (0, 0), (1, 0) i.e.,
-        // view coords -> base coords:
-        //   (0, 0) -> (0, 2)
-        //   (1, 0) -> (1, 2)
-        let selection = Selection::of_slice(view); // range(0:2, range(0:1, true_()))
-        let expected = range(0..2, range(0..1, true_()));
+        // 2) or flat offsets 2 and 6.
+        let selection = Selection::of_slice(base, view).unwrap();
+        let actual: Vec<_> = selection.eval(&EvalOpts::strict(), base).unwrap().collect();
 
-        assert_normalized_eq!(&selection, &expected);
-        // When we eval the selection against the view, we should get
-        // back the flat indices of (0, 0) and (1, 0) in the view’s
-        // layout. These map to (0, 2) and (1, 2) in the base, and so
-        // have flat offsets 2 and 6, respectively.
-        let actual: Vec<_> = selection.eval(&EvalOpts::strict(), view).unwrap().collect();
-        assert_eq!(actual, &[2, 6]);
-        assert_eq!(
-            actual,
-            vec![
-                view.location(&[0, 0]).unwrap(),
-                view.location(&[1, 0]).unwrap()
-            ]
-        );
         assert_eq!(
             actual,
             vec![
