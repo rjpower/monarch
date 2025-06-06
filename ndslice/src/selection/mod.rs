@@ -2138,6 +2138,12 @@ mod tests {
         let sel = Selection::union_of_slices(base, &[view]).unwrap();
         let expected = range(1..=1, true_());
 
+        assert_eq!(
+            sel.eval(&EvalOpts::strict(), base)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![1],
+        );
         assert_normalized_eq!(&sel, &expected);
     }
 
