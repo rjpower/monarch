@@ -18,10 +18,12 @@ use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::PortRef;
+use hyperactor::message::Bind;
+use hyperactor::message::Bindings;
 use hyperactor::message::IndexedErasedUnbound;
-use hyperactor_mesh::ActorMesh;
-use hyperactor_mesh::Mesh;
+use hyperactor::message::Unbind;
 use hyperactor_mesh::ProcMesh;
+use hyperactor_mesh::actor_mesh::ActorMesh;
 use hyperactor_mesh::actor_mesh::Cast;
 use hyperactor_mesh::alloc::AllocSpec;
 use hyperactor_mesh::alloc::Allocator;
@@ -65,6 +67,34 @@ struct PhilosopherActor {
 enum PhilosopherMessage {
     Start(PortRef<WaiterMessage>),
     GrantChopstick(usize),
+}
+
+// TODO(pzhang) replace the boilerplate Bind/Unbind impls with a macro.
+impl Bind for PhilosopherMessage {
+    fn bind(mut self, bindings: &Bindings) -> anyhow::Result<Self> {
+        match &mut self {
+            Self::Start(port) => {
+                let mut_ports = [port.port_id_mut()];
+                bindings.rebind(mut_ports.into_iter())?;
+            }
+            Self::GrantChopstick(_) => {}
+        }
+        Ok(self)
+    }
+}
+
+impl Unbind for PhilosopherMessage {
+    fn bindings(&self) -> anyhow::Result<Bindings> {
+        let mut bindings = Bindings::default();
+        match self {
+            Self::Start(port) => {
+                let ports = [port.port_id()];
+                bindings.insert(ports)?;
+            }
+            Self::GrantChopstick(_) => {}
+        }
+        Ok(bindings)
+    }
 }
 
 /// Message from a philosopher to the waiter
@@ -166,17 +196,20 @@ impl Handler<Cast<PhilosopherMessage>> for PhilosopherActor {
     }
 }
 
-struct Waiter<'a> {
+struct Waiter<A> {
     /// A map from chopstick to the rank of the philosopher who holds it.
     chopstick_assignments: HashMap<usize, usize>,
     /// A map from chopstick to the rank of the philosopher who requested it.
     chopstick_requests: HashMap<usize, usize>,
     /// ActorMesh of the philosophers.
-    philosophers: ActorMesh<'a, PhilosopherActor>,
+    philosophers: A,
 }
 
-impl<'a> Waiter<'a> {
-    fn new(philosophers: ActorMesh<'a, PhilosopherActor>) -> Self {
+impl<A> Waiter<A>
+where
+    A: ActorMesh<Actor = PhilosopherActor>,
+{
+    fn new(philosophers: A) -> Self {
         Self {
             chopstick_assignments: Default::default(),
             chopstick_requests: Default::default(),

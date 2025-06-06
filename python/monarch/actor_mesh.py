@@ -39,7 +39,7 @@ from typing import (
 import monarch
 from monarch import ActorFuture as Future
 
-from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
+from monarch._rust_bindings.monarch_hyperactor.actor import PanicFlag, PythonMessage
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
@@ -50,7 +50,7 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
 from monarch.common.pickle_flatten import flatten, unflatten
-from monarch.common.shape import MeshTrait, NDSlice, Shape
+from monarch.common.shape import MeshTrait, NDSlice
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ Selection = Literal["all", "choose"]  # TODO: replace with real selection object
 # standin class for whatever is the serializable python object we use
 # to name an actor mesh. Hacked up today because ActorMesh
 # isn't plumbed to non-clients
-class ActorMeshRef:
+class _ActorMeshRefImpl:
     def __init__(
         self,
         mailbox: Mailbox,
@@ -152,22 +152,26 @@ class ActorMeshRef:
     @staticmethod
     def from_hyperactor_mesh(
         mailbox: Mailbox, hy_actor_mesh: PythonActorMesh
-    ) -> "ActorMeshRef":
+    ) -> "_ActorMeshRefImpl":
         shape: Shape = hy_actor_mesh.shape
-        return ActorMeshRef(
+        return _ActorMeshRefImpl(
             mailbox,
             hy_actor_mesh,
             hy_actor_mesh.shape,
-            [cast(ActorId, hy_actor_mesh.get(i)) for i in range(len(shape.ndslice))],
+            [cast(ActorId, hy_actor_mesh.get(i)) for i in range(len(shape))],
         )
 
     @staticmethod
-    def from_actor_id(mailbox: Mailbox, actor_id: ActorId) -> "ActorMeshRef":
-        return ActorMeshRef(mailbox, None, singleton_shape, [actor_id])
+    def from_actor_id(mailbox: Mailbox, actor_id: ActorId) -> "_ActorMeshRefImpl":
+        return _ActorMeshRefImpl(mailbox, None, singleton_shape, [actor_id])
 
     @staticmethod
-    def from_actor_ref_with_shape(ref: "ActorMeshRef", shape: Shape) -> "ActorMeshRef":
-        return ActorMeshRef(ref._mailbox, None, shape, ref._please_replace_me_actor_ids)
+    def from_actor_ref_with_shape(
+        ref: "_ActorMeshRefImpl", shape: Shape
+    ) -> "_ActorMeshRefImpl":
+        return _ActorMeshRefImpl(
+            ref._mailbox, None, shape, ref._please_replace_me_actor_ids
+        )
 
     def __getstate__(
         self,
@@ -200,7 +204,7 @@ class ActorMeshRef:
         # The fix is to provide a first-class reference into Python, and always call "cast"
         # on it, including for load balanced requests.
         if selection == "choose":
-            idx = _load_balancing_seed.randrange(len(self._shape.ndslice))
+            idx = _load_balancing_seed.randrange(len(self._shape))
             actor_rank = self._shape.ndslice[idx]
             self._mailbox.post(self._please_replace_me_actor_ids[actor_rank], message)
             return
@@ -219,15 +223,14 @@ class ActorMeshRef:
         else:
             raise ValueError(f"invalid selection: {selection}")
 
-    @property
-    def len(self) -> int:
-        return len(self._shape.ndslice)
+    def __len__(self) -> int:
+        return len(self._shape)
 
 
 class Endpoint(Generic[P, R]):
     def __init__(
         self,
-        actor_mesh_ref: ActorMeshRef,
+        actor_mesh_ref: _ActorMeshRefImpl,
         name: str,
         impl: Callable[Concatenate[Any, P], Coroutine[Any, Any, R]],
         mailbox: Mailbox,
@@ -254,7 +257,7 @@ class Endpoint(Generic[P, R]):
         return r.recv()
 
     def call_one(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]:
-        if self._actor_mesh.len != 1:
+        if len(self._actor_mesh) != 1:
             raise ValueError(
                 f"Can only use 'call_one' on a single Actor but this actor has shape {self._actor_mesh._shape}"
             )
@@ -266,8 +269,8 @@ class Endpoint(Generic[P, R]):
         send(self, args, kwargs, port=p)
 
         async def process():
-            results = [None] * self._actor_mesh.len
-            for _ in range(self._actor_mesh.len):
+            results = [None] * len(self._actor_mesh)
+            for _ in range(len(self._actor_mesh)):
                 rank, value = await r.recv()
                 results[rank] = value
             call_shape = Shape(
@@ -288,7 +291,7 @@ class Endpoint(Generic[P, R]):
         p, r = port(self)
         # pyre-ignore
         send(self, args, kwargs, port=p)
-        for _ in range(self._actor_mesh.len):
+        for _ in range(len(self._actor_mesh)):
             yield await r.recv()
 
     def broadcast(self, *args: P.args, **kwargs: P.kwargs) -> None:
@@ -341,6 +344,9 @@ class ValueMesh(MeshTrait, Generic[R]):
     def __iter__(self):
         for rank in self._shape.ranks():
             yield Point(rank, self._shape), self._values[rank]
+
+    def __len__(self):
+        return len(self._shape)
 
     @property
     def _ndslice(self) -> NDSlice:
@@ -456,12 +462,12 @@ class _Actor:
     def __init__(self) -> None:
         self.instance: object | None = None
         self.active_requests: asyncio.Queue[asyncio.Future[object]] = asyncio.Queue()
-        self.complete_task: object | None = None
+        self.complete_task: asyncio.Task | None = None
 
     def handle(
-        self, mailbox: Mailbox, message: PythonMessage
+        self, mailbox: Mailbox, message: PythonMessage, panic_flag: PanicFlag
     ) -> Optional[Coroutine[Any, Any, Any]]:
-        return self.handle_cast(mailbox, 0, singleton_shape, message)
+        return self.handle_cast(mailbox, 0, singleton_shape, message, panic_flag)
 
     def handle_cast(
         self,
@@ -469,6 +475,7 @@ class _Actor:
         rank: int,
         shape: Shape,
         message: PythonMessage,
+        panic_flag: PanicFlag,
     ) -> Optional[Coroutine[Any, Any, Any]]:
         port = None
         try:
@@ -489,10 +496,10 @@ class _Actor:
                         port.send("result", result)
                     return None
 
-                return self.run_async(ctx, self.run_task(port, result))
+                return self.run_async(ctx, self.run_task(port, result, panic_flag))
         except Exception as e:
             traceback.print_exc()
-            s = ServiceCallFailedException(e)
+            s = ActorError(e)
 
             # The exception is delivered to exactly one of:
             # (1) our caller, (2) our supervisor
@@ -504,20 +511,34 @@ class _Actor:
     async def run_async(self, ctx, coroutine):
         _context.set(ctx)
         if self.complete_task is None:
-            asyncio.create_task(self._complete())
+            self.complete_task = asyncio.create_task(self._complete())
         await self.active_requests.put(create_eager_task(coroutine))
 
-    async def run_task(self, port, coroutine):
+    async def run_task(self, port, coroutine, panic_flag):
         try:
             result = await coroutine
             if port is not None:
                 port.send("result", result)
         except Exception as e:
             traceback.print_exc()
-            s = ServiceCallFailedException(e)
+            s = ActorError(e)
+
+            # The exception is delivered to exactly one of:
+            # (1) our caller, (2) our supervisor
             if port is not None:
                 port.send("exception", s)
-            raise s from None
+            else:
+                raise s from None
+        except BaseException as e:
+            # A BaseException can be thrown in the case of a Rust panic.
+            # In this case, we need a way to signal the panic to the Rust side.
+            # See [Panics in async endpoints]
+            try:
+                panic_flag.signal_panic(e)
+            except Exception:
+                # The channel might be closed if the Rust side has already detected the error
+                pass
+            raise
 
     async def _complete(self) -> None:
         while True:
@@ -553,16 +574,17 @@ class Actor(MeshTrait):
             "actor implementations are not meshes, but we can't convince the typechecker of it..."
         )
 
-    def _new_with_shape(self, shape: Shape) -> "Service":
+    def _new_with_shape(self, shape: Shape) -> "ActorMeshRef":
         raise NotImplementedError(
             "actor implementations are not meshes, but we can't convince the typechecker of it..."
         )
 
 
-class Service(MeshTrait):
+class ActorMeshRef(MeshTrait):
     def __init__(
-        self, Class: Type[T], actor_mesh_ref: ActorMeshRef, mailbox: Mailbox
+        self, Class: Type[T], actor_mesh_ref: _ActorMeshRefImpl, mailbox: Mailbox
     ) -> None:
+        self.__name__ = Class.__name__
         self._class = Class
         self._actor_mesh_ref = actor_mesh_ref
         self._mailbox = mailbox
@@ -580,6 +602,32 @@ class Service(MeshTrait):
                     ),
                 )
 
+    def __getattr__(self, name: str) -> Any:
+        # This method is called when an attribute is not found
+        # For linting purposes, we need to tell the type checker that any attribute
+        # could be an endpoint that's dynamically added at runtime
+        # At runtime, we still want to raise AttributeError for truly missing attributes
+
+        # Check if this is a method on the underlying class
+        if hasattr(self._class, name):
+            attr = getattr(self._class, name)
+            if isinstance(attr, EndpointProperty):
+                # Dynamically create the endpoint
+                endpoint = Endpoint(
+                    self._actor_mesh_ref,
+                    name,
+                    attr._method,
+                    self._mailbox,
+                )
+                # Cache it for future use
+                setattr(self, name, endpoint)
+                return endpoint
+
+        # If we get here, it's truly not found
+        raise AttributeError(
+            f"'{self.__class__.__name__}' object has no attribute '{name}'"
+        )
+
     def _create(self, args: Iterable[Any], kwargs: Dict[str, Any]) -> None:
         async def null_func(*_args: Iterable[Any], **_kwargs: Dict[str, Any]) -> None:
             return None
@@ -593,8 +641,10 @@ class Service(MeshTrait):
         # pyre-ignore
         send(ep, (self._class, *args), kwargs)
 
-    def __reduce_ex__(self, protocol: ...) -> "Tuple[Type[Service], Tuple[Any, ...]]":
-        return Service, (
+    def __reduce_ex__(
+        self, protocol: ...
+    ) -> "Tuple[Type[ActorMeshRef], Tuple[Any, ...]]":
+        return ActorMeshRef, (
             self._class,
             self._actor_mesh_ref,
             self._mailbox,
@@ -608,15 +658,15 @@ class Service(MeshTrait):
     def _labels(self) -> Iterable[str]:
         return self._actor_mesh_ref._shape.labels
 
-    def _new_with_shape(self, shape: Shape) -> "Service":
-        return Service(
+    def _new_with_shape(self, shape: Shape) -> "ActorMeshRef":
+        return ActorMeshRef(
             self._class,
-            ActorMeshRef.from_actor_ref_with_shape(self._actor_mesh_ref, shape),
+            _ActorMeshRefImpl.from_actor_ref_with_shape(self._actor_mesh_ref, shape),
             self._mailbox,
         )
 
 
-class ServiceCallFailedException(Exception):
+class ActorError(Exception):
     """
     Deterministic problem with the user's code.
     For example, an OOM resulting in trying to allocate too much GPU memory, or violating
@@ -629,15 +679,15 @@ class ServiceCallFailedException(Exception):
         message: str = "A remote service call has failed asynchronously.",
     ) -> None:
         self.exception = exception
-        self.service_frames: StackSummary = extract_tb(exception.__traceback__)
+        self.actor_mesh_ref_frames: StackSummary = extract_tb(exception.__traceback__)
         self.message = message
 
     def __str__(self) -> str:
         exe = str(self.exception)
-        service_tb = "".join(traceback.format_list(self.service_frames))
+        actor_mesh_ref_tb = "".join(traceback.format_list(self.actor_mesh_ref_frames))
         return (
             f"{self.message}\n"
-            f"Traceback of where the service call failed (most recent call last):\n{service_tb}{type(self.exception).__name__}: {exe}"
+            f"Traceback of where the service call failed (most recent call last):\n{actor_mesh_ref_tb}{type(self.exception).__name__}: {exe}"
         )
 
 

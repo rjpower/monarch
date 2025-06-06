@@ -1287,15 +1287,12 @@ impl SplitPortBuffer {
     /// be flushed.
     fn push(&mut self, serialized: Serialized) -> Option<Vec<Serialized>> {
         static HYPERACTOR_SPLIT_MAX_BUFFER_SIZE: OnceLock<usize> = OnceLock::new();
-        #[allow(clippy::undocumented_unsafe_blocks)]
-        let limit = HYPERACTOR_SPLIT_MAX_BUFFER_SIZE.get_or_init(||
-            // TODO: Audit that the environment access only happens in single-threaded code.
-            unsafe {
-                std::env::var("HYPERACTOR_SPLIT_MAX_BUFFER_SIZE")
-                    .ok()
-                    .and_then(|val| val.parse::<usize>().ok())
-                    .unwrap_or(5)
-            });
+        let limit = HYPERACTOR_SPLIT_MAX_BUFFER_SIZE.get_or_init(|| {
+            std::env::var("HYPERACTOR_SPLIT_MAX_BUFFER_SIZE")
+                .ok()
+                .and_then(|val| val.parse::<usize>().ok())
+                .unwrap_or(5)
+        });
 
         self.0.push(serialized);
         if &self.0.len() >= limit {
@@ -2252,6 +2249,7 @@ mod tests {
     use crate::proc::Proc;
     use crate::reference::ProcId;
     use crate::reference::WorldId;
+    use crate::simnet;
     use crate::test_utils::tracing::set_tracing_env_filter;
 
     #[test]
@@ -2445,6 +2443,12 @@ mod tests {
     #[tokio::test]
     async fn test_sim_client_server() {
         let proxy = ChannelAddr::any(channel::ChannelTransport::Unix);
+        simnet::start(
+            ChannelAddr::any(ChannelTransport::Unix),
+            proxy.clone(),
+            1000,
+        )
+        .unwrap();
         let dst_addr =
             SimAddr::new("local!1".parse::<ChannelAddr>().unwrap(), proxy.clone()).unwrap();
         let src_to_dst = ChannelAddr::Sim(

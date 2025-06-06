@@ -430,7 +430,7 @@ impl ControllerMessageHandler for ControllerActor {
 
         let slice = Slice::new(0usize, vec![self.world_size], vec![1])
             .unwrap()
-            .view_limit(Limit::from(CASTING_FANOUT_SIZE));
+            .reshape_with_limit(Limit::from(CASTING_FANOUT_SIZE));
 
         self.comm_actor_ref.send(
             this,
@@ -1647,7 +1647,7 @@ mod tests {
         assert_eq!(result.0, Seq::default());
         assert!(result.1.expect("result").is_err());
 
-        let records = sim::records().await;
+        let records = sim::records().await.unwrap();
         eprintln!("{}", serde_json::to_string_pretty(&records).unwrap());
     }
     #[tokio::test]
