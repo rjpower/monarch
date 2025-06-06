@@ -45,6 +45,20 @@ macro_rules! assert_structurally_eq {
 }
 
 #[macro_export]
+macro_rules! assert_normalized_eq {
+    ($expected:expr, $actual:expr) => {{
+        let expected = &$expected;
+        let actual = &$actual;
+        let norm_expected = $crate::selection::normalize(expected);
+        let norm_actual = $crate::selection::normalize(actual);
+        assert_eq!(
+            norm_expected, norm_actual,
+            "Normalized selections do not match."
+        );
+    }};
+}
+
+#[macro_export]
 macro_rules! assert_round_trip {
     ($selection:expr_2021) => {{
         let selection: Selection = $selection; // take ownership

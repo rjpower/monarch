@@ -111,6 +111,7 @@ use crate::Slice;
 use crate::selection::normal::NormalizedSelection;
 use crate::shape;
 use crate::shape::ShapeError;
+use crate::slice::CartesianIterator;
 use crate::slice::SliceError;
 
 /// This trait defines an abstract syntax without committing to a
@@ -989,6 +990,101 @@ impl Selection {
             .reduce(dsl::union)
             .unwrap_or_else(dsl::false_))
     }
+
+    /// Constructs a `Selection` expression that enumerates all
+    /// coordinates in the given `slice`.
+    ///
+    /// This is useful when the `slice` is a derived view obtained by
+    /// applying labeled dimension restrictions via the [`select!`]
+    /// macro. For example:
+    ///
+    /// ``` rust
+    /// let shape = ndslice::shape!(host = 2, gpu = 4);
+    /// let view = ndslice::select!(shape, host = 1).unwrap().slice();
+    /// let sel = Selection::of_slice(view);
+    /// ```
+    ///
+    /// The result is a symbolic `Selection` that matches exactly the contents
+    /// of the slice. Internally, it folds each coordinate into a nested chain
+    /// of singleton `range(i..=i, ...)` constraints and unions them:
+    ///
+    /// ```text
+    /// [1, 0] → range(1..=1, range(0..=0, true))
+    /// [1, 1] → range(1..=1, range(1..=1, true))
+    /// ...
+    /// ```
+    ///
+    /// The traversal is row-major (via `CartesianIterator`) and the
+    /// union is built deterministically, yielding reproducible
+    /// results.
+    pub fn of_slice(slice: &Slice) -> Selection {
+        let mut acc = dsl::false_();
+        for coord in CartesianIterator::new(slice.sizes()) {
+            let sel = coord
+                .iter()
+                .rev()
+                .fold(dsl::true_(), |acc, &i| dsl::range(i..=i, acc));
+            acc = dsl::union(acc, sel);
+        }
+        acc
+    }
+
+    /// Converts a list of views into a symbolic `Selection`
+    /// expression over a common base `Slice`.
+    ///
+    /// Each input `view` must be derived from the same base slice
+    /// (e.g., via repeated `select!` calls), such that their
+    /// coordinate locations can be resolved in terms of the base's
+    /// layout.
+    ///
+    /// For each coordinate in each view:
+    /// - Compute its memory `location` in the view,
+    /// - Use the base slice to recover the coordinate corresponding
+    ///   to that location,
+    /// - Convert the recovered coordinate into a singleton selection
+    ///   expression,
+    /// - Combine all such expressions into a union.
+    ///
+    /// The result is a `Selection` expression that exactly matches
+    /// the union of the points from all views, expressed in the
+    /// coordinate system of the base slice.
+    ///
+    /// Coordinates are deduplicated using a `BTreeSet`, ensuring:
+    /// - only unique points are selected,
+    /// - stable, deterministic output structure
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any coordinate in any view fails to map
+    /// back to the base.
+    ///
+    /// # Example
+    /// ```rust
+    /// let base = shape!(host = 2, gpu = 4).slice();
+    /// let view1 = select!(base, host = 0).unwrap(); // all GPUs of host 0
+    /// let view2 = select!(base, host = 1, gpu = 2..4).unwrap(); // GPUs 2 and 3 of host 1
+    /// let selection = union_of_slices(&base, &[view1, view2]).unwrap(); // 8 + 2 = 10 GPUs selected
+    /// ```
+    pub fn union_of_slices(base: &Slice, views: &[&Slice]) -> Result<Selection, SliceError> {
+        let mut coords_set = BTreeSet::new();
+        for view in views {
+            for coord in CartesianIterator::new(view.sizes()) {
+                let loc = view.location(&coord)?;
+                let base_coord = base.coordinates(loc)?;
+                coords_set.insert(base_coord);
+            }
+        }
+
+        let result = coords_set.into_iter().fold(dsl::false_(), |acc, coord| {
+            let sel = coord
+                .into_iter()
+                .rev()
+                .fold(dsl::true_(), |inner, i| dsl::range(i..=i, inner));
+            dsl::union(acc, sel)
+        });
+
+        Ok(result)
+    }
 } // impl Selection
 
 /// Trivial all(true) equivalence.
@@ -1215,8 +1311,10 @@ mod tests {
     use super::Selection;
     use super::dsl::*;
     use super::is_equivalent_true;
-    use super::structurally_equal;
     use crate::Slice;
+    use crate::assert_normalized_eq;
+    use crate::assert_structurally_eq;
+    use crate::select;
     use crate::shape;
     use crate::shape::ShapeError;
 
@@ -1870,7 +1968,7 @@ mod tests {
     }
 
     #[test]
-    fn test_selection_of_ranks_1d() {
+    fn test_of_ranks_1d() {
         let slice = Slice::new_row_major([5]);
         let ranks = BTreeSet::from([1, 3]);
         let selection = Selection::of_ranks(&slice, &ranks).unwrap();
@@ -1884,7 +1982,7 @@ mod tests {
     }
 
     #[test]
-    fn test_selection_of_ranks_empty_set() {
+    fn test_of_ranks_empty_set() {
         let slice = Slice::new_row_major([4]);
         let ranks = BTreeSet::new();
         let selection = Selection::of_ranks(&slice, &ranks).unwrap();
@@ -1898,16 +1996,16 @@ mod tests {
     }
 
     #[test]
-    fn test_selection_of_ranks_singleton_structural() {
+    fn test_of_ranks_singleton_structural() {
         let slice = Slice::new_row_major([5]);
         let ranks = BTreeSet::from([2]);
         let actual = Selection::of_ranks(&slice, &ranks).unwrap();
         let expected = range(2..=2, true_());
-        assert!(structurally_equal(&actual, &expected));
+        assert_structurally_eq!(&actual, &expected);
     }
 
     #[test]
-    fn test_selection_of_ranks_union_2d_structural() {
+    fn test_of_ranks_union_2d_structural() {
         let slice = Slice::new_row_major([2, 3]);
         // [ [0, 1, 2],
         //   [3, 4, 5] ]
@@ -1924,11 +2022,11 @@ mod tests {
             union(range(0, range(2, true_())), range(1, range(0, true_()))),
             range(1, range(1, true_())),
         );
-        assert!(structurally_equal(&actual, &expected));
+        assert_structurally_eq!(&actual, &expected);
     }
 
     #[test]
-    fn test_selection_of_ranks_3d_structural() {
+    fn test_of_ranks_3d_structural() {
         let slice = Slice::new_row_major([2, 2, 2]);
         // [ [ [0, 1],
         //     [2, 3] ],
@@ -1940,16 +2038,155 @@ mod tests {
             range(0, range(0, range(1, true_()))), // (0, 0, 1)
             range(1, range(1, range(0, true_()))), // (1, 1, 0)
         );
-        assert!(structurally_equal(&actual, &expected));
+        assert_structurally_eq!(&actual, &expected);
     }
 
     #[test]
-    fn test_selection_of_ranks_invalid_index() {
+    fn test_of_ranks_invalid_index() {
         let slice = Slice::new_row_major([4]);
         let ranks = BTreeSet::from([0, 4]); // 4 is out of bounds
         assert!(
             Selection::of_ranks(&slice, &ranks).is_err(),
             "expected out-of-bounds error"
+        );
+    }
+
+    #[test]
+    fn test_of_slice_empty() {
+        let slice = Slice::new_row_major([0]);
+        let selection = Selection::of_slice(&slice);
+        let expected = false_();
+        assert_structurally_eq!(&selection, &expected);
+        assert_eq!(
+            selection
+                .eval(&EvalOpts::strict(), &slice)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn test_of_slice_1d() {
+        let slice = Slice::new_row_major([3]);
+        let selection = Selection::of_slice(&slice);
+        let expected = union(
+            union(
+                union(false_(), range(0..=0, true_())),
+                range(1..=1, true_()),
+            ),
+            range(2..=2, true_()),
+        );
+        assert_normalized_eq!(&selection, &expected);
+        assert_eq!(
+            selection
+                .eval(&EvalOpts::strict(), &slice)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn test_of_slice_2d() {
+        let slice = Slice::new_row_major([2, 2]);
+        let selection = Selection::of_slice(&slice);
+        let expected = union(
+            union(
+                union(
+                    union(false_(), range(0..=0, range(0..=0, true_()))),
+                    range(0..=0, range(1..=1, true_())),
+                ),
+                range(1..=1, range(0..=0, true_())),
+            ),
+            range(1..=1, range(1..=1, true_())),
+        );
+        assert_normalized_eq!(&selection, &expected);
+        assert_normalized_eq!(
+            &expected,
+            &Selection::of_ranks(&slice, &(0..4).collect::<BTreeSet<_>>()).unwrap()
+        );
+        assert_eq!(
+            selection
+                .eval(&EvalOpts::strict(), &slice)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn test_union_of_slices_empty() {
+        let base = Slice::new_row_major([2]);
+        let sel = Selection::union_of_slices(&base, &[]).unwrap();
+        assert_structurally_eq!(&sel, &false_());
+        assert_eq!(
+            sel.eval(&EvalOpts::strict(), &base)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn test_union_of_slices_singleton() {
+        let shape = shape!(x = 3);
+        let base = shape.slice();
+        let selected = select!(shape, x = 1).unwrap();
+        let view = selected.slice();
+
+        let sel = Selection::union_of_slices(base, &[view]).unwrap();
+        let expected = range(1..=1, true_());
+
+        assert_normalized_eq!(&sel, &expected);
+    }
+
+    #[test]
+    fn test_union_of_slices_disjoint() {
+        let shape = shape!(x = 2, y = 2); // 2x2 grid
+        let base = shape.slice();
+
+        // View A: (0, *)
+        let a = select!(shape, x = 0).unwrap();
+        let view_a = a.slice();
+
+        // View B: (1, *)
+        let b = select!(shape, x = 1).unwrap();
+        let view_b = b.slice();
+
+        let sel = Selection::union_of_slices(base, &[view_a, view_b]).unwrap();
+        let expected = Selection::of_slice(base);
+
+        assert_normalized_eq!(&sel, &expected);
+        assert_eq!(
+            sel.eval(&EvalOpts::strict(), base)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            base.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_union_of_slices_overlapping() {
+        let shape = shape!(x = 1, y = 4); // 1x4 grid
+        let base = shape.slice();
+
+        let selected1 = select!(shape, y = 0..2).unwrap();
+        let view1 = selected1.slice();
+
+        let selected2 = select!(shape, y = 1..4).unwrap();
+        let view2 = selected2.slice();
+
+        let sel = Selection::union_of_slices(base, &[view1, view2]).unwrap();
+        let ranks = base.iter().collect::<BTreeSet<_>>();
+        let expected = Selection::of_ranks(base, &ranks).unwrap();
+
+        assert_normalized_eq!(&sel, &expected);
+        assert_eq!(
+            sel.eval(&EvalOpts::strict(), base)
+                .unwrap()
+                .collect::<Vec<_>>(),
+            base.iter().collect::<Vec<_>>()
         );
     }
 }
