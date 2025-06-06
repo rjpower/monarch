@@ -2059,11 +2059,11 @@ mod tests {
     fn test_of_slice_empty() {
         let slice = Slice::new_row_major([0]);
         let selection = Selection::of_slice(&slice);
-        let expected = false_();
-        assert_structurally_eq!(&selection, &expected);
+        let expected = range(0..0, true_());
+        assert_normalized_eq!(&selection, &expected);
         assert_eq!(
             selection
-                .eval(&EvalOpts::strict(), &slice)
+                .eval(&EvalOpts::lenient(), &slice)
                 .unwrap()
                 .collect::<Vec<_>>(),
             vec![]
@@ -2074,13 +2074,7 @@ mod tests {
     fn test_of_slice_1d() {
         let slice = Slice::new_row_major([3]);
         let selection = Selection::of_slice(&slice);
-        let expected = union(
-            union(
-                union(false_(), range(0..=0, true_())),
-                range(1..=1, true_()),
-            ),
-            range(2..=2, true_()),
-        );
+        let expected = range(0..3, true_());
         assert_normalized_eq!(&selection, &expected);
         assert_eq!(
             selection
@@ -2095,21 +2089,8 @@ mod tests {
     fn test_of_slice_2d() {
         let slice = Slice::new_row_major([2, 2]);
         let selection = Selection::of_slice(&slice);
-        let expected = union(
-            union(
-                union(
-                    union(false_(), range(0..=0, range(0..=0, true_()))),
-                    range(0..=0, range(1..=1, true_())),
-                ),
-                range(1..=1, range(0..=0, true_())),
-            ),
-            range(1..=1, range(1..=1, true_())),
-        );
+        let expected = range(0..2, range(0..2, true_()));
         assert_normalized_eq!(&selection, &expected);
-        assert_normalized_eq!(
-            &expected,
-            &Selection::of_ranks(&slice, &(0..4).collect::<BTreeSet<_>>()).unwrap()
-        );
         assert_eq!(
             selection
                 .eval(&EvalOpts::strict(), &slice)
@@ -2136,14 +2117,15 @@ mod tests {
         // view coords -> base coords:
         //   (0, 0) -> (0, 2)
         //   (1, 0) -> (1, 2)
-        let sel = Selection::of_slice(view); // range(0:2, range(0:1, true_()))
+        let selection = Selection::of_slice(view); // range(0:2, range(0:1, true_()))
+        let expected = range(0..2, range(0..1, true_()));
 
+        assert_normalized_eq!(&selection, &expected);
         // When we eval the selection against the view, we should get
         // back the flat indices of (0, 0) and (1, 0) in the view’s
         // layout. These map to (0, 2) and (1, 2) in the base, and so
         // have flat offsets 2 and 6, respectively.
-        let actual: Vec<_> = sel.eval(&EvalOpts::strict(), view).unwrap().collect();
-
+        let actual: Vec<_> = selection.eval(&EvalOpts::strict(), view).unwrap().collect();
         assert_eq!(actual, &[2, 6]);
         assert_eq!(
             actual,
@@ -2206,12 +2188,24 @@ mod tests {
         let b = select!(shape, x = 1).unwrap();
         let view_b = b.slice();
 
-        let sel = Selection::union_of_slices(base, &[view_a, view_b]).unwrap();
-        let expected = Selection::of_slice(base);
-
-        assert_normalized_eq!(&sel, &expected);
+        let selection = Selection::union_of_slices(base, &[view_a, view_b]).unwrap();
+        let ranks = base.iter().collect::<BTreeSet<_>>();
+        let expected = Selection::of_ranks(base, &ranks).unwrap();
+        assert_normalized_eq!(&selection, &expected);
+        let expected = union(
+            union(
+                union(
+                    union(false_(), range(0, range(0, true_()))),
+                    range(0, range(1, true_())),
+                ),
+                range(1, range(0, true_())),
+            ),
+            range(1, range(1, true_())),
+        );
+        assert_normalized_eq!(&selection, &expected);
         assert_eq!(
-            sel.eval(&EvalOpts::strict(), base)
+            selection
+                .eval(&EvalOpts::strict(), base)
                 .unwrap()
                 .collect::<Vec<_>>(),
             base.iter().collect::<Vec<_>>()
