@@ -1063,7 +1063,12 @@ impl Selection {
     /// let base = shape!(host = 2, gpu = 4).slice();
     /// let view1 = select!(base, host = 0).unwrap(); // all GPUs of host 0
     /// let view2 = select!(base, host = 1, gpu = 2..4).unwrap(); // GPUs 2 and 3 of host 1
-    /// let selection = union_of_slices(&base, &[view1, view2]).unwrap(); // 8 + 2 = 10 GPUs selected
+    /// let selection = union_of_slices(&base, &[view1, view2]).unwrap(); // 4 + 2 = 6 GPUs selected
+    /// let ranks: Vec<_> = selection
+    ///     .eval(&EvalOpts::strict(), &base)
+    ///     .unwrap()
+    ///     .collect();
+    /// assert_eq!(ranks.len(), 6);
     /// ```
     pub fn union_of_slices(base: &Slice, views: &[&Slice]) -> Result<Selection, SliceError> {
         let mut coords_set = BTreeSet::new();
