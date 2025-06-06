@@ -999,8 +999,10 @@ impl Selection {
     /// macro. For example:
     ///
     /// ``` rust
+    /// use ndslice::selection::Selection;
     /// let shape = ndslice::shape!(host = 2, gpu = 4);
-    /// let view = ndslice::select!(shape, host = 1).unwrap().slice();
+    /// let selected = ndslice::select!(shape, host = 1).unwrap();
+    /// let view = selected.slice();
     /// let sel = Selection::of_slice(view);
     /// ```
     ///
@@ -1013,10 +1015,6 @@ impl Selection {
     /// [1, 1] → range(1..=1, range(1..=1, true))
     /// ...
     /// ```
-    ///
-    /// The traversal is row-major (via `CartesianIterator`) and the
-    /// union is built deterministically, yielding reproducible
-    /// results.
     pub fn of_slice(slice: &Slice) -> Selection {
         let mut acc = dsl::false_();
         for coord in CartesianIterator::new(slice.sizes()) {
@@ -1060,12 +1058,17 @@ impl Selection {
     ///
     /// # Example
     /// ```rust
-    /// let base = shape!(host = 2, gpu = 4).slice();
+    //  use ndslice::*;
+    /// use ndslice::shape;
+    /// use ndslice::select;
+    /// use ndslice::selection::EvalOpts;
+    /// use ndslice::selection::Selection;
+    /// let base = shape!(host = 2, gpu = 4);
     /// let view1 = select!(base, host = 0).unwrap(); // all GPUs of host 0
     /// let view2 = select!(base, host = 1, gpu = 2..4).unwrap(); // GPUs 2 and 3 of host 1
-    /// let selection = union_of_slices(&base, &[view1, view2]).unwrap(); // 4 + 2 = 6 GPUs selected
+    /// let selection = Selection::union_of_slices(base.slice(), &[view1.slice(), view2.slice()]).unwrap(); // 4 + 2 = 6 GPUs selected
     /// let ranks: Vec<_> = selection
-    ///     .eval(&EvalOpts::strict(), &base)
+    ///     .eval(&EvalOpts::strict(), &base.slice())
     ///     .unwrap()
     ///     .collect();
     /// assert_eq!(ranks.len(), 6);
