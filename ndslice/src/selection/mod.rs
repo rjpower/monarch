@@ -2123,6 +2123,27 @@ mod tests {
         );
     }
 
+    // This view is non-contiguous.
+    //
+    // Note in the view `Slice { offset: 2, sizes: [2, 1], strides:
+    // [4, 1] }`, `strides[0] > 1` - this means there's space between
+    // the elements in the outer dimension.
+    #[test]
+    fn test_of_slice_handles_non_contiguous_view() {
+        let shape = shape!(host = 2, gpu = 4); // shape [2, 4]
+        let base = shape.slice();
+
+        // Select the 3rd GPU (index 2) across both hosts
+        let selected = select!(shape, gpu = 2).unwrap(); // (0, 2) and (1, 2)
+        let view = selected.slice();
+
+        let sel = Selection::of_slice(view);
+        let expected = vec![2, 6];
+        let actual: Vec<_> = sel.eval(&EvalOpts::strict(), view).unwrap().collect();
+
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn test_union_of_slices_empty() {
         let base = Slice::new_row_major([2]);
