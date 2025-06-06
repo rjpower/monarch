@@ -991,14 +991,14 @@ impl Selection {
             .unwrap_or_else(dsl::false_))
     }
 
-    /// Constructs a `Selection` expression that enumerates all
-    /// coordinates in the given `slice`.
+    /// Constructs a `Selection` expression that symbolically matches
+    /// all coordinates in the given `slice`.
     ///
     /// This is useful when the `slice` is a derived view obtained by
     /// applying labeled dimension restrictions via the [`select!`]
     /// macro. For example:
     ///
-    /// ``` rust
+    /// ```rust
     /// use ndslice::selection::Selection;
     /// let shape = ndslice::shape!(host = 2, gpu = 4);
     /// let selected = ndslice::select!(shape, host = 1).unwrap();
@@ -1006,15 +1006,21 @@ impl Selection {
     /// let sel = Selection::of_slice(view);
     /// ```
     ///
-    /// The result is a symbolic `Selection` that matches exactly the contents
-    /// of the slice. Internally, it folds each coordinate into a nested chain
-    /// of singleton `range(i..=i, ...)` constraints and unions them:
+    /// The result is a compact, symbolic `Selection` that matches the
+    /// full rectangular extent of the slice. Internally, it
+    /// constructs a nested sequence of `range(0..size_d, ...)`
+    /// constraints, one per dimension:
     ///
     /// ```text
-    /// [1, 0] → range(1..=1, range(0..=0, true))
-    /// [1, 1] → range(1..=1, range(1..=1, true))
-    /// ...
+    /// sizes = [2, 1]
+    /// result = range(0..2, range(0..1, true))
     /// ```
+    ///
+    /// **Note:** The returned `Selection` is expressed in the
+    /// coordinate system of the given `slice`. It is valid when
+    /// evaluated against that slice or any other slice that shares
+    /// the same coordinate interpretation and fully contains the
+    /// selection's domain.
     pub fn of_slice(slice: &Slice) -> Selection {
         let mut acc = dsl::true_();
         for d in (0..slice.num_dim()).rev() {
