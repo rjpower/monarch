@@ -1331,7 +1331,6 @@ mod tests {
     use super::dsl::*;
     use super::is_equivalent_true;
     use crate::Slice;
-    use crate::assert_normalized_eq;
     use crate::assert_structurally_eq;
     use crate::select;
     use crate::shape;
@@ -2175,7 +2174,7 @@ mod tests {
 
         let selection = base.reify_views(&[view]).unwrap();
         let expected = range(1..=1, true_());
-        assert_normalized_eq!(&selection, &expected);
+        assert_structurally_eq!(&selection, &expected);
 
         assert_eq!(
             selection
