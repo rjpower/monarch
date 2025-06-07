@@ -475,13 +475,13 @@ impl<'a> Iterator for DimSliceIterator<'a> {
 ///     vec![1, 0], vec![1, 1], vec![1, 2],
 /// ]);
 /// ```
-pub(crate) struct CartesianIterator<'a> {
+struct CartesianIterator<'a> {
     dims: &'a [usize],
     index: usize,
 }
 
 impl<'a> CartesianIterator<'a> {
-    pub(crate) fn new(dims: &'a [usize]) -> Self {
+    fn new(dims: &'a [usize]) -> Self {
         CartesianIterator { dims, index: 0 }
     }
 }
