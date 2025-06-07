@@ -111,7 +111,6 @@ use crate::Slice;
 use crate::selection::normal::NormalizedSelection;
 use crate::shape;
 use crate::shape::ShapeError;
-use crate::slice::CartesianIterator;
 use crate::slice::SliceError;
 
 /// This trait defines an abstract syntax without committing to a
@@ -993,69 +992,30 @@ impl Selection {
 
     /// Converts a list of views into a symbolic `Selection`
     /// expression over a common base `Slice`.
-    ///
-    /// Each input `view` must be derived from the same base slice
-    /// (e.g., via repeated `select!` calls), such that their
-    /// coordinate locations can be resolved in terms of the base's
-    /// layout.
-    ///
-    /// For each coordinate in each view:
-    /// - Compute its memory `location` in the view,
-    /// - Use the base slice to recover the coordinate corresponding
-    ///   to that location,
-    /// - Convert the recovered coordinate into a singleton selection
-    ///   expression,
-    /// - Combine all such expressions into a union.
-    ///
-    /// The result is a `Selection` expression that exactly matches
-    /// the union of the points from all views, expressed in the
-    /// coordinate system of the base slice.
-    ///
-    /// Coordinates are deduplicated using a `BTreeSet`, ensuring:
-    /// - only unique points are selected,
-    /// - stable, deterministic output structure
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any coordinate in any view fails to map
-    /// back to the base.
-    ///
-    /// # Example
-    /// ```rust
-    //  use ndslice::*;
-    /// use ndslice::shape;
-    /// use ndslice::select;
-    /// use ndslice::selection::EvalOpts;
-    /// use ndslice::selection::Selection;
-    /// let base = shape!(host = 2, gpu = 4);
-    /// let view1 = select!(base, host = 0).unwrap(); // all GPUs of host 0
-    /// let view2 = select!(base, host = 1, gpu = 2..4).unwrap(); // GPUs 2 and 3 of host 1
-    /// let selection = Selection::union_of_slices(base.slice(), &[view1.slice(), view2.slice()]).unwrap(); // 4 + 2 = 6 GPUs selected
-    /// let ranks: Vec<_> = selection
-    ///     .eval(&EvalOpts::strict(), &base.slice())
-    ///     .unwrap()
-    ///     .collect();
-    /// assert_eq!(ranks.len(), 6);
-    /// ```
     pub fn union_of_slices(base: &Slice, views: &[&Slice]) -> Result<Selection, SliceError> {
-        let mut coords_set = BTreeSet::new();
-        for view in views {
-            for coord in CartesianIterator::new(view.sizes()) {
-                let loc = view.location(&coord)?;
-                let base_coord = base.coordinates(loc)?;
-                coords_set.insert(base_coord);
+        let mut selections = Vec::with_capacity(views.len());
+
+        for &view in views {
+            if view.num_dim() != base.num_dim() {
+                return Err(SliceError::InvalidDims {
+                    expected: base.num_dim(),
+                    got: view.num_dim(),
+                });
             }
+            if view.is_empty() {
+                continue;
+            }
+            let origin = base.coordinates(view.offset())?;
+            let mut acc = dsl::true_();
+            for (&start, &len) in origin.iter().zip(view.sizes()).rev() {
+                acc = dsl::range(start..start + len, acc);
+            }
+            selections.push(acc);
         }
 
-        let result = coords_set.into_iter().fold(dsl::false_(), |acc, coord| {
-            let sel = coord
-                .into_iter()
-                .rev()
-                .fold(dsl::true_(), |inner, i| dsl::range(i..=i, inner));
-            dsl::union(acc, sel)
-        });
-
-        Ok(result)
+        let mut iter = selections.into_iter();
+        let first = iter.next().unwrap_or_else(dsl::false_);
+        Ok(iter.fold(first, dsl::union))
     }
 } // impl Selection
 
@@ -1067,31 +1027,24 @@ impl ReifyView for Slice {
     /// Constructs a `Selection` expression that symbolically matches
     /// all coordinates in the given `view`, expressed in the
     /// coordinate system of the provided `base` slice.
-    ///
-    /// This is a convenience wrapper around
-    /// [`Selection::union_of_slices`] for the common case of a single
-    /// view.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use ndslice::selection::ReifyView;
-    /// let shape = ndslice::shape!(host = 2, gpu = 4);
-    /// let view = ndslice::select!(shape, host = 1).unwrap();
-    /// let base = shape.slice();
-    /// let sel = base.reify_view(view.slice()).unwrap();
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the view’s contents cannot be projected
-    /// into the coordinate system of the base (e.g., if the view lies
-    /// outside bounds).
-    // pub fn reify_view(&self, view: &Slice) -> Result<Selection, SliceError> {
-    //     Selection::union_of_slices(self, &[view])
-    // }
     fn reify_view(&self, view: &Slice) -> Result<Selection, SliceError> {
-        Selection::union_of_slices(self, &[view])
+        if view.num_dim() != self.num_dim() {
+            return Err(SliceError::InvalidDims {
+                expected: self.num_dim(),
+                got: view.num_dim(),
+            });
+        }
+        if view.is_empty() {
+            return Ok(dsl::false_());
+        }
+
+        let origin = self.coordinates(view.offset())?;
+        let mut acc = dsl::true_();
+        for (&start, &len) in origin.iter().zip(view.sizes()).rev() {
+            acc = dsl::range(start..start + len, acc);
+        }
+
+        Ok(acc)
     }
 }
 
@@ -2064,6 +2017,8 @@ mod tests {
     fn test_reify_view_empty() {
         let slice = Slice::new_row_major([0]);
         let selection = slice.reify_view(&slice).unwrap();
+        let expected = false_();
+        assert_structurally_eq!(&selection, expected);
         assert_eq!(
             selection
                 .eval(&EvalOpts::lenient(), &slice)
@@ -2082,11 +2037,8 @@ mod tests {
         let view = selected.slice();
 
         let selection = base.reify_view(view).unwrap();
-        let expected = union(
-            union(union(false_(), range(2, true_())), range(3, true_())),
-            range(4, true_()),
-        );
-        assert_normalized_eq!(&selection, &expected);
+        let expected = range(2..5, true_());
+        assert_structurally_eq!(&selection, expected);
 
         let flat: Vec<_> = selection.eval(&EvalOpts::strict(), base).unwrap().collect();
         assert_eq!(flat, vec![2, 3, 4]);
@@ -2101,6 +2053,8 @@ mod tests {
         let selected = select!(shape, x = 1..3, y = 2..5).unwrap();
         let view = selected.slice();
         let selection = base.reify_view(view).unwrap();
+        let expected = range(1..3, range(2..5, true_()));
+        assert_structurally_eq!(&selection, expected);
 
         let flat: Vec<_> = selection.eval(&EvalOpts::strict(), base).unwrap().collect();
         assert_eq!(
@@ -2125,16 +2079,14 @@ mod tests {
         let selected = select!(shape, gpu = 2).unwrap(); // (0, 2) and (1, 2)
         let view = selected.slice();
 
-        // In the base slice, the selected coordinates are (0, 2), (1,
-        // 2) or flat offsets 2 and 6.
         let selection = base.reify_view(view).unwrap();
-        let expected = union(
-            union(false_(), range(0, range(2, true_()))),
-            range(1, range(2, true_())),
-        );
-        assert_normalized_eq!(&selection, &expected);
-        let actual: Vec<_> = selection.eval(&EvalOpts::strict(), base).unwrap().collect();
+        let expected = range(0..2, range(2..3, true_()));
+        assert_structurally_eq!(&selection, expected);
 
+        let actual = selection
+            .eval(&EvalOpts::strict(), base)
+            .unwrap()
+            .collect::<Vec<_>>();
         assert_eq!(
             actual,
             vec![
@@ -2164,16 +2116,17 @@ mod tests {
         let selected = select!(shape, x = 1).unwrap();
         let view = selected.slice();
 
-        let sel = Selection::union_of_slices(base, &[view]).unwrap();
+        let selection = Selection::union_of_slices(base, &[view]).unwrap();
         let expected = range(1..=1, true_());
+        assert_normalized_eq!(&selection, &expected);
 
         assert_eq!(
-            sel.eval(&EvalOpts::strict(), base)
+            selection
+                .eval(&EvalOpts::strict(), base)
                 .unwrap()
                 .collect::<Vec<_>>(),
             vec![1],
         );
-        assert_normalized_eq!(&sel, &expected);
     }
 
     #[test]
@@ -2190,20 +2143,11 @@ mod tests {
         let view_b = b.slice();
 
         let selection = Selection::union_of_slices(base, &[view_a, view_b]).unwrap();
-        let ranks = base.iter().collect::<BTreeSet<_>>();
-        let expected = Selection::of_ranks(base, &ranks).unwrap();
-        assert_normalized_eq!(&selection, &expected);
         let expected = union(
-            union(
-                union(
-                    union(false_(), range(0, range(0, true_()))),
-                    range(0, range(1, true_())),
-                ),
-                range(1, range(0, true_())),
-            ),
-            range(1, range(1, true_())),
+            range(0..1, range(0..2, true_())),
+            range(1..2, range(0..2, true_())),
         );
-        assert_normalized_eq!(&selection, &expected);
+        assert_structurally_eq!(&selection, &expected);
         assert_eq!(
             selection
                 .eval(&EvalOpts::strict(), base)
@@ -2224,13 +2168,16 @@ mod tests {
         let selected2 = select!(shape, y = 1..4).unwrap();
         let view2 = selected2.slice();
 
-        let sel = Selection::union_of_slices(base, &[view1, view2]).unwrap();
-        let ranks = base.iter().collect::<BTreeSet<_>>();
-        let expected = Selection::of_ranks(base, &ranks).unwrap();
+        let selection = Selection::union_of_slices(base, &[view1, view2]).unwrap();
+        let expected = union(
+            range(0..1, range(0..2, true_())),
+            range(0..1, range(1..4, true_())),
+        );
+        assert_structurally_eq!(&selection, &expected);
 
-        assert_normalized_eq!(&sel, &expected);
         assert_eq!(
-            sel.eval(&EvalOpts::strict(), base)
+            selection
+                .eval(&EvalOpts::strict(), base)
                 .unwrap()
                 .collect::<Vec<_>>(),
             base.iter().collect::<Vec<_>>()
