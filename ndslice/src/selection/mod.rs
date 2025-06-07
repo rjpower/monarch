@@ -1022,21 +1022,10 @@ impl Selection {
         let mut selections = Vec::with_capacity(views.len());
 
         for &view in views {
-            if view.num_dim() != base.num_dim() {
-                return Err(SliceError::InvalidDims {
-                    expected: base.num_dim(),
-                    got: view.num_dim(),
-                });
-            }
             if view.is_empty() {
                 continue;
             }
-            let origin = base.coordinates(view.offset())?;
-            let mut acc = dsl::true_();
-            for (&start, &len) in origin.iter().zip(view.sizes()).rev() {
-                acc = dsl::range(start..start + len, acc);
-            }
-            selections.push(acc);
+            selections.push(base.reify_view(view)?);
         }
 
         let mut iter = selections.into_iter();
