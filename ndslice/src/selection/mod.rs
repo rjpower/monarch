@@ -990,8 +990,34 @@ impl Selection {
             .unwrap_or_else(dsl::false_))
     }
 
-    /// Converts a list of views into a symbolic `Selection`
-    /// expression over a common base `Slice`.
+    /// Converts a list of `views` into a symbolic [`Selection`]
+    /// expression over a common `base` [`Slice`].
+    ///
+    /// Each view describes a rectangular subregion of the base. This
+    /// function reifies each view into a nested `range(.., ..)`
+    /// expression in the base coordinate system and returns the union
+    /// of all such selections.
+    ///
+    /// Empty views are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any view:
+    /// - Has a different number of dimensions than the base slice
+    /// - Refers to coordinates not contained within the base
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let shape = ndslice::shape!(x = 4, y = 4);
+    /// let base = shape.slice();
+    ///
+    /// let a = ndslice::select!(shape, x = 0..2, y = 0..2).unwrap();
+    /// let b = ndslice::select!(shape, x = 2..4, y = 2..4).unwrap();
+    ///
+    /// let sel =
+    ///     ndslice::selection::Selection::union_of_slices(&base, &[a.slice(), b.slice()]).unwrap();
+    /// ```
     pub fn union_of_slices(base: &Slice, views: &[&Slice]) -> Result<Selection, SliceError> {
         let mut selections = Vec::with_capacity(views.len());
 
@@ -1024,9 +1050,32 @@ pub trait ReifyView {
 }
 
 impl ReifyView for Slice {
-    /// Constructs a `Selection` expression that symbolically matches
-    /// all coordinates in the given `view`, expressed in the
-    /// coordinate system of the provided `base` slice.
+    /// Constructs a [`Selection`] expression that symbolically
+    /// matches all coordinates in the given `view`, expressed in the
+    /// coordinate system of the provided `base` slice (`self`).
+    ///
+    /// The resulting expression uses nested `range(start..end, ...)`
+    /// combinators to represent the rectangular region selected by
+    /// the view within the base slice.
+    ///
+    /// Returns [`dsl::false_()`] for empty views.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The number of dimensions in the view does not match the base
+    /// - The view lies outside the bounds of the base slice
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use ndslice::selection::ReifyView;
+    /// let shape = ndslice::shape!(x = 4, y = 4);
+    /// let base = shape.slice();
+    /// let selected = ndslice::select!(shape, x = 1..3, y = 2..4).unwrap();
+    /// let view = selected.slice();
+    /// let selection = base.reify_view(view).unwrap();
+    /// ```
     fn reify_view(&self, view: &Slice) -> Result<Selection, SliceError> {
         if view.num_dim() != self.num_dim() {
             return Err(SliceError::InvalidDims {
