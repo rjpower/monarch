@@ -2134,6 +2134,8 @@ mod tests {
         // Select the 3rd GPU (index 2) across both hosts
         let selected = select!(shape, gpu = 2).unwrap(); // (0, 2) and (1, 2)
         let view = selected.slice();
+        let coordinates: Vec<_> = view.iter().map(|i| view.coordinates(i).unwrap()).collect();
+        assert_eq!(coordinates, [[0, 0], [1, 0]]);
 
         let selection = base.reify_view(view).unwrap();
         let expected = range(0..2, range(2..3, true_()));
