@@ -611,13 +611,12 @@ mod tests {
                 let view_offset_in_base = base.coordinates(subview.offset()).unwrap();
 
                 // b = view_offset + v
-
-                let base_coords: Vec<_> = v.iter()
+                let b: Vec<_> = v.iter()
                     .zip(&view_offset_in_base)
                     .map(|(sub_c, offset)| sub_c + offset)
                     .collect();
 
-                assert!(base.location(&base_coords).is_ok());
+                assert!(base.location(&b).is_ok());
             }
         }
     }
