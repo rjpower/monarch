@@ -2074,49 +2074,50 @@ mod tests {
     }
 
     #[test]
-    fn test_of_slice_1d() {
-        let slice = Slice::new_row_major([3]);
-        let selection = slice.reify_view(&slice).unwrap();
+    fn test_reify_view_1d() {
+        let shape = shape!(x = 6); // 1D shape with 6 elements
+        let base = shape.slice();
+
+        let selected = select!(shape, x = 2..5).unwrap();
+        let view = selected.slice();
+
+        let selection = base.reify_view(view).unwrap();
         let expected = union(
-            union(union(false_(), range(0, true_())), range(1, true_())),
-            range(2, true_()),
+            union(union(false_(), range(2, true_())), range(3, true_())),
+            range(4, true_()),
         );
         assert_normalized_eq!(&selection, &expected);
+
+        let flat: Vec<_> = selection.eval(&EvalOpts::strict(), base).unwrap().collect();
+        assert_eq!(flat, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn test_reify_view_2d() {
+        let shape = shape!(x = 4, y = 5); // 2D shape: 4 rows, 5 columns
+        let base = shape.slice();
+
+        // Select the middle 2x3 block: rows 1..3 and columns 2..5
+        let selected = select!(shape, x = 1..3, y = 2..5).unwrap();
+        let view = selected.slice();
+        let selection = base.reify_view(view).unwrap();
+
+        let flat: Vec<_> = selection.eval(&EvalOpts::strict(), base).unwrap().collect();
         assert_eq!(
-            selection
-                .eval(&EvalOpts::strict(), &slice)
-                .unwrap()
-                .collect::<Vec<_>>(),
-            vec![0, 1, 2]
+            flat,
+            vec![
+                base.location(&[1, 2]).unwrap(),
+                base.location(&[1, 3]).unwrap(),
+                base.location(&[1, 4]).unwrap(),
+                base.location(&[2, 2]).unwrap(),
+                base.location(&[2, 3]).unwrap(),
+                base.location(&[2, 4]).unwrap(),
+            ]
         );
     }
 
     #[test]
-    fn test_of_slice_2d() {
-        let slice = Slice::new_row_major([2, 2]);
-        let selection = slice.reify_view(&slice).unwrap();
-        let expected = union(
-            union(
-                union(
-                    union(false_(), range(0, range(0, true_()))),
-                    range(0, range(1, true_())),
-                ),
-                range(1, range(0, true_())),
-            ),
-            range(1, range(1, true_())),
-        );
-        assert_normalized_eq!(&selection, &expected);
-        assert_eq!(
-            selection
-                .eval(&EvalOpts::strict(), &slice)
-                .unwrap()
-                .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3]
-        );
-    }
-
-    #[test]
-    fn test_of_slice_handles_non_contiguous_view() {
+    fn test_reify_view_selects_column_across_rows() {
         let shape = shape!(host = 2, gpu = 4); // shape [2, 4]
         let base = shape.slice();
 
