@@ -989,53 +989,28 @@ impl Selection {
             .reduce(dsl::union)
             .unwrap_or_else(dsl::false_))
     }
-
-    /// Converts a list of `views` into a symbolic [`Selection`]
-    /// expression over a common `base` [`Slice`].
-    ///
-    /// Each view describes a rectangular subregion of the base. This
-    /// function reifies each view into a nested `range(.., ..)`
-    /// expression in the base coordinate system and returns the union
-    /// of all such selections.
-    ///
-    /// Empty views are ignored.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any view:
-    /// - Has a different number of dimensions than the base slice
-    /// - Refers to coordinates not contained within the base
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// let shape = ndslice::shape!(x = 4, y = 4);
-    /// let base = shape.slice();
-    ///
-    /// let a = ndslice::select!(shape, x = 0..2, y = 0..2).unwrap();
-    /// let b = ndslice::select!(shape, x = 2..4, y = 2..4).unwrap();
-    ///
-    /// let sel =
-    ///     ndslice::selection::Selection::union_of_slices(&base, &[a.slice(), b.slice()]).unwrap();
-    /// ```
-    pub fn union_of_slices(base: &Slice, views: &[&Slice]) -> Result<Selection, SliceError> {
-        let mut selections = Vec::with_capacity(views.len());
-
-        for &view in views {
-            if view.is_empty() {
-                continue;
-            }
-            selections.push(base.reify_view(view)?);
-        }
-
-        let mut iter = selections.into_iter();
-        let first = iter.next().unwrap_or_else(dsl::false_);
-        Ok(iter.fold(first, dsl::union))
-    }
 } // impl Selection
 
-pub trait ReifyView {
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for crate::slice::Slice {}
+}
+
+/// Connects the `select!` API to the `Selection` algebra by enabling
+/// `base.reify_view(view)` syntax, where `base: Slice`.
+///
+/// The base slice defines the coordinate system in which the view is
+/// interpreted. Views are themselves `Slice` values, typically
+/// produced by `select!`, and are reified as `Selection` expressions
+/// over the base.
+pub trait ReifyView: sealed::Sealed {
+    /// Reify a view as a `Selection` in the coordinate system of
+    /// `self`.
     fn reify_view(&self, view: &Slice) -> Result<Selection, SliceError>;
+
+    /// Reify multiple views as a union of selections in the
+    /// coordinate system of `self`.
+    fn reify_views(&self, views: &[&Slice]) -> Result<Selection, SliceError>;
 }
 
 impl ReifyView for Slice {
@@ -1083,6 +1058,50 @@ impl ReifyView for Slice {
         }
 
         Ok(acc)
+    }
+
+    /// Converts a list of `views` into a symbolic [`Selection`]
+    /// expression over a common `base` [`Slice`].
+    ///
+    /// Each view describes a rectangular subregion of the base. This
+    /// function reifies each view into a nested `range(.., ..)`
+    /// expression in the base coordinate system and returns the union
+    /// of all such selections.
+    ///
+    /// Empty views are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any view:
+    /// - Has a different number of dimensions than the base slice
+    /// - Refers to coordinates not contained within the base
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use ndslice::selection::ReifyView;
+    ///
+    /// let shape = ndslice::shape!(x = 4, y = 4);
+    /// let base = shape.slice();
+    ///
+    /// let a = ndslice::select!(shape, x = 0..2, y = 0..2).unwrap();
+    /// let b = ndslice::select!(shape, x = 2..4, y = 2..4).unwrap();
+    ///
+    /// let sel = base.reify_views(&[a.slice(), b.slice()]).unwrap();
+    /// ```
+    fn reify_views(&self, views: &[&Slice]) -> Result<Selection, SliceError> {
+        let mut selections = Vec::with_capacity(views.len());
+
+        for &view in views {
+            if view.is_empty() {
+                continue;
+            }
+            selections.push(self.reify_view(view)?);
+        }
+
+        let mut iter = selections.into_iter();
+        let first = iter.next().unwrap_or_else(dsl::false_);
+        Ok(iter.fold(first, dsl::union))
     }
 }
 
@@ -2137,7 +2156,7 @@ mod tests {
     #[test]
     fn test_union_of_slices_empty() {
         let base = Slice::new_row_major([2]);
-        let sel = Selection::union_of_slices(&base, &[]).unwrap();
+        let sel = base.reify_views(&[]).unwrap();
         assert_structurally_eq!(&sel, &false_());
         assert_eq!(
             sel.eval(&EvalOpts::strict(), &base)
@@ -2154,7 +2173,7 @@ mod tests {
         let selected = select!(shape, x = 1).unwrap();
         let view = selected.slice();
 
-        let selection = Selection::union_of_slices(base, &[view]).unwrap();
+        let selection = base.reify_views(&[view]).unwrap();
         let expected = range(1..=1, true_());
         assert_normalized_eq!(&selection, &expected);
 
@@ -2180,7 +2199,7 @@ mod tests {
         let b = select!(shape, x = 1).unwrap();
         let view_b = b.slice();
 
-        let selection = Selection::union_of_slices(base, &[view_a, view_b]).unwrap();
+        let selection = base.reify_views(&[view_a, view_b]).unwrap();
         let expected = union(
             range(0..1, range(0..2, true_())),
             range(1..2, range(0..2, true_())),
@@ -2206,7 +2225,7 @@ mod tests {
         let selected2 = select!(shape, y = 1..4).unwrap();
         let view2 = selected2.slice();
 
-        let selection = Selection::union_of_slices(base, &[view1, view2]).unwrap();
+        let selection = base.reify_views(&[view1, view2]).unwrap();
         let expected = union(
             range(0..1, range(0..2, true_())),
             range(0..1, range(1..4, true_())),
