@@ -201,11 +201,7 @@ mod tests {
             py.import_bound("torch")?;
 
             // Define the Custom class inline
-            py.run_bound(
-                "class Custom:\n    pass",
-                None,
-                None,
-            )?;
+            py.run_bound("class Custom:\n    pass", None, None)?;
 
             let obj = py.eval_bound("Custom()", None, None)?;
             RValue::extract_bound(&obj)

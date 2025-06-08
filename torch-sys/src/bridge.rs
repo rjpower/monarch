@@ -6,7 +6,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-
 use crate::IValue;
 use crate::backend::BoxedBackend;
 use crate::backend::BoxedWork;
@@ -480,6 +479,7 @@ pub(crate) mod cuda_ffi {
         #[namespace = "c10::cuda"]
         type CUDAStream;
         #[namespace = ""]
+        type CUstream_st = nccl_sys::CUstream_st;
         fn get_current_stream(device: i8) -> SharedPtr<CUDAStream>;
         fn set_current_stream(stream: &CUDAStream);
         fn create_stream(device: i8, priority: i32) -> SharedPtr<CUDAStream>;
@@ -497,12 +497,17 @@ pub(crate) mod cuda_ffi {
 
 #[cfg(feature = "cuda")]
 mod cuda_stuff {
-    // SAFETY: CUDAStream is thread safe
-    unsafe impl Send for ffi::CUDAStream {}
-    // SAFETY: see above
-    unsafe impl Sync for ffi::CUDAStream {}
+    use std::fmt::Debug;
+    use std::fmt::Error;
+    use std::fmt::Formatter;
 
-    impl Debug for ffi::CUDAStream {
+    use crate::bridge::cuda_ffi;
+    // SAFETY: CUDAStream is thread safe
+    unsafe impl Send for cuda_ffi::CUDAStream {}
+    // SAFETY: see above
+    unsafe impl Sync for cuda_ffi::CUDAStream {}
+
+    impl Debug for cuda_ffi::CUDAStream {
         fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
             f.debug_struct("CUDAStream")
                 .field("device", &format!("{}", self.device_index()))
@@ -511,7 +516,7 @@ mod cuda_stuff {
         }
     }
 
-    impl Debug for ffi::CUDAEvent {
+    impl Debug for cuda_ffi::CUDAEvent {
         fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
             f.debug_struct("CUDAEvent")
                 .field("ptr", &format!("{:p}", self))
@@ -522,9 +527,9 @@ mod cuda_stuff {
     // SAFETY: CUDAEvent is thread safe. The comments on `c10::Event` say it isn't, but in
     // Rust we would consider it Sync because shared references are fine to access
     // across threads.
-    unsafe impl Send for ffi::CUDAEvent {}
+    unsafe impl Send for cuda_ffi::CUDAEvent {}
     // SAFETY: see above
-    unsafe impl Sync for ffi::CUDAEvent {}
+    unsafe impl Sync for cuda_ffi::CUDAEvent {}
 }
 
 unsafe extern "C" {

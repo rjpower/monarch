@@ -14,7 +14,6 @@ async-trait = "0.1.86"
 atomic_refcell = "0.1.13"
 cxx = "1.0.119"
 derive_more = { version = "1.0.0", features = ["full"] }
-fxhash = "0.2.1"
 monarch_types = { version = "0.0.0", path = "../monarch_types" }
 nccl-sys = { path = "../nccl-sys", optional = true }
 paste = "1.0.14"

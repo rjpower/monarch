@@ -8,10 +8,6 @@
 
 #pragma once
 
-#ifdef MONARCH_USE_CUDA
-#include <ATen/cuda/CUDAEvent.h> // @manual=//caffe2:torch-cpp
-#include <nccl.h> // @manual
-#endif // MONARCH_USE_CUDA
 #include <rust/cxx.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/torch.h> // @manual=//caffe2:torch-cpp
@@ -296,28 +292,6 @@ inline bool type_ptr_is_optional_tensor_list(const TypePtr& type) {
       type_ptr_is_tensor_list(
              type->expectRef<c10::OptionalType>().getElementType());
 }
-
-#ifdef MONARCH_USE_CUDA
-std::unique_ptr<at::cuda::CUDAEvent>
-create_cuda_event(bool enable_timing, bool blocking, bool interprocess);
-
-std::shared_ptr<c10::cuda::CUDAStream> get_current_stream(
-    c10::DeviceIndex device);
-
-std::shared_ptr<c10::cuda::CUDAStream> create_stream(
-    c10::DeviceIndex device,
-    int32_t priority);
-
-void set_current_stream(const c10::cuda::CUDAStream& stream);
-
-/// This function exists because ncclConfig initialization requires the use of
-/// a macro. We cannot reference the macro directly from Rust code, so we wrap
-/// the macro use in a function and bind that to Rust instead.
-inline ncclConfig_t make_nccl_config() {
-  ncclConfig_t ret = NCCL_CONFIG_INITIALIZER;
-  return ret;
-}
-#endif // MONARCH_USE_CUDA
 
 extern "C" {
 void cpp_incref(void* ptr);
