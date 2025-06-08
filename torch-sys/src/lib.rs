@@ -110,7 +110,9 @@ mod scalar_type;
 mod tensor;
 
 pub mod backend;
+#[cfg(feature = "cuda")]
 pub mod cuda;
+#[cfg(feature = "cuda")]
 pub mod nccl;
 
 /// Binding for `c10::Layout`.

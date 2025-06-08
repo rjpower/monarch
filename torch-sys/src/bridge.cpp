@@ -339,6 +339,7 @@ rust::Vec<Tensor> toTensorList(IValue iv) {
   return ret;
 }
 
+#ifdef MONARCH_USE_CUDA
 std::unique_ptr<at::cuda::CUDAEvent>
 create_cuda_event(bool enable_timing, bool blocking, bool interprocess) {
   unsigned int flags = (blocking ? cudaEventBlockingSync : cudaEventDefault) |
@@ -368,6 +369,7 @@ void set_current_stream(const c10::cuda::CUDAStream& stream) {
   }
   at::cuda::setCurrentCUDAStream(stream);
 }
+#endif // MONARCH_USE_CUDA
 
 rust::Vec<uint8_t> save_tensor(const Tensor& t) {
   return save(t);
