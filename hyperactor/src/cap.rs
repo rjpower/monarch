@@ -47,7 +47,12 @@ pub(crate) mod sealed {
     }
 
     pub trait CanSplitPort: Send + Sync {
-        fn split(&self, port_id: PortId, reducer: Option<u64>) -> PortId;
+        fn split(
+            &self,
+            port_id: PortId,
+            reducer: Option<u64>,
+            buffer_size: Option<usize>,
+        ) -> PortId;
     }
 
     #[async_trait]

@@ -726,7 +726,18 @@ impl PortId {
     /// Split this port, returning a new port that relays messages to the port
     /// through a local proxy, which may coalesce messages.
     pub fn split(&self, caps: &impl cap::CanSplitPort, reducer_typehash: Option<u64>) -> PortId {
-        caps.split(self.clone(), reducer_typehash)
+        self.split_with_buffer_size(caps, reducer_typehash, None)
+    }
+
+    /// Split this port with a custom buffer size, returning a new port that relays messages to the port
+    /// through a local proxy, which may coalesce messages based on the specified buffer size.
+    pub fn split_with_buffer_size(
+        &self,
+        caps: &impl cap::CanSplitPort,
+        reducer_typehash: Option<u64>,
+        buffer_size: Option<usize>,
+    ) -> PortId {
+        caps.split(self.clone(), reducer_typehash, buffer_size)
     }
 }
 
