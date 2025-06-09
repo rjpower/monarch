@@ -10,7 +10,7 @@ import logging
 import tempfile
 import time
 from contextlib import contextmanager, ExitStack
-from typing import Callable, Dict, Generator, Literal, Optional
+from typing import Any, Callable, Dict, Generator, Literal, Optional
 
 import monarch_supervisor
 from monarch.common.client import Client
