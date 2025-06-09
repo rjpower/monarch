@@ -1162,8 +1162,13 @@ impl<A: Actor> cap::sealed::CanOpenPort for Instance<A> {
 }
 
 impl<A: Actor> cap::sealed::CanSplitPort for Instance<A> {
-    fn split(&self, port_id: PortId, reducer_typehash: Option<u64>) -> PortId {
-        self.mailbox.split(port_id, reducer_typehash)
+    fn split(
+        &self,
+        port_id: PortId,
+        reducer_typehash: Option<u64>,
+        buffer_size: Option<usize>,
+    ) -> PortId {
+        self.mailbox.split(port_id, reducer_typehash, buffer_size)
     }
 }
 

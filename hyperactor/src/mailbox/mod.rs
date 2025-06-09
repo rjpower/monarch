@@ -1279,32 +1279,49 @@ impl cap::sealed::CanOpenPort for Mailbox {
     }
 }
 
-#[derive(Default)]
-struct SplitPortBuffer(Vec<Serialized>);
+struct SplitPortBuffer {
+    messages: Vec<Serialized>,
+    max_buffer_size: usize,
+}
 
 impl SplitPortBuffer {
+    fn new(max_buffer_size: usize) -> Self {
+        Self {
+            messages: Vec::new(),
+            max_buffer_size,
+        }
+    }
+
     /// Push a new item to the buffer, and optionally return any items that should
     /// be flushed.
     fn push(&mut self, serialized: Serialized) -> Option<Vec<Serialized>> {
-        static HYPERACTOR_SPLIT_MAX_BUFFER_SIZE: OnceLock<usize> = OnceLock::new();
-        let limit = HYPERACTOR_SPLIT_MAX_BUFFER_SIZE.get_or_init(|| {
-            std::env::var("HYPERACTOR_SPLIT_MAX_BUFFER_SIZE")
-                .ok()
-                .and_then(|val| val.parse::<usize>().ok())
-                .unwrap_or(5)
-        });
-
-        self.0.push(serialized);
-        if &self.0.len() >= limit {
-            Some(std::mem::take(&mut self.0))
+        self.messages.push(serialized);
+        if self.messages.len() >= self.max_buffer_size {
+            Some(std::mem::take(&mut self.messages))
         } else {
             None
         }
     }
 }
 
+impl Default for SplitPortBuffer {
+    fn default() -> Self {
+        // Default buffer size, can be overridden via environment variable for backward compatibility
+        let default_size = std::env::var("HYPERACTOR_SPLIT_MAX_BUFFER_SIZE")
+            .ok()
+            .and_then(|val| val.parse::<usize>().ok())
+            .unwrap_or(5);
+        Self::new(default_size)
+    }
+}
+
 impl cap::sealed::CanSplitPort for Mailbox {
-    fn split(&self, port_id: PortId, reducer_typehash: Option<u64>) -> PortId {
+    fn split(
+        &self,
+        port_id: PortId,
+        reducer_typehash: Option<u64>,
+        buffer_size: Option<usize>,
+    ) -> PortId {
         fn post(mailbox: &Mailbox, port_id: PortId, msg: Serialized) {
             mailbox.post(
                 MessageEnvelope::new(mailbox.actor_id().clone(), port_id, msg),
@@ -1328,7 +1345,9 @@ impl cap::sealed::CanSplitPort for Mailbox {
                 Ok(())
             }),
             Some(r) => {
-                let buffer = Mutex::new(SplitPortBuffer::default());
+                let actual_buffer_size =
+                    buffer_size.unwrap_or_else(|| SplitPortBuffer::default().max_buffer_size);
+                let buffer = Mutex::new(SplitPortBuffer::new(actual_buffer_size));
                 Box::new(move |serialized: Serialized| {
                     // Hold the lock until messages are sent. This is to avoid another
                     // invocation of this method trying to send message concurrently and
@@ -2231,7 +2250,6 @@ mod tests {
     use std::time::Duration;
 
     use timed_test::async_timed_test;
-    use tracing::Level;
 
     use super::*;
     use crate::Actor;
@@ -2250,7 +2268,6 @@ mod tests {
     use crate::reference::ProcId;
     use crate::reference::WorldId;
     use crate::simnet;
-    use crate::test_utils::tracing::set_tracing_env_filter;
 
     #[test]
     fn test_error() {
@@ -2916,6 +2933,41 @@ mod tests {
         }
     }
 
+    async fn setup_split_port_ids_with_buffer_size(
+        reducer_typehash: Option<u64>,
+        buffer_size: usize,
+    ) -> Setup {
+        let muxer = MailboxMuxer::new();
+        let actor0 = Mailbox::new(id!(test[0].actor), BoxedMailboxSender::new(muxer.clone()));
+        let actor1 = Mailbox::new(id!(test[1].actor1), BoxedMailboxSender::new(muxer.clone()));
+        muxer.bind_mailbox(actor0.clone());
+        muxer.bind_mailbox(actor1.clone());
+
+        // Open a port on actor0
+        let (port_handle, receiver) = actor0.open_port::<u64>();
+        let port_id = port_handle.bind().port_id().clone();
+
+        // Split it twice on actor1 with custom buffer size
+        let port_id1 =
+            port_id.split_with_buffer_size(&actor1, reducer_typehash.clone(), Some(buffer_size));
+        let port_id2 =
+            port_id.split_with_buffer_size(&actor1, reducer_typehash.clone(), Some(buffer_size));
+
+        // A split port id can also be split
+        let port_id2_1 =
+            port_id2.split_with_buffer_size(&actor1, reducer_typehash, Some(buffer_size));
+
+        Setup {
+            receiver,
+            actor0,
+            actor1,
+            port_id,
+            port_id1,
+            port_id2,
+            port_id2_1,
+        }
+    }
+
     fn post(mailbox: &Mailbox, port_id: PortId, msg: u64) {
         mailbox.post(
             MessageEnvelope::new_unknown(port_id.clone(), Serialized::serialize(&msg).unwrap()),
@@ -2972,10 +3024,6 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 30)]
     async fn test_split_port_id_sum_reducer() {
-        // SAFETY: TODO: Audit that the environment access only happens in single-threaded code.
-        unsafe { std::env::set_var("HYPERACTOR_SPLIT_MAX_BUFFER_SIZE", "1") };
-        set_tracing_env_filter(Level::INFO);
-
         let sum_accumulator = accum::sum::<u64>();
         let reducer_typehash = sum_accumulator.reducer_typehash();
         let Setup {
@@ -2986,7 +3034,7 @@ mod tests {
             port_id1,
             port_id2,
             port_id2_1,
-        } = setup_split_port_ids(Some(reducer_typehash)).await;
+        } = setup_split_port_ids_with_buffer_size(Some(reducer_typehash), 1).await;
         post(&actor0, port_id.clone(), 4);
         post(&actor1, port_id1.clone(), 2);
         post(&actor1, port_id2.clone(), 3);
@@ -3007,7 +3055,6 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 30)]
     async fn test_split_port_id_every_n_messages() {
-        set_tracing_env_filter(Level::INFO);
         let actor = Mailbox::new(
             id!(test[0].actor),
             BoxedMailboxSender::new(PanickingMailboxSender),
