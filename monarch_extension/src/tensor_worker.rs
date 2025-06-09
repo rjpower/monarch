@@ -6,6 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#![cfg(feature = "tensor_engine")]
+
 /// These are the worker messages exposed through pyo3 to python.
 /// The actual documentation of the messages can be found in [`monarch_messages::worker::WorkerMessage`]
 /// This split is currently needed to customize the constructors for the messages and due to the
@@ -39,8 +41,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::types::PyTuple;
-use torch_sys::nccl::ReduceOp;
-use torch_sys::nccl::UniqueId;
+use torch_sys_cuda::nccl::ReduceOp;
+use torch_sys_cuda::nccl::UniqueId;
 
 #[pyclass(
     name = "WorkerMessage",
