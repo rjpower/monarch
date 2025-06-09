@@ -8,16 +8,27 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
+#[cfg(feature = "tensor_engine")]
 mod client;
+#[cfg(feature = "tensor_engine")]
 mod controller;
+#[cfg(feature = "tensor_engine")]
 pub mod convert;
+#[cfg(feature = "tensor_engine")]
 mod debugger;
+#[cfg(feature = "tensor_engine")]
 mod mesh_controller;
-mod panic;
 mod simulator_client;
+#[cfg(feature = "tensor_engine")]
 mod tensor_worker;
 
+mod panic;
 use pyo3::prelude::*;
+
+#[pyfunction]
+fn has_tensor_engine() -> bool {
+    cfg!(feature = "tensor_engine")
+}
 
 fn get_or_add_new_module<'py>(
     module: &Bound<'py, PyModule>,
@@ -63,16 +74,49 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "monarch_hyperactor.selection",
     )?)?;
 
-    client::register_python_bindings(&get_or_add_new_module(module, "monarch_extension.client")?)?;
-    tensor_worker::register_python_bindings(&get_or_add_new_module(
-        module,
-        "monarch_extension.tensor_worker",
-    )?)?;
-
-    controller::register_python_bindings(&get_or_add_new_module(
-        module,
-        "monarch_extension.controller",
-    )?)?;
+    #[cfg(feature = "tensor_engine")]
+    {
+        client::register_python_bindings(&get_or_add_new_module(
+            module,
+            "monarch_extension.client",
+        )?)?;
+        tensor_worker::register_python_bindings(&get_or_add_new_module(
+            module,
+            "monarch_extension.tensor_worker",
+        )?)?;
+        controller::register_python_bindings(&get_or_add_new_module(
+            module,
+            "monarch_extension.controller",
+        )?)?;
+        debugger::register_python_bindings(&get_or_add_new_module(
+            module,
+            "monarch_extension.debugger",
+        )?)?;
+        monarch_messages::debugger::register_python_bindings(&get_or_add_new_module(
+            module,
+            "monarch_messages.debugger",
+        )?)?;
+        simulator_client::register_python_bindings(&get_or_add_new_module(
+            module,
+            "monarch_extension.simulator_client",
+        )?)?;
+        ::controller::bootstrap::register_python_bindings(&get_or_add_new_module(
+            module,
+            "controller.bootstrap",
+        )?)?;
+        ::monarch_tensor_worker::bootstrap::register_python_bindings(&get_or_add_new_module(
+            module,
+            "monarch_tensor_worker.bootstrap",
+        )?)?;
+        crate::convert::register_python_bindings(&get_or_add_new_module(
+            module,
+            "monarch_extension.convert",
+        )?)?;
+        crate::mesh_controller::register_python_bindings(&get_or_add_new_module(
+            module,
+            "monarch_extension.mesh_controller",
+        )?)?;
+    }
 
     monarch_hyperactor::bootstrap::register_python_bindings(&get_or_add_new_module(
         module,
@@ -111,18 +155,6 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module,
         "monarch_hyperactor.runtime",
     )?)?;
-    debugger::register_python_bindings(&get_or_add_new_module(
-        module,
-        "monarch_extension.debugger",
-    )?)?;
-    monarch_messages::debugger::register_python_bindings(&get_or_add_new_module(
-        module,
-        "monarch_messages.debugger",
-    )?)?;
-    simulator_client::register_python_bindings(&get_or_add_new_module(
-        module,
-        "monarch_extension.simulator_client",
-    )?)?;
     hyperactor_extension::alloc::register_python_bindings(&get_or_add_new_module(
         module,
         "hyperactor_extension.alloc",
@@ -131,30 +163,14 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module,
         "hyperactor_extension.telemetry",
     )?)?;
-    ::controller::bootstrap::register_python_bindings(&get_or_add_new_module(
-        module,
-        "controller.bootstrap",
-    )?)?;
-
-    ::monarch_tensor_worker::bootstrap::register_python_bindings(&get_or_add_new_module(
-        module,
-        "monarch_tensor_worker.bootstrap",
-    )?)?;
-
-    crate::convert::register_python_bindings(&get_or_add_new_module(
-        module,
-        "monarch_extension.convert",
-    )?)?;
 
     crate::panic::register_python_bindings(&get_or_add_new_module(
         module,
         "monarch_extension.panic",
     )?)?;
 
-    crate::mesh_controller::register_python_bindings(&get_or_add_new_module(
-        module,
-        "monarch_extension.mesh_controller",
-    )?)?;
+    // Add feature detection function
+    module.add_function(wrap_pyfunction!(has_tensor_engine, module)?)?;
 
     Ok(())
 }
