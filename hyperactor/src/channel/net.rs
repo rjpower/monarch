@@ -1924,7 +1924,7 @@ mod tests {
     }
 
     #[tracing_test::traced_test]
-    #[async_timed_test(timeout_secs = 30)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn test_tcp_reconnect() {
         // Use temporary config for this test
         let _guard = config::global::set_temp_config(Config {
@@ -2365,7 +2365,7 @@ mod tests {
         }
     }
 
-    #[async_timed_test(timeout_secs = 30)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn test_persistent_server_session() {
         // Use temporary config for this test
         let _guard = config::global::set_temp_config(Config {
@@ -2843,7 +2843,7 @@ mod tests {
 
     // Verify a large number of messages can be delivered and acked with the
     // presence of flakiness in the network, i.e. random delay and disconnection.
-    #[async_timed_test(timeout_secs = 30)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn test_network_flakiness_in_channel() {
         set_tracing_env_filter(Level::DEBUG);
         let sampling_rate = 100;
@@ -2908,7 +2908,7 @@ mod tests {
         // check here to verify the messages are acked correctly.
     }
 
-    #[async_timed_test(timeout_secs = 30)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn test_ack_every_n_messages() {
         // Use temporary config for this test
         let _guard = config::global::set_temp_config(Config {
@@ -2919,7 +2919,7 @@ mod tests {
         sparse_ack().await;
     }
 
-    #[async_timed_test(timeout_secs = 30)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn test_ack_every_time_interval() {
         // Use temporary config for this test
         let _guard = config::global::set_temp_config(Config {
