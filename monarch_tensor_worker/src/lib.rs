@@ -89,6 +89,8 @@ use monarch_types::PyTree;
 use ndslice::Slice;
 use pipe::PipeActor;
 use pipe::PipeParams;
+use pyo3::Python;
+use pyo3::types::PyAnyMethods;
 use serde::Deserialize;
 use serde::Serialize;
 use sorted_vec::SortedVec;
@@ -253,10 +255,23 @@ impl Actor for WorkerActor {
 impl Handler<Cast<AssignRankMessage>> for WorkerActor {
     async fn handle(
         &mut self,
-        _this: &Instance<Self>,
+        this: &Instance<Self>,
         message: Cast<AssignRankMessage>,
     ) -> anyhow::Result<()> {
         self.rank = message.rank.0;
+        Python::with_gil(|py| {
+            let mesh_controller = py.import_bound("monarch.mesh_controller").unwrap();
+            mesh_controller
+                .call_method1(
+                    "_initialize_env",
+                    (
+                        self.rank,
+                        self.world_size,
+                        this.proc().proc_id().to_string(),
+                    ),
+                )
+                .unwrap();
+        });
         Ok(())
     }
 }

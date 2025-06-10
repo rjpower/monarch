@@ -141,6 +141,7 @@ class TestingContext:
         dm = dm.rename(hosts="host", gpus="gpu")
         try:
             yield dm
+            dm.exit()
         except Exception as e:
             # abnormal exit, so we just make sure we do not try to communicate in destructors,
             # but we do notn wait for workers to exit since we do not know what state they are in.

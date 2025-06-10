@@ -512,6 +512,7 @@ class TestController:
             monarch.random.make_deterministic()
             for device in ("cpu", "cuda"):
                 a = monarch.random.get_state()
+                monarch.inspect(a)
                 first = torch.rand(1, device=device)
                 monarch.random.set_state(a)
                 second = torch.rand(1, device=device)

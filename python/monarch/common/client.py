@@ -174,6 +174,8 @@ class Client:
         destroy_pg: bool = True,
         error_reason: Optional[RemoteException | DeviceException | Exception] = None,
     ) -> None:
+        if self.has_shutdown:
+            return
         logger.info("shutting down the client gracefully")
 
         atexit.unregister(self._atexit)

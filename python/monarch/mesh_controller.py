@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import os
 import traceback
 from collections import deque
 from logging import Logger
@@ -23,12 +24,15 @@ from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarc
 )
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyProcMesh
 from monarch._rust_bindings.monarch_messages.debugger import DebuggerAction
+from monarch.common._device_utils import _local_device_count
 from monarch.common.client import Client
 from monarch.common.controller_api import LogMessage, MessageResult
 from monarch.common.device_mesh import DeviceMesh, no_mesh
 from monarch.common.invocation import DeviceException, RemoteException
 from monarch.controller.debugger import read as debugger_read, write as debugger_write
 from monarch.proc_mesh import ProcMesh
+from monarch.rust_local_mesh import _get_worker_exec_info
+
 from pyre_extensions import none_throws
 
 logger: Logger = logging.getLogger(__name__)
@@ -190,6 +194,30 @@ def _worker_response_to_result(result: client.WorkerResponse) -> MessageResult:
         )
     else:
         raise RuntimeError(f"Unknown exception type: {type(exc)}")
+
+
+def _initialize_env(worker_rank: int, num_worker_procs: int, proc_id: str) -> None:
+    try:
+        _, worker_env = _get_worker_exec_info()
+        gpus_per_host = _local_device_count()
+        local_rank = worker_rank % gpus_per_host
+        process_env = {
+            **worker_env,
+            "HYPERACTOR_MANAGED_SUBPROCESS": "1",
+            "CUDA_VISIBLE_DEVICES": str(local_rank),
+            "NCCL_HOSTID": f"{proc_id}_host_{worker_rank // gpus_per_host}",
+            # This is needed to avoid a hard failure in ncclx when we do not
+            # have backend topology info (eg. on RE).
+            "NCCL_IGNORE_TOPO_LOAD_FAILURE": "true",
+            "LOCAL_RANK": str(local_rank),
+            "RANK": str(worker_rank),
+            "WORLD_SIZE": str(num_worker_procs),
+            "LOCAL_WORLD_SIZE": str(gpus_per_host),
+        }
+        os.environ.update(process_env)
+    except Exception:
+        traceback.print_exc()
+        raise
 
 
 def spawn_tensor_engine(proc_mesh: ProcMesh) -> DeviceMesh:
