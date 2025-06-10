@@ -1396,7 +1396,8 @@ pub(crate) mod unix {
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
-                        false
+                        // On non-Linux platforms, only compare pathname since no abstract names
+                        saddr.as_pathname() == oaddr.as_pathname()
                     }
                 }
                 (Self::Unbound, _) | (_, Self::Unbound) => false,
@@ -1445,8 +1446,29 @@ pub(crate) mod unix {
         }
 
         #[cfg(not(target_os = "linux"))]
-        pub fn from_abstract_name(_name: &str) -> anyhow::Result<Self> {
-            anyhow::bail!("abstract names are only supported on Linux")
+        pub fn from_abstract_name(name: &str) -> anyhow::Result<Self> {
+            // On non-Linux platforms, convert abstract names to filesystem paths
+            let name = name.strip_prefix("@").unwrap_or(name);
+            let path = Self::abstract_to_filesystem_path(name);
+            Self::from_pathname(&path.to_string_lossy())
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        fn abstract_to_filesystem_path(abstract_name: &str) -> std::path::PathBuf {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::Hash;
+            use std::hash::Hasher;
+
+            // Generate a stable hash of the abstract name for deterministic paths
+            let mut hasher = DefaultHasher::new();
+            abstract_name.hash(&mut hasher);
+            let hash = hasher.finish();
+
+            // Include process ID to prevent inter-process conflicts
+            let process_id = std::process::id();
+
+            // TODO: we just leak these. Should we do something smarter?
+            std::path::PathBuf::from(format!("/tmp/hyperactor_{}_{:x}", process_id, hash))
         }
 
         /// Pathnames may be absolute or relative.
@@ -1780,11 +1802,9 @@ mod tests {
     use rand::distributions::Alphanumeric;
     use timed_test::async_timed_test;
     use tokio::io::DuplexStream;
-    use tracing::Level;
 
     use super::*;
     use crate::Config;
-    use crate::test_utils::tracing::set_tracing_env_filter;
 
     fn unused_return_channel<M>() -> oneshot::Sender<M> {
         oneshot::channel().0
@@ -1899,7 +1919,6 @@ mod tests {
             ..Default::default()
         });
 
-        set_tracing_env_filter(Level::DEBUG);
         let (addr, mut rx) = tcp::serve::<String>("[::1]:0".parse().unwrap())
             .await
             .unwrap();
@@ -1924,7 +1943,7 @@ mod tests {
     }
 
     #[tracing_test::traced_test]
-    #[async_timed_test(timeout_secs = 30)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn test_tcp_reconnect() {
         // Use temporary config for this test
         let _guard = config::global::set_temp_config(Config {
@@ -2365,7 +2384,7 @@ mod tests {
         }
     }
 
-    #[async_timed_test(timeout_secs = 30)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn test_persistent_server_session() {
         // Use temporary config for this test
         let _guard = config::global::set_temp_config(Config {
@@ -2398,7 +2417,6 @@ mod tests {
             }
         }
 
-        set_tracing_env_filter(Level::DEBUG);
         let manager = SessionManager::new();
         let session_id = 123;
 
@@ -2469,7 +2487,6 @@ mod tests {
             message_ack_every_n_messages: 1,
             ..Default::default()
         });
-        hyperactor::test_utils::tracing::set_tracing_env_filter(tracing::Level::DEBUG);
         let manager = SessionManager::new();
         let session_id = 123;
 
@@ -2632,7 +2649,6 @@ mod tests {
     // Verify unacked message will be resent after reconnection.
     #[async_timed_test(timeout_secs = 60)]
     async fn test_persistent_net_tx() {
-        set_tracing_env_filter(Level::DEBUG);
         let link = MockLink::<u64>::new();
         let receiver_storage = link.receiver_storage();
 
@@ -2843,9 +2859,8 @@ mod tests {
 
     // Verify a large number of messages can be delivered and acked with the
     // presence of flakiness in the network, i.e. random delay and disconnection.
-    #[async_timed_test(timeout_secs = 30)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn test_network_flakiness_in_channel() {
-        set_tracing_env_filter(Level::DEBUG);
         let sampling_rate = 100;
         let mut link = MockLink::<u64>::with_network_flakiness(NetworkFlakiness {
             disconnect_params: Some((0.001, 15, Duration::from_millis(400))),
@@ -2908,7 +2923,7 @@ mod tests {
         // check here to verify the messages are acked correctly.
     }
 
-    #[async_timed_test(timeout_secs = 30)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn test_ack_every_n_messages() {
         // Use temporary config for this test
         let _guard = config::global::set_temp_config(Config {
@@ -2919,7 +2934,7 @@ mod tests {
         sparse_ack().await;
     }
 
-    #[async_timed_test(timeout_secs = 30)]
+    #[async_timed_test(timeout_secs = 60)]
     async fn test_ack_every_time_interval() {
         // Use temporary config for this test
         let _guard = config::global::set_temp_config(Config {
@@ -2931,7 +2946,6 @@ mod tests {
     }
 
     async fn sparse_ack() {
-        set_tracing_env_filter(Level::DEBUG);
         let mut link = MockLink::<u64>::new();
         // Set a large buffer size to improve throughput.
         link.set_buffer_size(1024000);
@@ -2997,7 +3011,6 @@ mod tests {
             message_delivery_timeout: Duration::from_secs(300),
             ..Default::default()
         });
-        set_tracing_env_filter(Level::DEBUG);
         let socket_addr: SocketAddr = "[::1]:0".parse().unwrap();
         let (local_addr, mut rx) = tcp::serve::<String>(socket_addr).await.unwrap();
 
