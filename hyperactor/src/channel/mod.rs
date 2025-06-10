@@ -740,7 +740,7 @@ mod tests {
                 "unix!@{}",
                 rng.sample_iter(Uniform::new_inclusive('a', 'z'))
                     .take(10)
-                    .collect()
+                    .collect::<String>()
             )
             .parse()
             .unwrap(),
