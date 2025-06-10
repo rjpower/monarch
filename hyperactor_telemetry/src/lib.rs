@@ -428,6 +428,7 @@ pub fn initialize_logging() {
 
     #[cfg(fbcode_build)]
     {
+        use crate::env::Env;
         fn is_layer_enabled(env_var: &str) -> bool {
             std::env::var(env_var).unwrap_or_default() != "1"
         }
