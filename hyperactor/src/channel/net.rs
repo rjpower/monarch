@@ -1780,11 +1780,9 @@ mod tests {
     use rand::distributions::Alphanumeric;
     use timed_test::async_timed_test;
     use tokio::io::DuplexStream;
-    use tracing::Level;
 
     use super::*;
     use crate::Config;
-    use crate::test_utils::tracing::set_tracing_env_filter;
 
     fn unused_return_channel<M>() -> oneshot::Sender<M> {
         oneshot::channel().0
@@ -1899,7 +1897,6 @@ mod tests {
             ..Default::default()
         });
 
-        set_tracing_env_filter(Level::DEBUG);
         let (addr, mut rx) = tcp::serve::<String>("[::1]:0".parse().unwrap())
             .await
             .unwrap();
@@ -2398,7 +2395,6 @@ mod tests {
             }
         }
 
-        set_tracing_env_filter(Level::DEBUG);
         let manager = SessionManager::new();
         let session_id = 123;
 
@@ -2469,7 +2465,6 @@ mod tests {
             message_ack_every_n_messages: 1,
             ..Default::default()
         });
-        hyperactor::test_utils::tracing::set_tracing_env_filter(tracing::Level::DEBUG);
         let manager = SessionManager::new();
         let session_id = 123;
 
@@ -2632,7 +2627,6 @@ mod tests {
     // Verify unacked message will be resent after reconnection.
     #[async_timed_test(timeout_secs = 60)]
     async fn test_persistent_net_tx() {
-        set_tracing_env_filter(Level::DEBUG);
         let link = MockLink::<u64>::new();
         let receiver_storage = link.receiver_storage();
 
@@ -2845,7 +2839,6 @@ mod tests {
     // presence of flakiness in the network, i.e. random delay and disconnection.
     #[async_timed_test(timeout_secs = 30)]
     async fn test_network_flakiness_in_channel() {
-        set_tracing_env_filter(Level::DEBUG);
         let sampling_rate = 100;
         let mut link = MockLink::<u64>::with_network_flakiness(NetworkFlakiness {
             disconnect_params: Some((0.001, 15, Duration::from_millis(400))),
@@ -2931,7 +2924,6 @@ mod tests {
     }
 
     async fn sparse_ack() {
-        set_tracing_env_filter(Level::DEBUG);
         let mut link = MockLink::<u64>::new();
         // Set a large buffer size to improve throughput.
         link.set_buffer_size(1024000);
@@ -2997,7 +2989,6 @@ mod tests {
             message_delivery_timeout: Duration::from_secs(300),
             ..Default::default()
         });
-        set_tracing_env_filter(Level::DEBUG);
         let socket_addr: SocketAddr = "[::1]:0".parse().unwrap();
         let (local_addr, mut rx) = tcp::serve::<String>(socket_addr).await.unwrap();
 
