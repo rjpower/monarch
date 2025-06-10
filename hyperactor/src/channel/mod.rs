@@ -730,7 +730,7 @@ mod tests {
         use rand::distributions::Uniform;
 
         let rng = rand::thread_rng();
-        let uds_name: String = rng
+        let _uds_name: String = rng
             .sample_iter(Uniform::new_inclusive('a', 'z'))
             .take(10)
             .collect();

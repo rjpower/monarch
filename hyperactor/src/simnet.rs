@@ -1078,17 +1078,11 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use rand::Rng;
-    use rand::distributions::Alphanumeric;
     use tokio::sync::Mutex;
-    use tokio::sync::oneshot;
 
     use super::*;
-    use crate::PortId;
     use crate::channel::ChannelTransport;
-    use crate::channel::Tx;
     use crate::channel::sim::SimAddr;
-    use crate::channel::sim::records;
     use crate::clock::Clock;
     use crate::clock::RealClock;
     use crate::clock::SimClock;
