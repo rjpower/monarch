@@ -709,7 +709,6 @@ mod tests {
                 }
             }
 
-            #[tracing_test::traced_test]
             #[tokio::test]
             async fn test_delivery_failure() {
                 use hyperactor::ActorId;
