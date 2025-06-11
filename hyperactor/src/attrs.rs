@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
 //! Attribute dictionary for type-safe, heterogeneous key-value storage with serde support.
 //!
 //! This module provides `Attrs`, a type-safe dictionary that can store heterogeneous values
@@ -180,10 +188,6 @@ impl<T: Serialize + Send + Sync + Clone + 'static> SerializableValue for T {
 /// The dictionary can be serialized using serde. During serialization, each value
 /// is serialized with its key name. During deserialization, the automatically registered
 /// key information is used to determine the correct type for each value.
-
-/// A type-safe attribute dictionary that maps keys to values of different types.
-///
-/// This struct uses string-based keys to avoid potential hash collisions from typehashes.
 pub struct Attrs {
     values: HashMap<&'static str, Box<dyn SerializableValue>>,
 }
