@@ -28,7 +28,6 @@ from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as HyPr
 from monarch._rust_bindings.monarch_hyperactor.shape import Point
 
 from monarch._rust_bindings.monarch_messages.debugger import DebuggerAction
-from monarch.common._device_utils import _local_device_count
 from monarch.common.client import Client
 from monarch.common.controller_api import LogMessage, MessageResult
 from monarch.common.device_mesh import DeviceMesh, no_mesh

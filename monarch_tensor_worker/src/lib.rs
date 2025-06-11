@@ -91,7 +91,6 @@ use monarch_types::PyTree;
 use ndslice::Slice;
 use pipe::PipeActor;
 use pipe::PipeParams;
-use pyo3::IntoPy;
 use pyo3::Py;
 use pyo3::Python;
 use pyo3::types::PyAnyMethods;
