@@ -6,6 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::collections::VecDeque;
 use std::iter::repeat_n;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -49,7 +50,7 @@ use crate::convert::convert;
 struct _Controller {
     controller_instance: Arc<Mutex<InstanceWrapper<ControllerMessage>>>,
     workers: RootActorMesh<'static, WorkerActor>,
-    pending_messages: Vec<PyObject>,
+    pending_messages: VecDeque<PyObject>,
     history: history::History,
 }
 
@@ -64,7 +65,7 @@ impl _Controller {
     ) -> PyResult<()> {
         for (seq, response) in responses {
             let message = crate::client::WorkerResponse::new(seq, response);
-            self.pending_messages.push(message.into_py(py));
+            self.pending_messages.push_back(message.into_py(py));
         }
         Ok(())
     }
@@ -86,7 +87,7 @@ impl _Controller {
                 } => {
                     let dm = crate::client::DebuggerMessage::new(debugger_actor_id.into(), action)?
                         .into_py(py);
-                    self.pending_messages.push(dm);
+                    self.pending_messages.push_back(dm);
                 }
                 ControllerMessage::Status {
                     seq,
@@ -175,7 +176,7 @@ impl _Controller {
         Ok(Self {
             workers: workers?,
             controller_instance: Arc::new(Mutex::new(controller_instance)),
-            pending_messages: Vec::new(),
+            pending_messages: VecDeque::new(),
             history: history::History::new(world_size),
         })
     }
@@ -226,7 +227,7 @@ impl _Controller {
         if self.pending_messages.is_empty() {
             self.fill_messages(py, timeout_msec)?;
         }
-        Ok(self.pending_messages.pop())
+        Ok(self.pending_messages.pop_front())
     }
 
     fn _debugger_attach(&mut self, pdb_actor: PyActorId) -> PyResult<()> {
