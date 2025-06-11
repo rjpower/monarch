@@ -356,6 +356,7 @@ pub(crate) mod test_util {
         Cast<Echo>,
         Cast<GetRank>,
         Cast<Error>,
+        GetRank,
         Relay,
         IndexedErasedUnbound<Cast<Echo>>,
         IndexedErasedUnbound<Cast<GetRank>>,
@@ -400,6 +401,20 @@ pub(crate) mod test_util {
             let ports = [self.1.port_id()];
             bindings.insert(ports)?;
             Ok(bindings)
+        }
+    }
+
+    #[async_trait]
+    impl Handler<GetRank> for TestActor {
+        async fn handle(
+            &mut self,
+            this: &Instance<Self>,
+            GetRank(ok, reply): GetRank,
+        ) -> Result<(), anyhow::Error> {
+            let rank = this.self_id().rank();
+            reply.send(this, rank)?;
+            anyhow::ensure!(ok, "intentional error!"); // If `!ok` exit with `Err()`.
+            Ok(())
         }
     }
 
@@ -692,6 +707,45 @@ mod tests {
                 for _ in 0..num_actors {
                     assert_eq!(rx.recv().await.unwrap(), CastTestMessage::Forward("abc".to_string()));
                 }
+            }
+
+            #[tracing_test::traced_test]
+            #[tokio::test]
+            async fn test_delivery_failure() {
+                use hyperactor::ActorId;
+                use hyperactor::ProcId;
+                use hyperactor::WorldId;
+                use hyperactor::mailbox::MessageEnvelope;
+                use hyperactor::mailbox::Undeliverable;
+
+                let alloc = $allocator
+                    .allocate(AllocSpec {
+                        shape: shape! { replica = 1  },
+                        constraints: Default::default(),
+                    })
+                    .await
+                    .unwrap();
+
+                let name = alloc.name().to_string();
+                let mesh = ProcMesh::allocate(alloc).await.unwrap();
+                let actor_mesh = mesh.spawn::<TestActor>("foo", &()).await.unwrap();
+                let (reply_to, _) = actor_mesh.open_port();
+
+                let (port, mut undeliverable_rx) = mesh.client().open_port::<Undeliverable<MessageEnvelope>>();
+                port.bind_to(Undeliverable::<MessageEnvelope>::port());
+
+                // Send a message to an actor that doesn't exist but the
+                // proc does.
+                let bad_actor: ActorRef<TestActor> =
+                    ActorRef::attest(ActorId(ProcId(WorldId(name.clone()), 0), "foo".into(), 1));
+                bad_actor.send(mesh.client(), GetRank(true, reply_to.bind())).unwrap();
+
+                // The message will be returned!
+                let Undeliverable(undelivered) = undeliverable_rx.recv().await.unwrap();
+                assert_eq!(mesh.client().actor_id(), undelivered.sender());
+                assert_eq!(&bad_actor.actor_id().port_id(GetRank::port()), undelivered.dest());
+
+                // TODO: Stop the proc.
             }
         }
     }

@@ -92,8 +92,8 @@ impl IntoFuture for Handle {
         async move {
             let (flag, state) = self.take().unwrap();
             flag.await;
-            let status = state.lock().unwrap().status();
-            status
+            
+            state.lock().unwrap().status()
         }
     }
 }
