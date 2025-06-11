@@ -254,14 +254,14 @@ impl _Controller {
             .map_err(|err| PyErr::new::<PyValueError, _>(err.to_string()))?;
         Ok(())
     }
-    fn _drain_and_stop(&mut self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+    fn _drain_and_stop(&mut self, py: Python<'_>) -> PyResult<()> {
+        self.send_slice(
+            self.workers.proc_mesh().shape().slice().clone(),
+            WorkerMessage::Exit { error: None },
+        )?;
         let instance = self.controller_instance.clone();
-        let result =
-            signal_safe_block_on(py, async move { instance.lock().await.drain_and_stop() })??;
-        for r in result {
-            self.add_message(r)?;
-        }
-        Ok(std::mem::take(&mut self.pending_messages))
+        let _ = signal_safe_block_on(py, async move { instance.lock().await.drain_and_stop() })??;
+        Ok(())
     }
 }
 

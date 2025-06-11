@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import atexit
 import logging
 import os
+import time
 import traceback
 from collections import deque
 from logging import Logger
@@ -32,7 +34,6 @@ from monarch.common.invocation import DeviceException, RemoteException
 from monarch.controller.debugger import read as debugger_read, write as debugger_write
 from monarch.proc_mesh import ProcMesh
 from monarch.rust_local_mesh import _get_worker_exec_info
-
 from pyre_extensions import none_throws
 
 logger: Logger = logging.getLogger(__name__)
@@ -76,18 +77,8 @@ class Controller(_Controller):
     def drain_and_stop(
         self,
     ) -> List[LogMessage | MessageResult | client.DebuggerMessage]:
-        logger.info("rust controller shutting down")
-        results = []
-        for msg in self._drain_and_stop():
-            if isinstance(msg, client.WorkerResponse):
-                results.append(_worker_response_to_result(msg))
-            elif isinstance(msg, client.LogMessage):
-                results.append(LogMessage(msg.level, msg.message))
-            elif isinstance(msg, client.DebuggerMessage):
-                results.append(msg)
-            else:
-                raise RuntimeError(f"Unexpected message type {type(msg)}")
-        return results
+        self._drain_and_stop()
+        return []
 
     def _run_debugger_loop(self, message: client.DebuggerMessage) -> None:
         if not isinstance(message.action, DebuggerAction.Paused):
@@ -220,13 +211,49 @@ def _initialize_env(worker_rank: int, num_worker_procs: int, proc_id: str) -> No
         raise
 
 
+class MeshClient(Client):
+    def shutdown(
+        self,
+        destroy_pg: bool = True,
+        error_reason: Optional[RemoteException | DeviceException | Exception] = None,
+    ):
+        # return
+        if self.has_shutdown:
+            return
+        logger.info("shutting down the client gracefully")
+
+        atexit.unregister(self._atexit)
+        self._shutdown = True
+        if self._pending_shutdown_error:
+            raise self._pending_shutdown_error
+
+        # ensure all pending work is finished.
+        # all errors must be messaged back at this point
+        self.new_node_nocoalesce([], [], None, [])
+        self._request_status()
+
+        ttl = 60
+        start_time = time.time()
+        end_time = start_time + ttl
+        while ttl > 0 and self.last_assigned_seq > self.last_processed_seq:
+            ttl = end_time - time.time()
+            self.handle_next_message(ttl)
+
+        if ttl <= 0:
+            raise RuntimeError("shutdown timed out")
+
+        # we are not expecting anything more now, because we already
+        # waited for the responses
+        self.inner.drain_and_stop()
+
+
 def spawn_tensor_engine(proc_mesh: ProcMesh) -> DeviceMesh:
     # This argument to Controller
     # is currently only used for debug printing. It should be fixed to
     # report the proc ID instead of the rank it currently does.
     gpus = proc_mesh.sizes.get("gpus", 1)
     backend_ctrl = Controller(proc_mesh._proc_mesh)
-    client = Client(backend_ctrl, proc_mesh.size(), gpus)
+    client = MeshClient(backend_ctrl, proc_mesh.size(), gpus)
     dm = DeviceMesh(
         client,
         NDSlice.new_row_major(list(proc_mesh.sizes.values())),

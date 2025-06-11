@@ -103,6 +103,13 @@ class Client:
         # workers.
         self.last_processed_seq = -1
 
+        # an error that we have received but know for certain has not
+        # been propagated to a future. This will be reported on shutdown
+        # to avoid hiding the error. This is best effort: we only keep
+        # the error until the point the a future is dependent on
+        # _any_ error, not particularly the tracked one.
+        self._pending_shutdown_error = None
+
         self.recorder = Recorder()
 
         self.pending_results: Dict[
@@ -180,6 +187,8 @@ class Client:
 
         atexit.unregister(self._atexit)
         self._shutdown = True
+        if self._pending_shutdown_error:
+            raise self._pending_shutdown_error
 
         # request status for the last sent seq, and wait for the result to make sure all
         # seqs are processed.
@@ -305,6 +314,10 @@ class Client:
 
         if error is not None:
             logging.info("Received error for seq %s: %s", seq, error)
+            if self._shutdown:
+                raise error
+
+            self._pending_shutdown_error = error
             # We should not have set result if we have an error.
             assert result is None
             if not isinstance(error, RemoteException):
@@ -328,7 +341,11 @@ class Client:
 
         fut, _ = self.pending_results[seq]
         if fut is not None:
-            fut._set_result(result if error is None else error)
+            if error is None:
+                fut._set_result(result)
+            else:
+                fut._set_result(error)
+                self._pending_shutdown_error = None
         elif result is not None:
             logger.debug(f"{seq}: unused result {result}")
         elif error is not None:

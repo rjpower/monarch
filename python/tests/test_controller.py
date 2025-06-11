@@ -602,6 +602,13 @@ class TestController:
         assert torch.equal(moved_tensor_a, torch.tensor([1.0]))
         assert torch.equal(moved_tensor_b, torch.tensor([2.0]))
 
+    def test_hanging_error(self, backend_type):
+        with self.local_device_mesh(2, 2, backend_type) as device_mesh:
+            remote(lambda: torch.rand(3) + torch.rand(4), propagate=lambda: None)()
+
+            with pytest.raises(Exception, match="The size of tensor"):
+                device_mesh.client.shutdown()
+
     def test_slice_mesh_pytree(self, backend_type):
         with self.local_device_mesh(2, 2, backend_type) as device_mesh:
             a = device_mesh.rank(("host")) + torch.zeros((1,), device="cuda")
