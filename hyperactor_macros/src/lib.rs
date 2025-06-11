@@ -1208,3 +1208,4 @@ fn export_impl(which: &'static str, attr: TokenStream, input: &DeriveInput) -> T
 
     TokenStream::from(expanded)
 }
+
