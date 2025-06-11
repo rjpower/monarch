@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
 //! Attribute dictionary for type-safe, heterogeneous key-value storage with serde support.
 //!
 //! This module provides `Attrs`, a type-safe dictionary that can store heterogeneous values
