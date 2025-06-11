@@ -187,8 +187,6 @@ class Client:
 
         atexit.unregister(self._atexit)
         self._shutdown = True
-        if self._pending_shutdown_error:
-            raise self._pending_shutdown_error
 
         # request status for the last sent seq, and wait for the result to make sure all
         # seqs are processed.
@@ -314,9 +312,6 @@ class Client:
 
         if error is not None:
             logging.info("Received error for seq %s: %s", seq, error)
-            if self._shutdown:
-                raise error
-
             self._pending_shutdown_error = error
             # We should not have set result if we have an error.
             assert result is None

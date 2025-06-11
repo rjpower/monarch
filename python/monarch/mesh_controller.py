@@ -227,8 +227,6 @@ class MeshClient(Client):
 
         atexit.unregister(self._atexit)
         self._shutdown = True
-        if self._pending_shutdown_error:
-            raise self._pending_shutdown_error
 
         # ensure all pending work is finished.
         # all errors must be messaged back at this point
@@ -241,6 +239,8 @@ class MeshClient(Client):
         while ttl > 0 and self.last_assigned_seq > self.last_processed_seq:
             ttl = end_time - time.time()
             self.handle_next_message(ttl)
+            if self._pending_shutdown_error:
+                raise self._pending_shutdown_error
 
         if ttl <= 0:
             raise RuntimeError("shutdown timed out")

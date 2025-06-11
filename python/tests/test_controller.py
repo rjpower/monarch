@@ -603,6 +603,8 @@ class TestController:
         assert torch.equal(moved_tensor_b, torch.tensor([2.0]))
 
     def test_hanging_error(self, backend_type):
+        if backend_type != "mesh":
+            pytest.skip("only relevant for mesh backend")
         with self.local_device_mesh(2, 2, backend_type) as device_mesh:
             remote(lambda: torch.rand(3) + torch.rand(4), propagate=lambda: None)()
 
