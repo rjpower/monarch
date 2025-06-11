@@ -274,11 +274,9 @@ impl History {
                 Some(RefStatus::Errored(exception)) => {
                     // We know that this invocation hasn't been completed yet, so we can
                     // directly call set_exception on it.
-                    if !invocation.reported {
-                        invocation.set_exception(exception.clone());
-                        results.push((seq, Some(Err(exception.clone()))));
-                        invocation.reported = true;
-                    }
+                    invocation.set_exception(exception.clone());
+                    results.push((seq, Some(Err(exception.clone()))));
+                    invocation.reported = true;
                 }
                 Some(RefStatus::Invoked(invoked_seq)) => {
                     if let Some(invocation) = self.invocations.get_mut(invoked_seq) {
