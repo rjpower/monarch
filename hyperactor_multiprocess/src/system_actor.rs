@@ -2608,10 +2608,8 @@ mod tests {
         use crate::supervision::ProcSupervisor;
 
         // Use temporary config for this test
-        let _guard = hyperactor::config::global::set_temp_config(hyperactor::config::Config {
-            message_delivery_timeout: Duration::from_secs(1),
-            ..Default::default()
-        });
+        let config = hyperactor::config::global::lock();
+        let _guard = config.override_key(hyperactor::config::MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(1));
 
         // Serve a system. Undeliverable messages encountered by the
         // mailbox server are returned to the system actor.
