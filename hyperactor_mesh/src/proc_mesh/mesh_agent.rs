@@ -16,7 +16,6 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 use enum_as_inner::EnumAsInner;
-use hyperactor::mailbox::DeliveryError;
 use hyperactor::Actor;
 use hyperactor::ActorHandle;
 use hyperactor::ActorId;
@@ -33,6 +32,7 @@ use hyperactor::actor::remote::Remote;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::mailbox::BoxedMailboxSender;
+use hyperactor::mailbox::DeliveryError;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::IntoBoxedMailboxSender;
 use hyperactor::mailbox::MailboxClient;
@@ -135,7 +135,7 @@ impl Actor for MeshAgent {
     async fn handle_undeliverable_message(
         &mut self,
         this: &Instance<Self>,
-        mut undelivered: Undeliverable<MessageEnvelope>,
+        undelivered: Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
         let Undeliverable(ref envelope) = undelivered;
         tracing::info!("took charge of a message not delivered: {}", envelope);

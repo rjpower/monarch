@@ -10,7 +10,6 @@
 
 //! This module contains all the core traits required to define and manage actors.
 
-use crate::mailbox::UndeliverableMessageError;
 use std::any::TypeId;
 use std::fmt;
 use std::fmt::Debug;
@@ -46,6 +45,7 @@ use crate::mailbox::MailboxSenderError;
 use crate::mailbox::MessageEnvelope;
 use crate::mailbox::PortHandle;
 use crate::mailbox::Undeliverable;
+use crate::mailbox::UndeliverableMessageError;
 use crate::mailbox::log::MessageLogError;
 use crate::message::Castable;
 use crate::message::IndexedErasedUnbound;

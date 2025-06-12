@@ -2633,7 +2633,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_detached_return_handle() {
-        let (return_handle, mut return_receiver) = new_undeliverable_port();
+        let (return_handle, mut return_receiver) =
+            crate::mailbox::undeliverable::new_undeliverable_port();
         // Simulate an undelivered message return.
         let envelope = MessageEnvelope::new(
             id!(foo[0].bar),
