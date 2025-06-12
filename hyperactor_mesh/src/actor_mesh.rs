@@ -745,18 +745,18 @@ mod tests {
                 let name = alloc.name().to_string();
                 let mesh = ProcMesh::allocate(alloc).await.unwrap();
                 let actor_mesh = mesh.spawn::<TestActor>("foo", &()).await.unwrap();
-                let reply_to = actor_mesh.open_port::<usize>().0.bind();
+                let unmonitored_reply_to = actor_mesh.open_port::<usize>().0.bind();
                 let (undeliverable_messages, mut undeliverable_rx) = actor_mesh.open_port::<Undeliverable<MessageEnvelope>>();
                 undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
                 // Send a message to a non-existent actor (the proc however exists).
                 let bad_actor = ActorRef::<TestActor>::attest(ActorId(ProcId(WorldId(name.clone()), 0), "foo".into(), 1));
-                bad_actor.send(mesh.client(), GetRank(true, reply_to)).unwrap();
+                bad_actor.send(mesh.client(), GetRank(true, unmonitored_reply_to)).unwrap();
 
                 // The message will be returned!
-                let Undeliverable(undelivered) = undeliverable_rx.recv().await.unwrap();
-                assert_eq!(mesh.client().actor_id(), undelivered.sender());
-                assert_eq!(&bad_actor.actor_id().port_id(GetRank::port()), undelivered.dest());
+                let Undeliverable(msg) = undeliverable_rx.recv().await.unwrap();
+                assert_eq!(mesh.client().actor_id(), msg.sender());
+                assert_eq!(&bad_actor.actor_id().port_id(GetRank::port()), msg.dest());
 
                 // TODO: Stop the proc.
             }
