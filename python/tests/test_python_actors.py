@@ -385,11 +385,9 @@ def test_rust_binding_modules_correct() -> None:
     check(bindings, "monarch._rust_bindings")
 
 
-IS_SANDCASTLE = os.getenv("TW_JOB_USER") == "sandcastle"
-
-
 @pytest.mark.skipif(
-    IS_SANDCASTLE, reason="TODO: Can't seem to find GPUs but only this test case?"
+    torch.cuda.device_count() < 2,
+    reason="Not enough GPUs, this test requires at least 2 GPUs",
 )
 def test_tensor_engine() -> None:
     pm = proc_mesh(gpus=2).get()
