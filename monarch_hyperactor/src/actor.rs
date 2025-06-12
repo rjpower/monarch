@@ -25,6 +25,7 @@ use hyperactor::message::IndexedErasedUnbound;
 use hyperactor::message::Unbind;
 use hyperactor_mesh::actor_mesh::Cast;
 use monarch_types::PickledPyObject;
+use monarch_types::SerializablePyErr;
 use pyo3::exceptions::PyBaseException;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -166,7 +167,7 @@ impl PickledMessageClientActor {
 }
 
 #[pyclass(frozen, module = "monarch._rust_bindings.monarch_hyperactor.actor")]
-#[derive(Clone, Serialize, Deserialize, Named)]
+#[derive(Clone, Serialize, Deserialize, Named, PartialEq)]
 pub struct PythonMessage {
     method: String,
     message: ByteBuf,
@@ -188,12 +189,19 @@ impl std::fmt::Debug for PythonMessage {
 
 impl Unbind for PythonMessage {
     fn bindings(&self) -> anyhow::Result<Bindings> {
-        Ok(Bindings::default())
+        let mut bindings = Bindings::default();
+        if let Some(response_port) = &self.response_port {
+            bindings.push(response_port)?;
+        }
+        Ok(bindings)
     }
 }
 
 impl Bind for PythonMessage {
-    fn bind(self, _bindings: &Bindings) -> anyhow::Result<Self> {
+    fn bind(mut self, bindings: &Bindings) -> anyhow::Result<Self> {
+        if let Some(response_port) = &mut self.response_port {
+            bindings.rebind::<PortId>([response_port].into_iter())?;
+        }
         Ok(self)
     }
 }
@@ -268,7 +276,7 @@ impl Actor for PythonActor {
     type Params = PickledPyObject;
 
     async fn new(actor_type: PickledPyObject) -> Result<Self, anyhow::Error> {
-        Ok(Python::with_gil(|py| -> PyResult<Self> {
+        Ok(Python::with_gil(|py| -> Result<Self, SerializablePyErr> {
             let unpickled = actor_type.unpickle(py)?;
             let class_type: &Bound<'_, PyType> = unpickled.downcast()?;
             let actor: PyObject = class_type.call0()?.to_object(py);
@@ -369,10 +377,7 @@ async fn drive_future(
                     .unwrap()
                     .clone()
                     .into();
-                match err.traceback_bound(py) {
-                    None => Err(anyhow::anyhow!("{} <no traceback available>", err)),
-                    Some(traceback) => Err(anyhow::anyhow!("{}: {}", err, traceback.format()?)),
-                }
+                Err(SerializablePyErr::from(py, &err).into())
             }),
             // An Err means that the sender has been dropped without sending.
             // That's okay, it just means that the Python task has completed.
@@ -403,7 +408,7 @@ impl Handler<PythonMessage> for PythonActor {
         // See [Panics in async endpoints].
         let (sender, receiver) = oneshot::channel();
 
-        let future = Python::with_gil(|py| -> PyResult<_> {
+        let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
             let mailbox = PyMailbox {
                 inner: this.mailbox_for_py().clone(),
             };
@@ -430,6 +435,7 @@ impl Handler<PythonMessage> for PythonActor {
                 awaitable.into_bound(py),
             )
             .map(Some)
+            .map_err(|err| err.into())
         })?;
 
         if let Some(future) = future {
@@ -454,7 +460,7 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
         // See [Panics in async endpoints].
         let (sender, receiver) = oneshot::channel();
 
-        let future = Python::with_gil(|py| -> PyResult<_> {
+        let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
             let mailbox = PyMailbox {
                 inner: this.mailbox_for_py().clone(),
             };
@@ -484,6 +490,7 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
                 awaitable.into_bound(py),
             )
             .map(Some)
+            .map_err(|err| err.into())
         })?;
 
         if let Some(future) = future {
@@ -500,4 +507,34 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     hyperactor_mod.add_class::<PythonMessage>()?;
     hyperactor_mod.add_class::<PanicFlag>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use hyperactor::id;
+
+    use super::*;
+
+    #[test]
+    fn test_python_message_bind_unbind() {
+        let message = PythonMessage {
+            method: "test".to_string(),
+            message: ByteBuf::from(vec![1, 2, 3]),
+            response_port: Some(id!(world[0].client[0][123])),
+            rank_in_response: false,
+        };
+        {
+            let unbound = message.clone().unbind().unwrap();
+            assert_eq!(message, unbound.bind().unwrap());
+        }
+
+        let no_port_message = PythonMessage {
+            response_port: None,
+            ..message
+        };
+        {
+            let unbound = no_port_message.clone().unbind().unwrap();
+            assert_eq!(no_port_message, unbound.bind().unwrap());
+        }
+    }
 }
