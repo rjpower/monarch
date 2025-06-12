@@ -171,6 +171,7 @@ impl<'a, A: RemoteActor> RootActorMesh<'a, A> {
 
     /// Until the selection logic is more powerful, we need a way to
     /// replicate the send patterns that the worker actor mesh actually does.
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
     pub fn cast_slices<M: RemoteMessage + Clone>(
         &self,
         sel: Vec<Slice>,
