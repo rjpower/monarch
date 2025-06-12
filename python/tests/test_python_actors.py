@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import operator
+import os
 from types import ModuleType
 
 import monarch
@@ -384,6 +385,12 @@ def test_rust_binding_modules_correct() -> None:
     check(bindings, "monarch._rust_bindings")
 
 
+IS_SANDCASTLE = os.getenv("TW_JOB_USER") == "sandcastle"
+
+
+@pytest.mark.skipif(
+    IS_SANDCASTLE, reason="TODO: Can't seem to find GPUs but only this test case?"
+)
 def test_tensor_engine() -> None:
     pm = proc_mesh(gpus=2).get()
 
