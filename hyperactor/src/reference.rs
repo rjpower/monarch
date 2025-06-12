@@ -765,7 +765,6 @@ pub struct PortRef<M: RemoteMessage> {
 }
 
 impl<M: RemoteMessage> PortRef<M> {
-
     /// The caller attests that the provided PortId can be
     /// converted to a reachable, typed port reference.
     pub fn attest(port_id: PortId) -> Self {
@@ -778,18 +777,18 @@ impl<M: RemoteMessage> PortRef<M> {
 
     /// The caller attests that the provided PortId can be
     /// converted to a reachable, typed port reference.
-    pub fn attest_message_port(actor: &ActorId) -> Self {
-        PortRef::<M>::attest(actor.port_id(<M as Named>::port()))
-    }
-
-    /// The caller attests that the provided PortId can be
-    /// converted to a reachable, typed port reference.
     pub(crate) fn attest_reducible(port_id: PortId, reducer_typehash: Option<u64>) -> Self {
         Self {
             port_id,
             reducer_typehash,
             phantom: PhantomData,
         }
+    }
+
+    /// The caller attests that the provided PortId can be
+    /// converted to a reachable, typed port reference.
+    pub fn attest_message_port(actor: &ActorId) -> Self {
+        PortRef::<M>::attest(actor.port_id(<M as Named>::port()))
     }
 
     /// The typehash of this port's reducer, if any. Reducers
