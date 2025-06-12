@@ -507,7 +507,6 @@ mod tests {
     use hyperactor::mailbox::PortReceiver;
     use hyperactor::mailbox::open_port;
     use hyperactor::reference::Index;
-    use hyperactor::test_utils::tracing::set_tracing_env_filter;
     use hyperactor_mesh_macros::sel;
     use maplit::btreemap;
     use maplit::hashmap;
@@ -517,7 +516,6 @@ mod tests {
     use test_utils::*;
     use timed_test::async_timed_test;
     use tokio::time::Duration;
-    use tracing::Level;
 
     use super::*;
     use crate::ProcMesh;
@@ -830,7 +828,6 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 30)]
     async fn test_cast_and_reply() {
-        set_tracing_env_filter(Level::INFO);
         let MeshSetup {
             actor_mesh,
             mut reply1_rx,
@@ -919,7 +916,6 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 30)]
     async fn test_cast_and_accum() -> Result<()> {
-        set_tracing_env_filter(Level::INFO);
         let MeshSetup {
             actor_mesh,
             mut reply1_rx,
