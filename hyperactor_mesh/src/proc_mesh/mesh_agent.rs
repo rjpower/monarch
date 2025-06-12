@@ -136,16 +136,16 @@ impl Actor for MeshAgent {
         undelivered: Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
         let Undeliverable(ref envelope) = undelivered;
-        tracing::info!("Took charge of a message not delivered: {}", envelope);
+        tracing::info!("took charge of a message not delivered: {}", envelope);
 
         let sender = envelope.sender().clone();
-        let return_port = PortRef::attest(sender.port_id(Undeliverable::<MessageEnvelope>::port()));
+        let return_port = PortRef::<Undeliverable<MessageEnvelope>>::attest_message_port(&sender);
         match return_port.send(this, undelivered) {
             Ok(()) => (),
             Err(err) => {
                 // TODO: Consider what behavior we want in this case.
                 tracing::error!(
-                    "Attempt to return {} an undeliverable message failed: {}",
+                    "attempt to return {} an undeliverable message failed: {}",
                     sender,
                     err
                 );
