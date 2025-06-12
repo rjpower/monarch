@@ -93,6 +93,7 @@ impl IntoFuture for Handle {
             let (flag, state) = self.take().unwrap();
             flag.await;
 
+            #[allow(clippy::let_and_return)]
             let status = state.lock().unwrap().status();
             status
         }
