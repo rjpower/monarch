@@ -16,6 +16,7 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 use enum_as_inner::EnumAsInner;
+use hyperactor::mailbox::DeliveryError;
 use hyperactor::Actor;
 use hyperactor::ActorHandle;
 use hyperactor::ActorId;
@@ -38,6 +39,7 @@ use hyperactor::mailbox::MailboxClient;
 use hyperactor::mailbox::MailboxSender;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::Undeliverable;
+use hyperactor::mailbox::UndeliverableMessageError;
 use hyperactor::proc::Proc;
 use hyperactor::supervision::ActorSupervisionEvent;
 use serde::Deserialize;
@@ -133,24 +135,22 @@ impl Actor for MeshAgent {
     async fn handle_undeliverable_message(
         &mut self,
         this: &Instance<Self>,
-        undelivered: Undeliverable<MessageEnvelope>,
+        mut undelivered: Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
         let Undeliverable(ref envelope) = undelivered;
         tracing::info!("took charge of a message not delivered: {}", envelope);
 
         let sender = envelope.sender().clone();
-        let return_port = PortRef::<Undeliverable<MessageEnvelope>>::attest_message_port(&sender);
-        match return_port.send(this, undelivered) {
-            Ok(()) => (),
-            Err(err) => {
-                // TODO: Consider what behavior we want in this case.
-                tracing::error!(
-                    "attempt to return {} an undeliverable message failed: {}",
-                    sender,
-                    err
-                );
-            }
+        if this.self_id() == &sender {
+            anyhow::bail!(UndeliverableMessageError::delivery_failure(envelope));
         }
+
+        let mut envelope = envelope.clone();
+        let return_port = PortRef::attest_message_port(&sender);
+        return_port.send(this, undelivered).map_err(|err| {
+            envelope.try_set_error(DeliveryError::BrokenLink(format!("send failure: {err}")));
+            UndeliverableMessageError::return_failure(&envelope)
+        })?;
 
         Ok(())
     }

@@ -10,6 +10,7 @@
 
 //! This module contains all the core traits required to define and manage actors.
 
+use crate::mailbox::UndeliverableMessageError;
 use std::any::TypeId;
 use std::fmt;
 use std::fmt::Debug;
@@ -131,23 +132,9 @@ pub trait Actor: Sized + Send + Sync + Debug + 'static {
         this: &Instance<Self>,
         Undeliverable(envelope): Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
-        let to = envelope.dest().clone();
-        let from = envelope.sender().clone();
+        assert_eq!(envelope.sender(), this.self_id());
 
-        // We don't expect returned messages we didn't send.
-        assert_eq!(from, *this.self_id());
-
-        // By this return, the default behavior is to exit this
-        // actor's message loop and transition the actor's state to
-        // `ActorStatus::Failed` with this error message.
-        Err(anyhow::anyhow!(format!(
-            "a message from {} to {} was undeliverable and returned: {:?}",
-            from,
-            to,
-            envelope
-                .error()
-                .map_or("None".to_string(), |e| format!("{:?}", e))
-        )))
+        anyhow::bail!(UndeliverableMessageError::delivery_failure(&envelope));
     }
 }
 
