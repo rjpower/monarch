@@ -520,8 +520,13 @@ pub(crate) mod test_util {
 #[cfg(test)]
 mod tests {
 
+    use hyperactor::ActorId;
     use hyperactor::PortRef;
+    use hyperactor::ProcId;
+    use hyperactor::WorldId;
     use hyperactor::id;
+    use hyperactor::mailbox::MessageEnvelope;
+    use hyperactor::mailbox::Undeliverable;
     use hyperactor::message::Bind;
     use hyperactor::message::Unbind;
     use ndslice::shape;
@@ -636,7 +641,6 @@ mod tests {
                         && hops.is_empty());
             }
 
-            #[tracing_test::traced_test]
             #[tokio::test]
             async fn test_inter_proc_mesh_comms() {
                 let mut meshes = Vec::new();
@@ -711,12 +715,6 @@ mod tests {
 
             #[tokio::test]
             async fn test_delivery_failure() {
-                use hyperactor::ActorId;
-                use hyperactor::ProcId;
-                use hyperactor::WorldId;
-                use hyperactor::mailbox::MessageEnvelope;
-                use hyperactor::mailbox::Undeliverable;
-
                 let alloc = $allocator
                     .allocate(AllocSpec {
                         shape: shape! { replica = 1  },
