@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import operator
+import os
 from types import ModuleType
 
 import monarch
@@ -384,6 +385,10 @@ def test_rust_binding_modules_correct() -> None:
     check(bindings, "monarch._rust_bindings")
 
 
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Not enough GPUs, this test requires at least 2 GPUs",
+)
 def test_tensor_engine() -> None:
     pm = proc_mesh(gpus=2).get()
 
