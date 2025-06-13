@@ -66,7 +66,6 @@ use crate::RemoteMessage;
 use crate::clock::Clock;
 use crate::clock::RealClock;
 use crate::config;
-use crate::config::global::message_delivery_timeout;
 
 /// Use to prevent [futures::Stream] objects using the wrong next() method by
 /// accident. Bascially, we want to use [tokio_stream::StreamExt::next] since it
@@ -167,7 +166,7 @@ fn deserialize_ack(data: BytesMut) -> Result<u64, usize> {
 
 fn build_codec() -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()
-        .max_frame_length(config::global::codec_max_frame_length())
+        .max_frame_length(config::global::get(config::CODEC_MAX_FRAME_LENGTH))
         .new_codec()
 }
 
@@ -230,7 +229,9 @@ impl<M: RemoteMessage> NetTx<M> {
             fn is_expired(&self) -> bool {
                 match self.deque.front() {
                     None => false,
-                    Some((_, _, since, _)) => since.elapsed() > message_delivery_timeout(),
+                    Some((_, _, since, _)) => {
+                        since.elapsed() > config::global::get(config::MESSAGE_DELIVERY_TIMEOUT)
+                    }
                 }
             }
 
@@ -341,7 +342,7 @@ impl<M: RemoteMessage> NetTx<M> {
             fn is_expired(&self) -> bool {
                 matches!(
                     self.0.front(),
-                    Some((_, _, received_at, _)) if received_at.elapsed() > message_delivery_timeout()
+                    Some((_, _, received_at, _)) if received_at.elapsed() > config::global::get(config::MESSAGE_DELIVERY_TIMEOUT)
                 )
             }
 
@@ -352,7 +353,10 @@ impl<M: RemoteMessage> NetTx<M> {
                 match self.0.front() {
                     Some((_, _, received_at, _)) => {
                         RealClock
-                            .sleep_until(received_at.clone() + message_delivery_timeout())
+                            .sleep_until(
+                                received_at.clone()
+                                    + config::global::get(config::MESSAGE_DELIVERY_TIMEOUT),
+                            )
                             .await
                     }
                     None => std::future::pending::<()>().await,
@@ -463,7 +467,7 @@ impl<M: RemoteMessage> NetTx<M> {
                                 "session {}.{}: failed to receive ack within timeout {} secs; link is currently connected",
                                 link.dest(),
                                 session_id,
-                                message_delivery_timeout().as_secs(),
+                                config::global::get(config::MESSAGE_DELIVERY_TIMEOUT).as_secs(),
                             );
                             (State::Closing(Deliveries{outbox, unacked}), Conn::Connected { sink, stream })
                         }
@@ -585,7 +589,7 @@ impl<M: RemoteMessage> NetTx<M> {
                             "session {}.{}: failed to receive ack within timeout {} secs; link is currently broken",
                             link.dest(),
                             session_id,
-                            message_delivery_timeout().as_secs(),
+                            config::global::get(config::MESSAGE_DELIVERY_TIMEOUT).as_secs(),
                         );
                         (
                             State::Closing(Deliveries { outbox, unacked }),
@@ -891,8 +895,8 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
         use anyhow::Context;
         let mut last_ack_time = RealClock.now();
 
-        let ack_time_interval = config::global::message_ack_time_interval();
-        let ack_msg_interval = config::global::message_ack_every_n_messages();
+        let ack_time_interval = config::global::get(config::MESSAGE_ACK_TIME_INTERVAL);
+        let ack_msg_interval = config::global::get(config::MESSAGE_ACK_EVERY_N_MESSAGES);
 
         loop {
             tokio::select! {
@@ -1804,7 +1808,6 @@ mod tests {
     use tokio::io::DuplexStream;
 
     use super::*;
-    use crate::Config;
 
     fn unused_return_channel<M>() -> oneshot::Sender<M> {
         oneshot::channel().0
@@ -1913,11 +1916,9 @@ mod tests {
     async fn test_tcp_message_size() {
         let default_size_in_bytes = 100 * 1024 * 1024;
         // Use temporary config for this test
-        let _guard = config::global::set_temp_config(crate::Config {
-            message_delivery_timeout: Duration::from_secs(1),
-            codec_max_frame_length: default_size_in_bytes,
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard1 = config.override_key(config::MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(1));
+        let _guard2 = config.override_key(config::CODEC_MAX_FRAME_LENGTH, default_size_in_bytes);
 
         let (addr, mut rx) = tcp::serve::<String>("[::1]:0".parse().unwrap())
             .await
@@ -1946,10 +1947,8 @@ mod tests {
     #[async_timed_test(timeout_secs = 60)]
     async fn test_tcp_reconnect() {
         // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_ack_every_n_messages: 1,
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
         let socket_addr: SocketAddr = "[::1]:0".parse().unwrap();
         let (local_addr, mut rx1) = tcp::serve::<u64>(socket_addr).await.unwrap();
         let local_socket = match local_addr {
@@ -2387,10 +2386,8 @@ mod tests {
     #[async_timed_test(timeout_secs = 60)]
     async fn test_persistent_server_session() {
         // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_ack_every_n_messages: 1,
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
         async fn verify_ack(
             framed: &mut Framed<DuplexStream, LengthDelimitedCodec>,
             expected_last: u64,
@@ -2481,12 +2478,9 @@ mod tests {
     }
 
     #[async_timed_test(timeout_secs = 60)]
-    async fn test_ack_from_server_sesssion() {
-        // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_ack_every_n_messages: 1,
-            ..Default::default()
-        });
+    async fn test_ack_from_server_session() {
+        let config = config::global::lock();
+        let _guard = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
         let manager = SessionManager::new();
         let session_id = 123;
 
@@ -2547,10 +2541,8 @@ mod tests {
         let link = MockLink::<u64>::fail_connects();
         let tx = NetTx::<u64>::new(link);
         // Override the default (1m) for the purposes of this test.
-        let _guard = config::global::set_temp_config(Config {
-            message_delivery_timeout: Duration::from_secs(1),
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard = config.override_key(config::MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(1));
         let mut tx_receiver = tx.status().clone();
         let (return_channel, _return_receiver) = oneshot::channel();
         tx.try_post(123, return_channel).unwrap();
@@ -2801,10 +2793,8 @@ mod tests {
 
     async fn verify_ack_exceeded_limit(disconnect_before_ack: bool) {
         // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_delivery_timeout: Duration::from_secs(2),
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard = config.override_key(config::MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(2));
 
         let link: MockLink<u64> = MockLink::<u64>::new();
         let disconnect_signal = link.disconnect_signal().clone();
@@ -2925,23 +2915,22 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 60)]
     async fn test_ack_every_n_messages() {
-        // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_ack_every_n_messages: 600,
-            message_ack_time_interval: Duration::from_millis(1000000),
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard_message_ack = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 600);
+        let _guard_time_interval =
+            config.override_key(config::MESSAGE_ACK_TIME_INTERVAL, Duration::from_secs(1000));
         sparse_ack().await;
     }
 
     #[async_timed_test(timeout_secs = 60)]
     async fn test_ack_every_time_interval() {
-        // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_ack_every_n_messages: 100000000,
-            message_ack_time_interval: Duration::from_millis(500),
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard_message_ack =
+            config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 100000000);
+        let _guard_time_interval = config.override_key(
+            config::MESSAGE_ACK_TIME_INTERVAL,
+            Duration::from_millis(500),
+        );
         sparse_ack().await;
     }
 
@@ -3006,11 +2995,10 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 300)]
     async fn test_tcp_throughput() {
-        // Use temporary config for this test
-        let _guard = config::global::set_temp_config(Config {
-            message_delivery_timeout: Duration::from_secs(300),
-            ..Default::default()
-        });
+        let config = config::global::lock();
+        let _guard =
+            config.override_key(config::MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(300));
+
         let socket_addr: SocketAddr = "[::1]:0".parse().unwrap();
         let (local_addr, mut rx) = tcp::serve::<String>(socket_addr).await.unwrap();
 
