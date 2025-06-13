@@ -1286,7 +1286,7 @@ impl SplitPortBuffer {
     /// Push a new item to the buffer, and optionally return any items that should
     /// be flushed.
     fn push(&mut self, serialized: Serialized) -> Option<Vec<Serialized>> {
-        let limit = crate::config::global::split_max_buffer_size();
+        let limit = crate::config::global::get(crate::config::SPLIT_MAX_BUFFER_SIZE);
 
         self.0.push(serialized);
         if self.0.len() >= limit {
@@ -2964,10 +2964,8 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 30)]
     async fn test_split_port_id_sum_reducer() {
-        let _config_guard = crate::config::global::set_temp_config(crate::config::Config {
-            split_max_buffer_size: 1,
-            ..crate::config::Config::default()
-        });
+        let config = crate::config::global::lock();
+        let _config_guard = config.override_key(crate::config::SPLIT_MAX_BUFFER_SIZE, 1);
 
         let sum_accumulator = accum::sum::<u64>();
         let reducer_typehash = sum_accumulator.reducer_typehash();
