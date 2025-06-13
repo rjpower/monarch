@@ -11,6 +11,7 @@
 use std::cell::Cell;
 
 use pyo3::prelude::*;
+use pyo3::types::PyTraceback;
 use tracing::span::EnteredSpan;
 // Thread local to store the current span
 thread_local! {
@@ -43,18 +44,83 @@ pub fn exit_span() -> PyResult<()> {
     Ok(())
 }
 
+/// Get the current span ID from the active span
+#[pyfunction]
+pub fn get_current_span_id() -> PyResult<u64> {
+    Ok(tracing::Span::current().id().map_or(0, |id| id.into_u64()))
+}
+
 /// Log a message with the given metaata
 #[pyfunction]
-pub fn forward_to_tracing(message: &str, file: &str, lineno: i64, level: i32) {
+pub fn forward_to_tracing(py: Python, record: PyObject) -> PyResult<()> {
+    let message = record.call_method0(py, "getMessage")?;
+    let message: &str = message.extract(py)?;
+    let lineno: i64 = record.getattr(py, "lineno")?.extract(py)?;
+    let file = record.getattr(py, "filename")?;
+    let file: &str = file.extract(py)?;
+    let level: i32 = record.getattr(py, "levelno")?.extract(py)?;
+
     // Map level number to level name
     match level {
-        40 => tracing::error!(file = file, lineno = lineno, message),
+        40 | 50 => {
+            let exc = record.getattr(py, "exc_info").ok();
+            let traceback = exc
+                .and_then(|exc| {
+                    if exc.is_none(py) {
+                        return None;
+                    }
+                    exc.extract::<(PyObject, PyObject, Bound<'_, PyTraceback>)>(py)
+                        .ok()
+                })
+                .map(|(_, _, tb)| tb.format().unwrap_or_default());
+            match traceback {
+                Some(traceback) => {
+                    tracing::error!(
+                        file = file,
+                        lineno = lineno,
+                        stacktrace = traceback,
+                        message
+                    );
+                }
+                None => {
+                    tracing::error!(file = file, lineno = lineno, message);
+                }
+            }
+        }
         30 => tracing::warn!(file = file, lineno = lineno, message),
         20 => tracing::info!(file = file, lineno = lineno, message),
         10 => tracing::debug!(file = file, lineno = lineno, message),
         _ => tracing::info!(file = file, lineno = lineno, message),
     }
+    Ok(())
 }
+
+#[pyclass(
+    unsendable,
+    subclass,
+    module = "monarch._rust_bindings.hyperactor_extension.telemetry"
+)]
+struct PySpan {
+    span: tracing::span::EnteredSpan,
+}
+
+#[pymethods]
+impl PySpan {
+    #[new]
+    fn new(name: &str) -> Self {
+        let span = tracing::span!(tracing::Level::DEBUG, "python.span", name = name);
+        let entered_span = span.entered();
+
+        Self { span: entered_span }
+    }
+
+    fn exit(&mut self) {
+        self.span = tracing::span::Span::none().entered();
+    }
+}
+
+use pyo3::Bound;
+use pyo3::types::PyModule;
 
 pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register the forward_to_tracing function
@@ -80,5 +146,13 @@ pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     module.add_function(exit_span_fn)?;
 
+    let get_current_span_id_fn = wrap_pyfunction!(get_current_span_id, module)?;
+    get_current_span_id_fn.setattr(
+        "__module__",
+        "monarch._rust_bindings.hyperactor_extension.telemetry",
+    )?;
+    module.add_function(get_current_span_id_fn)?;
+
+    module.add_class::<PySpan>()?;
     Ok(())
 }
