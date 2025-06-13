@@ -32,6 +32,8 @@ use ndslice::Selection;
 use ndslice::Shape;
 use ndslice::ShapeError;
 use ndslice::Slice;
+use ndslice::dsl;
+use ndslice::selection::ReifyView;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -73,11 +75,28 @@ pub trait ActorMesh: Mesh {
             None, // TODO: reducer typehash
         )?;
 
+        // Sub-set the selection to the selection that represents the mesh's view
+        // of the root mesh. We need to do this because the comm actor uses the
+        // slice as the stream key; thus different sub-slices will result in potentially
+        // out of order delivery.
+        //
+        // TODO: We should repair this by introducing an explicit stream key, associated
+        // with the root mesh.
+        let selection_of_slice = self
+            .shape()
+            .slice()
+            .reify_view(self.shape().slice())
+            .expect("invalid slice");
+        let selection = dsl::intersection(selection, selection_of_slice);
+
         self.proc_mesh().comm_actor().send(
             self.proc_mesh().client(),
             CastMessage {
                 dest: Uslice {
-                    slice: self.shape().slice().clone(),
+                    // TODO: currently this slice is being used as the stream key
+                    // in comm actor. We should change it to an explicit id, maintained
+                    // by the root proc mesh.
+                    slice: self.proc_mesh().shape().slice().clone(),
                     selection,
                 },
                 message,
@@ -152,6 +171,7 @@ impl<'a, A: RemoteActor> RootActorMesh<'a, A> {
 
     /// Until the selection logic is more powerful, we need a way to
     /// replicate the send patterns that the worker actor mesh actually does.
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
     pub fn cast_slices<M: RemoteMessage + Clone>(
         &self,
         sel: Vec<Slice>,
@@ -356,6 +376,7 @@ pub(crate) mod test_util {
         Cast<Echo>,
         Cast<GetRank>,
         Cast<Error>,
+        GetRank,
         Relay,
         IndexedErasedUnbound<Cast<Echo>>,
         IndexedErasedUnbound<Cast<GetRank>>,
@@ -400,6 +421,20 @@ pub(crate) mod test_util {
             let ports = [self.1.port_id()];
             bindings.insert(ports)?;
             Ok(bindings)
+        }
+    }
+
+    #[async_trait]
+    impl Handler<GetRank> for TestActor {
+        async fn handle(
+            &mut self,
+            this: &Instance<Self>,
+            GetRank(ok, reply): GetRank,
+        ) -> Result<(), anyhow::Error> {
+            let rank = this.self_id().rank();
+            reply.send(this, rank)?;
+            anyhow::ensure!(ok, "intentional error!"); // If `!ok` exit with `Err()`.
+            Ok(())
         }
     }
 
@@ -505,8 +540,13 @@ pub(crate) mod test_util {
 #[cfg(test)]
 mod tests {
 
+    use hyperactor::ActorId;
     use hyperactor::PortRef;
+    use hyperactor::ProcId;
+    use hyperactor::WorldId;
     use hyperactor::id;
+    use hyperactor::mailbox::MessageEnvelope;
+    use hyperactor::mailbox::Undeliverable;
     use hyperactor::message::Bind;
     use hyperactor::message::Unbind;
     use ndslice::shape;
@@ -620,7 +660,6 @@ mod tests {
                         && hops.is_empty());
             }
 
-            #[tracing_test::traced_test]
             #[tokio::test]
             async fn test_inter_proc_mesh_comms() {
                 let mut meshes = Vec::new();
@@ -691,6 +730,35 @@ mod tests {
                 for _ in 0..num_actors {
                     assert_eq!(rx.recv().await.unwrap(), CastTestMessage::Forward("abc".to_string()));
                 }
+            }
+
+            #[tokio::test]
+            async fn test_delivery_failure() {
+                let alloc = $allocator
+                    .allocate(AllocSpec {
+                        shape: shape! { replica = 1  },
+                        constraints: Default::default(),
+                    })
+                    .await
+                    .unwrap();
+
+                let name = alloc.name().to_string();
+                let mesh = ProcMesh::allocate(alloc).await.unwrap();
+                let actor_mesh = mesh.spawn::<TestActor>("foo", &()).await.unwrap();
+                let unmonitored_reply_to = actor_mesh.open_port::<usize>().0.bind();
+                let (undeliverable_messages, mut undeliverable_rx) = actor_mesh.open_port::<Undeliverable<MessageEnvelope>>();
+                undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
+
+                // Send a message to a non-existent actor (the proc however exists).
+                let bad_actor = ActorRef::<TestActor>::attest(ActorId(ProcId(WorldId(name.clone()), 0), "foo".into(), 1));
+                bad_actor.send(mesh.client(), GetRank(true, unmonitored_reply_to)).unwrap();
+
+                // The message will be returned!
+                let Undeliverable(msg) = undeliverable_rx.recv().await.unwrap();
+                assert_eq!(mesh.client().actor_id(), msg.sender());
+                assert_eq!(&bad_actor.actor_id().port_id(GetRank::port()), msg.dest());
+
+                // TODO: Stop the proc.
             }
         }
     }
