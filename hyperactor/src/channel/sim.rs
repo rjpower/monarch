@@ -91,6 +91,7 @@ impl SimAddr {
     }
 
     /// Creates a new directional SimAddr meant to convey a channel between two addresses.
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `SimNetError`.
     pub fn new_with_src(
         src: AddressProxyPair,
         addr: ChannelAddr,
@@ -99,6 +100,7 @@ impl SimAddr {
         Self::new_impl(Some(Box::new(src)), addr, proxy)
     }
 
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `SimNetError`.
     fn new_impl(
         src: Option<Box<AddressProxyPair>>,
         addr: ChannelAddr,
@@ -219,11 +221,6 @@ impl Event for MessageDeliveryEvent {
                 .map_or_else(|| 1, |v| v.latency.as_millis() as u64);
         }
     }
-}
-
-/// Export the message delivery records of the simnet.
-pub async fn records() -> anyhow::Result<Option<Vec<simnet::SimulatorEventRecord>>, SimNetError> {
-    Ok(simnet_handle()?.records().await)
 }
 
 /// Bind a channel address to the simnet. It will register the address as a node in simnet,
@@ -537,7 +534,7 @@ mod tests {
             assert_eq!(rx.recv().await.unwrap(), 123);
         }
 
-        let records = sim::records().await;
+        let records = sim::simnet_handle().unwrap().close().await.unwrap();
         eprintln!("records: {:#?}", records);
     }
 
@@ -696,8 +693,8 @@ mod tests {
         // This message will be delievered at simulator time = 100 seconds
         tx.try_post((), oneshot::channel().0).unwrap();
         {
-            // Allow some time for simnet to run
-            RealClock.sleep(tokio::time::Duration::from_secs(1)).await;
+            // Allow simnet to run
+            tokio::task::yield_now().await;
             // Messages have not been receive since 10 seconds have not elapsed
             assert!(rx.rx.try_recv().is_err());
         }
@@ -705,7 +702,7 @@ mod tests {
         tokio::time::advance(tokio::time::Duration::from_secs(100)).await;
         {
             // Allow some time for simnet to run
-            RealClock.sleep(tokio::time::Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
             // Messages are received
             assert!(rx.rx.try_recv().is_ok());
         }
@@ -766,7 +763,7 @@ mod tests {
             // Allow some time for simnet to run
             RealClock.sleep(tokio::time::Duration::from_secs(1)).await;
         }
-        let recs = records().await.unwrap().unwrap();
+        let recs = simnet::simnet_handle().unwrap().close().await.unwrap();
         assert_eq!(recs.len(), 2);
         let end_times = recs.iter().map(|rec| rec.end_at).collect::<Vec<_>>();
         // client message was delivered at "real" time = 5 seconds

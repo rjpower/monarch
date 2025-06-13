@@ -106,13 +106,24 @@ pub fn to_yaml<P: AsRef<Path>>(attrs: &Attrs, path: P) -> Result<(), anyhow::Err
 
 /// Merge with another configuration, with the other taking precedence
 pub fn merge(config: &mut Attrs, other: &Attrs) {
-    // For each key in the other config, copy it to this config
-    config[CODEC_MAX_FRAME_LENGTH] = other[CODEC_MAX_FRAME_LENGTH];
-    config[MESSAGE_DELIVERY_TIMEOUT] = other[MESSAGE_DELIVERY_TIMEOUT];
-    config[MESSAGE_ACK_TIME_INTERVAL] = other[MESSAGE_ACK_TIME_INTERVAL];
-    config[MESSAGE_ACK_EVERY_N_MESSAGES] = other[MESSAGE_ACK_EVERY_N_MESSAGES];
-    config[SPLIT_MAX_BUFFER_SIZE] = other[SPLIT_MAX_BUFFER_SIZE];
-    config[IS_MANAGED_SUBPROCESS] = other[IS_MANAGED_SUBPROCESS];
+    if other.contains_key(CODEC_MAX_FRAME_LENGTH) {
+        config[CODEC_MAX_FRAME_LENGTH] = other[CODEC_MAX_FRAME_LENGTH];
+    }
+    if other.contains_key(MESSAGE_DELIVERY_TIMEOUT) {
+        config[MESSAGE_DELIVERY_TIMEOUT] = other[MESSAGE_DELIVERY_TIMEOUT];
+    }
+    if other.contains_key(MESSAGE_ACK_TIME_INTERVAL) {
+        config[MESSAGE_ACK_TIME_INTERVAL] = other[MESSAGE_ACK_TIME_INTERVAL];
+    }
+    if other.contains_key(MESSAGE_ACK_EVERY_N_MESSAGES) {
+        config[MESSAGE_ACK_EVERY_N_MESSAGES] = other[MESSAGE_ACK_EVERY_N_MESSAGES];
+    }
+    if other.contains_key(SPLIT_MAX_BUFFER_SIZE) {
+        config[SPLIT_MAX_BUFFER_SIZE] = other[SPLIT_MAX_BUFFER_SIZE];
+    }
+    if other.contains_key(IS_MANAGED_SUBPROCESS) {
+        config[IS_MANAGED_SUBPROCESS] = other[IS_MANAGED_SUBPROCESS];
+    }
 }
 
 /// Global configuration functions
