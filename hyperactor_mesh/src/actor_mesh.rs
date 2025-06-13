@@ -799,12 +799,12 @@ mod tests {
 
         #[tokio::test]
         async fn test_send_failure() {
+            use hyperactor::test_utils::pingpong::PingPongActor;
+            use hyperactor::test_utils::pingpong::PingPongActorParams;
+            use hyperactor::test_utils::pingpong::PingPongMessage;
+
             use crate::alloc::ProcStopReason;
             use crate::proc_mesh::ProcEvent;
-
-            use hyperactor::test_utils::pingpong::PingPongActor;
-            use hyperactor::test_utils::pingpong::PingPongMessage;
-            use hyperactor::test_utils::pingpong::PingPongActorParams;
 
             let config = hyperactor::config::global::lock();
             let _guard = config.override_key(
@@ -824,7 +824,8 @@ mod tests {
             let mut events = mesh.events().unwrap();
 
             let (undeliverable_msg_tx, mut undeliverable_msg_rx) = mesh.client().open_port();
-            let ping_pong_actor_params = PingPongActorParams::new(undeliverable_msg_tx.bind(), None);
+            let ping_pong_actor_params =
+                PingPongActorParams::new(undeliverable_msg_tx.bind(), None);
             let actor_mesh: RootActorMesh<PingPongActor> = mesh
                 .spawn::<PingPongActor>("ping-pong", &ping_pong_actor_params)
                 .await
@@ -841,14 +842,21 @@ mod tests {
             );
 
             // Get 'pong' to send 'ping' a message. Since 'ping's
-            // mailbox server has been taken down, the send will fail.
+            // mailbox is stopped, the send will timeout and fail.
             let (unmonitored_done_tx, _) = mesh.client().open_once_port();
-            pong.send(mesh.client(), PingPongMessage(1, ping.clone(), unmonitored_done_tx.bind())).unwrap();
+            pong.send(
+                mesh.client(),
+                PingPongMessage(1, ping.clone(), unmonitored_done_tx.bind()),
+            )
+            .unwrap();
 
             // The message will be returned!
             let Undeliverable(msg) = undeliverable_msg_rx.recv().await.unwrap();
             assert_eq!(msg.sender(), pong.actor_id());
-            assert_eq!(msg.dest(), &ping.actor_id().port_id(PingPongMessage::port()));
+            assert_eq!(
+                msg.dest(),
+                &ping.actor_id().port_id(PingPongMessage::port())
+            );
         }
 
         // The intent is to emulate the behaviors of the Python
