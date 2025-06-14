@@ -6,7 +6,6 @@
 
 # pyre-unsafe
 
-import asyncio
 import collections
 import contextvars
 import functools
@@ -28,7 +27,6 @@ from typing import (
     cast,
     Concatenate,
     Dict,
-    Generator,
     Generic,
     Iterable,
     List,
@@ -96,39 +94,6 @@ class MonarchContext:
 _context: contextvars.ContextVar[MonarchContext] = contextvars.ContextVar(
     "monarch.actor_mesh._context"
 )
-
-
-# this was implemented in python 3.12 as an argument to task
-# but I have to backport to 3.10/3.11.
-def create_eager_task(coro: Awaitable[None]) -> asyncio.Future:
-    iter = coro.__await__()
-    try:
-        first_yield = next(iter)
-        return asyncio.create_task(RestOfCoroutine(first_yield, iter).run())
-    except StopIteration as e:
-        t = asyncio.Future()
-        t.set_result(e.value)
-        return t
-
-
-class RestOfCoroutine(Generic[T1, T2]):
-    def __init__(self, first_yield: T1, iter: Generator[T2, None, T2]) -> None:
-        self.first_yield: T1 | None = first_yield
-        self.iter: Generator[T2, None, T2] = iter
-
-    def __await__(self) -> Generator[T1, None, T1] | Generator[T2, None, T2]:
-        first_yield = self.first_yield
-        assert first_yield is not None
-        yield first_yield
-        self.first_yield = None
-        while True:
-            try:
-                yield next(self.iter)
-            except StopIteration as e:
-                return e.value
-
-    async def run(self) -> T1 | T2:
-        return await self
 
 
 T = TypeVar("T")
@@ -284,7 +249,7 @@ class Endpoint(Generic[P, R]):
         async def process() -> ValueMesh[R]:
             results: List[R] = [None] * len(self._actor_mesh)  # pyre-fixme[9]
             for _ in range(len(self._actor_mesh)):
-                rank, value = await r.recv()  # pyre-fixme[23]
+                rank, value = await r.recv()
                 results[rank] = value
             call_shape = Shape(
                 self._actor_mesh._shape.labels,
@@ -295,7 +260,7 @@ class Endpoint(Generic[P, R]):
         def process_blocking() -> ValueMesh[R]:
             results: List[R] = [None] * len(self._actor_mesh)  # pyre-fixme[9]
             for _ in range(len(self._actor_mesh)):
-                rank, value = r.recv().get()  # pyre-fixme[23]
+                rank, value = r.recv().get()
                 results[rank] = value
             call_shape = Shape(
                 self._actor_mesh._shape.labels,
@@ -496,7 +461,81 @@ class RankedPortReceiver(PortReceiver[Tuple[int, R]]):
 singleton_shape = Shape([], NDSlice(offset=0, sizes=[], strides=[]))
 
 
+class _Actor:
+    """
+    This is the message handling implementation of a Python actor.
+
+    The layering goes:
+        Rust `PythonActor` -> `_Actor` -> user-provided `Actor` instance
+
+    Messages are received from the Rust backend, and forwarded to the `handle`
+    methods on this class.
+
+    This class wraps the actual `Actor` instance provided by the user, and
+    routes messages to it, managing argument serialization/deserialization and
+    error handling.
+
+    Messages will be processed in order, on a dedicated thread for this actor.
+    """
+
+    def __init__(self) -> None:
+        self.instance: object | None = None
+
+    def handle(self, mailbox: Mailbox, message: PythonMessage) -> None:
+        return self.handle_cast(mailbox, 0, singleton_shape, message)
+
+    def handle_cast(
+        self,
+        mailbox: Mailbox,
+        rank: int,
+        shape: Shape,
+        message: PythonMessage,
+    ) -> None:
+        port = (
+            Port(message.response_port, mailbox, rank)
+            if message.response_port
+            else None
+        )
+        try:
+            ctx: MonarchContext = MonarchContext(
+                mailbox, mailbox.actor_id.proc_id, Point(rank, shape)
+            )
+            _context.set(ctx)
+
+            args, kwargs = _unpickle(message.message, mailbox)
+            if message.method == "__init__":
+                Class, *args = args
+                self.instance = Class(*args, **kwargs)
+                return None
+
+            the_method = getattr(self.instance, message.method)._method
+
+            enter_span(the_method.__module__, message.method, str(ctx.mailbox.actor_id))
+            result = the_method(self.instance, *args, **kwargs)
+            exit_span()
+            if port is not None:
+                port.send("result", result)
+        except Exception as e:
+            traceback.print_exc()
+            s = ActorError(e)
+
+            # The exception is delivered to exactly one of:
+            # (1) our caller, (2) our supervisor
+            if port is not None:
+                port.send("exception", s)
+            else:
+                raise s from None
+
+
 class _AsyncActor:
+    """
+    An async version of `_Actor`.
+
+    Messages will be processed in order, but the `handle` methods will be
+    enqueued as background tasks. Thus, if an async endpoint `await`s, the
+    scheduler may concurrently process another message.
+    """
+
     def __init__(self) -> None:
         self.instance: object | None = None
 
@@ -549,7 +588,7 @@ class _AsyncActor:
                     exit_span()
                     return result
 
-                result = await create_eager_task(instrumented())
+                result = await instrumented()
             else:
                 enter_span(
                     the_method.__module__, message.method, str(ctx.mailbox.actor_id)
@@ -579,56 +618,6 @@ class _AsyncActor:
                 # The channel might be closed if the Rust side has already detected the error
                 pass
             raise
-
-
-class _Actor:
-    def __init__(self) -> None:
-        self.instance: object | None = None
-
-    def handle(self, mailbox: Mailbox, message: PythonMessage) -> None:
-        return self.handle_cast(mailbox, 0, singleton_shape, message)
-
-    def handle_cast(
-        self,
-        mailbox: Mailbox,
-        rank: int,
-        shape: Shape,
-        message: PythonMessage,
-    ) -> None:
-        port = (
-            Port(message.response_port, mailbox, rank)
-            if message.response_port
-            else None
-        )
-        try:
-            ctx: MonarchContext = MonarchContext(
-                mailbox, mailbox.actor_id.proc_id, Point(rank, shape)
-            )
-            _context.set(ctx)
-
-            args, kwargs = _unpickle(message.message, mailbox)
-            if message.method == "__init__":
-                Class, *args = args
-                self.instance = Class(*args, **kwargs)
-                return None
-
-            the_method = getattr(self.instance, message.method)._method
-
-            enter_span(the_method.__module__, message.method, str(ctx.mailbox.actor_id))
-            result = the_method(self.instance, *args, **kwargs)
-            exit_span()
-            if port is not None:
-                port.send("result", result)
-        except Exception as e:
-            traceback.print_exc()
-            s = ActorError(e)
-
-            # The exception is delivered to exactly one of:
-            # (1) our caller, (2) our supervisor
-            if port is not None:
-                port.send("exception", s)
-            else:
-                raise s from None
 
 
 def _is_mailbox(x: object) -> bool:

@@ -594,6 +594,34 @@ async def test_actor_tls() -> None:
     assert 4 == await am.get_async.call_one()
 
 
+class TLSActorFullSync(Actor):
+    """An actor that manages thread-local state."""
+
+    def __init__(self):
+        self.local = threading.local()
+        self.local.value = 0
+
+    @endpoint
+    def increment(self):
+        self.local.value += 1
+
+    @endpoint
+    def get(self):
+        return self.local.value
+
+
+async def test_actor_tls_full_sync() -> None:
+    """Test that thread-local state is respected."""
+    pm = await proc_mesh(gpus=1)
+    am = await pm.spawn("tls", TLSActorFullSync)
+    await am.increment.call_one()
+    await am.increment.call_one()
+    await am.increment.call_one()
+    await am.increment.call_one()
+
+    assert 4 == await am.get.call_one()
+
+
 class AsyncActor(Actor):
     def __init__(self):
         self.should_exit = False

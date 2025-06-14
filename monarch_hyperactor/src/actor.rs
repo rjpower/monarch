@@ -563,8 +563,10 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
     }
 }
 
+/// Helper struct to make a Python future passable in an actor message.
+///
+/// Also so that we don't have to write this massive type signature everywhere
 struct PythonTask {
-    // What in the world
     future: Arc<Mutex<Option<Pin<Box<dyn Future<Output = PyResult<PyObject>> + Send + 'static>>>>>,
 }
 
