@@ -68,9 +68,11 @@ class PdbWrapper(pdb.Pdb):
         return r
 
     def set_trace(self):
+        print("before starting the session")
         self.client_ref.debugger_session_start.call_one(
             self.rank, self.coords, socket.getfqdn(socket.gethostname()), self.actor_id
         ).get()
+        print("after starting the session")
         if self.header:
             self.message(self.header)
         super().set_trace()
@@ -131,5 +133,7 @@ class WriteWrapper:
 def remote_breakpointhook(
     rank: int, coords: Dict[str, int], actor_id: ActorId, client_ref: "DebugClient"
 ):
+    print("retmoe_breakpointhook called")
     ds = PdbWrapper(rank, coords, actor_id, client_ref)
+    print(ds)
     ds.set_trace()

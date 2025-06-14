@@ -347,6 +347,7 @@ class DebugClient(Actor):
         self, rank: int, coords: Dict[str, int], hostname: str, actor_id: ActorId
     ) -> None:
         # Create a session if it doesn't exist
+        print("starting debug session for rank", rank)
         if rank not in self.sessions:
             self.sessions[rank] = DebugSession(rank, coords, hostname, actor_id)
 
