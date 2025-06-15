@@ -480,14 +480,10 @@ async def test_debug() -> None:
         debugee = await proc.spawn("debugee", DebugeeActor)
         debug_client = await init_debugging(debugee)
 
-        print("suo 1")
         fut = debugee.to_debug.call()
-        print("suo 2")
         await debug_client.wait_pending_session.call_one()
-        print("suo 3")
         breakpoints = []
         for i in range(10):
-            print("suo loop", i)
             breakpoints = await debug_client.list.call_one()
             if len(breakpoints) == 4:
                 break
