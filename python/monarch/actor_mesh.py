@@ -436,10 +436,8 @@ class PortReceiver(Generic[R]):
         return self._process(self._receiver.blocking_recv())
 
     def _process(self, msg: PythonMessage) -> R:
-        print("processing response,")
         # TODO: Try to do something more structured than a cast here
         payload = cast(R, _unpickle(msg.message, self._mailbox))
-        print(f"{payload=}")
         if msg.method == "result":
             return payload
         else:

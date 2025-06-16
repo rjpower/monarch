@@ -29,6 +29,7 @@ use hyperactor::message::Unbind;
 use hyperactor_mesh::actor_mesh::Cast;
 use monarch_types::PickledPyObject;
 use monarch_types::SerializablePyErr;
+use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::PyBaseException;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -88,7 +89,7 @@ impl PickledMessage {
 
     #[getter]
     fn message<'a>(&self, py: Python<'a>) -> Bound<'a, PyBytes> {
-        PyBytes::new_bound(py, self.message.as_ref())
+        PyBytes::new(py, self.message.as_ref())
     }
 
     fn serialize(&self) -> PyResult<PySerialized> {
@@ -131,7 +132,7 @@ impl PickledMessageClientActor {
         })?;
         Python::with_gil(|py| {
             result
-                .map(|res| res.into_py(py))
+                .map(|res| res.into_py_any(py))?
                 .map_err(|err| PyRuntimeError::new_err(err.to_string()))
         })
     }
@@ -144,9 +145,9 @@ impl PickledMessageClientActor {
             .drain_and_stop()
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
             .into_iter()
-            .map(|message| message.into_py(py))
-            .collect::<Vec<PyObject>>();
-        Ok(PyList::new_bound(py, messages))
+            .map(|message| message.into_py_any(py))
+            .collect::<PyResult<Vec<PyObject>>>()?;
+        PyList::new(py, messages)
     }
 
     fn world_status<'py>(&mut self, py: Python<'py>) -> PyResult<PyObject> {
@@ -156,7 +157,7 @@ impl PickledMessageClientActor {
             instance.lock().await.world_status(Default::default()).await
         })??;
         Python::with_gil(|py| {
-            let py_dict = PyDict::new_bound(py);
+            let py_dict = PyDict::new(py);
             for (world, status) in worlds {
                 py_dict.set_item(world.to_string(), status.to_string())?;
             }
@@ -236,7 +237,7 @@ impl PythonMessage {
 
     #[getter]
     fn message<'a>(&self, py: Python<'a>) -> Bound<'a, PyBytes> {
-        PyBytes::new_bound(py, self.message.as_ref())
+        PyBytes::new(py, self.message.as_ref())
     }
 
     #[getter]
@@ -304,11 +305,11 @@ impl Actor for PythonActor {
         Ok(Python::with_gil(|py| -> Result<Self, SerializablePyErr> {
             let unpickled = actor_type.unpickle(py)?;
             let class_type: &Bound<'_, PyType> = unpickled.downcast()?;
-            let actor: PyObject = class_type.call0()?.to_object(py);
+            let actor = class_type.call0()?.into_pyobject(py)?;
 
-            let actor_mesh_module = py.import_bound("monarch.actor_mesh")?;
+            let actor_mesh_module = Python::import(py, "monarch.actor_mesh")?;
             let actor_class = actor_mesh_module.getattr("_AsyncActor")?;
-            let is_async = actor.bind(py).is_instance(&actor_class)?;
+            let is_async = actor.is_instance(&actor_class)?;
 
             let dispatch_type = if is_async {
                 // Get the event loop state to run PythonActor handlers in. We construct a
@@ -320,7 +321,7 @@ impl Actor for PythonActor {
                     let (tx, rx) = std::sync::mpsc::channel();
                     let _ = std::thread::spawn(move || {
                         Python::with_gil(|py| {
-                            let asyncio = Python::import_bound(py, "asyncio").unwrap();
+                            let asyncio = Python::import(py, "asyncio").unwrap();
                             let event_loop = asyncio.call_method0("new_event_loop").unwrap();
                             asyncio
                                 .call_method1("set_event_loop", (event_loop.clone(),))
@@ -340,9 +341,8 @@ impl Actor for PythonActor {
                 DispatchType::Sync
             };
 
-            // Temporarily release the GIL (as the thread we are about to create needs it).
             Ok(Self {
-                actor,
+                actor: actor.into(),
                 dispatch_type,
             })
         })?)
@@ -461,7 +461,7 @@ impl Handler<PythonMessage> for PythonActor {
                 Python::with_gil(|py| -> Result<_, SerializablePyErr> {
                     tokio::task::block_in_place(|| {
                         self.actor
-                            .call_method_bound(py, "handle", (mailbox, message), None)
+                            .call_method(py, "handle", (mailbox, message), None)
                             .map_err(|err| err.into())
                     })
                 })?;
@@ -472,7 +472,7 @@ impl Handler<PythonMessage> for PythonActor {
                 let (sender, receiver) = oneshot::channel();
 
                 let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
-                    let awaitable = self.actor.call_method_bound(
+                    let awaitable = self.actor.call_method(
                         py,
                         "handle",
                         (
@@ -517,7 +517,7 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
                 Python::with_gil(|py| -> Result<_, SerializablePyErr> {
                     tokio::task::block_in_place(|| {
                         self.actor
-                            .call_method_bound(
+                            .call_method(
                                 py,
                                 "handle_cast",
                                 (mailbox, rank.0, PyShape::from(shape), message),
@@ -533,7 +533,7 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
                 let (sender, receiver) = oneshot::channel();
 
                 let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
-                    let awaitable = self.actor.call_method_bound(
+                    let awaitable = self.actor.call_method(
                         py,
                         "handle_cast",
                         (
