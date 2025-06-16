@@ -74,9 +74,13 @@ pub mod stencil {
 /// let results: Vec<_> = ndslice::utils::apply_stencil(coords, sizes, offsets).collect();
 /// // Results in: [[0, 1], [2, 1], [1, 0], [1, 2]]
 /// ```
-pub fn apply_stencil<'a, Off>(coords: &'a[usize], sizes: &'a[usize], offsets: &'a[Off]) -> impl Iterator<Item = Vec<usize>> + 'a
+pub fn apply_stencil<'a, Off>(
+    coords: &'a [usize],
+    sizes: &'a [usize],
+    offsets: &'a [Off],
+) -> impl Iterator<Item = Vec<usize>> + 'a
 where
-    Off: AsRef<[isize]> + 'a
+    Off: AsRef<[isize]> + 'a,
 {
     let ndim = coords.len();
     assert_eq!(ndim, sizes.len());
