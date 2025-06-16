@@ -669,8 +669,7 @@ mod tests {
                         }
                     }
                 }
-                // In this test, 316 * 5 = 1580 PingPong messages
-                // handled are handled.
+                // In this test, 316 * 5 = 1580 messages are handled.
                 assert_eq!(num_games, 316);
 
                 let results = join_all(futures).await;
