@@ -647,7 +647,6 @@ mod tests {
                 let actor_mesh = proc_mesh.spawn::<PingPongActor>("pingpong", &params).await.unwrap();
                 let slice = actor_mesh.shape().slice();
 
-                let mut num_games = 0;
                 let mut futures = Vec::new();
                 for rank in slice.iter() {
                     let actor = actor_mesh.get(rank).unwrap();
@@ -664,15 +663,12 @@ mod tests {
                                     PingPongMessage(4, neighbor.clone(), done_tx.bind()),
                                 )
                                 .unwrap();
-                            num_games += 1;
                             futures.push(done_rx.recv());
                         }
                     }
                 }
-                // In this test, 316 * 5 = 1580 messages are handled.
-                assert_eq!(num_games, 316);
-
                 let results = join_all(futures).await;
+                assert_eq!(results.len(), 316); // 5180 messages
                 for result in results {
                     assert_eq!(result.unwrap(), true);
                 }
