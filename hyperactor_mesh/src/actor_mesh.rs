@@ -649,45 +649,14 @@ mod tests {
                 let shape = actor_mesh.shape();
                 let slice = shape.slice();
 
-                // 6-neighbor offsets.
-                const NEIGHBORS: &[[isize; 3]] = &[
-                    [-1, 0, 0],
-                    [1, 0, 0],
-                    [0, -1, 0],
-                    [0, 1, 0],
-                    [0, 0, -1],
-                    [0, 0, 1],
-                ];
-
                 // Collect futures for all OncePorts.
                 let mut futures = Vec::new();
 
                 for rank in slice.iter() {
                     let coords = slice.coordinates(rank).unwrap();
                     let actor = actor_mesh.get(rank).unwrap();
-
-                    for offset in NEIGHBORS {
-                        let ndim = coords.len();
-                        let mut neighbor_coords = Vec::with_capacity(ndim);
-                        let mut in_bounds = true;
-
-                        for dim in 0..ndim {
-                            let c = coords[dim];
-                            let o = offset[dim];
-                            let size = slice.sizes()[dim];
-
-                            let val = c as isize + o;
-                            if val < 0 || val >= size as isize {
-                                in_bounds = false;
-                                break;
-                            }
-                            neighbor_coords.push(val as usize);
-                        }
-
-                        if !in_bounds {
-                            continue;
-                        }
-
+                    let neighbors = ndslice::utils::stencil::von_neumann_neighbors(3usize);
+                    for neighbor_coords in ndslice::utils::apply_stencil(&coords, slice.sizes(), &neighbors) {
                         if let Ok(neighbor_rank) = shape.slice().location(&neighbor_coords) {
                             let neighbor = actor_mesh.get(neighbor_rank).unwrap();
                             let (done_tx, done_rx) = proc_mesh.client().open_once_port();
