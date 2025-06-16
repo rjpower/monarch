@@ -1,0 +1,98 @@
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+pub mod stencil {
+    /// Generates the von Neumann stencil for grids of arbitrary
+    /// dimensionality.
+    ///
+    /// The von Neumann neighborhood consists of all neighbors offset by
+    /// ±1 along a single axis, with all other coordinates unchanged. In
+    /// `n` dimensions, this yields `2 * n` neighbors.
+    ///
+    /// For example, in 3D, this returns the offsets:
+    /// ```text
+    /// [-1, 0, 0], [1, 0, 0],
+    /// [0, -1, 0], [0, 1, 0],
+    /// [0, 0, -1], [0, 0, 1]
+    /// ```
+    pub fn von_neumann_neighbors<D: Into<usize>>(ndim: D) -> Vec<Vec<isize>> {
+        let ndim = ndim.into();
+        let mut offsets = Vec::with_capacity(2 * ndim);
+
+        for axis in 0..ndim {
+            let mut offset_pos = vec![0; ndim];
+            offset_pos[axis] = 1;
+            offsets.push(offset_pos);
+
+            let mut offset_neg = vec![0; ndim];
+            offset_neg[axis] = -1;
+            offsets.push(offset_neg);
+        }
+
+        offsets
+    }
+}
+
+/// Applies a stencil pattern to coordinates, returning valid
+/// resulting coordinates.
+///
+/// Given base coordinates and a set of offset vectors (the stencil),
+/// computes the coordinates that result from applying each offset.
+/// Only returns coordinates that fall within the specified bounds.
+///
+/// # Arguments
+///
+/// * `coords` - Base coordinates in N-dimensional space
+/// * `sizes` - Size bounds for each dimension (coordinates must be <
+///   size)
+/// * `offsets` - Collection of offset vectors to apply to the base
+///   coordinates
+///
+/// # Returns
+///
+/// An iterator yielding valid coordinates (as `Vec<usize>`) for each
+/// offset that produces in-bounds results. Out-of-bounds results are
+/// filtered out.
+///
+/// # Panics
+///
+/// Panics if `coords` and `sizes` have different lengths, or if any
+/// offset vector has a different length than `coords`.
+///
+/// # Examples
+///
+/// ```rust
+/// let coords = &[1, 1];
+/// let sizes = &[3, 3];
+/// let offsets = &[vec![-1, 0], vec![1, 0], vec![0, -1], vec![0, 1]]; // 4-connected neighbors
+///
+/// let results: Vec<_> = ndslice::utils::apply_stencil(coords, sizes, offsets).collect();
+/// // Results in: [[0, 1], [2, 1], [1, 0], [1, 2]]
+/// ```
+pub fn apply_stencil<'a, Off>(coords: &'a[usize], sizes: &'a[usize], offsets: &'a[Off]) -> impl Iterator<Item = Vec<usize>> + 'a
+where
+    Off: AsRef<[isize]> + 'a
+{
+    let ndim = coords.len();
+    assert_eq!(ndim, sizes.len());
+    assert!(offsets.iter().all(|o| o.as_ref().len() == ndim));
+
+    offsets.iter().filter_map(move |offset| {
+        let mut p = Vec::with_capacity(ndim);
+        for dim in 0..ndim {
+            let c = coords[dim] as isize;
+            let size = sizes[dim] as isize;
+            let val = c + offset.as_ref()[dim];
+            if val < 0 || val >= size {
+                return None; // Invalid coordinate, skip this offset.
+            }
+            p.push(val as usize);
+        }
+        Some(p)
+    })
+}
