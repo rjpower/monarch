@@ -105,7 +105,7 @@ pub mod stencil {
 /// ```rust
 /// let coords = &[1, 1];
 /// let sizes = &[3, 3];
-/// let offsets: [[isize; 2]; 4] = [ [-1, 0], [1, 0], [0, -1], [0, 1] ];
+/// let offsets: [[isize; 2]; 4] = [[-1, 0], [1, 0], [0, -1], [0, 1]];
 ///
 /// let results: Vec<_> = ndslice::utils::apply_stencil(coords, sizes, &offsets).collect();
 /// // Results in: [[0, 1], [2, 1], [1, 0], [1, 2]]
