@@ -593,6 +593,36 @@ mod tests {
             }
 
             #[tokio::test]
+            async fn test_ping_pong() {
+                use hyperactor::test_utils::pingpong::PingPongActor;
+                use hyperactor::test_utils::pingpong::PingPongMessage;
+                use hyperactor::test_utils::pingpong::PingPongActorParams;
+
+                let alloc = $allocator
+                    .allocate(AllocSpec {
+                        shape: shape! { replica = 2  },
+                        constraints: Default::default(),
+                    })
+                    .await
+                    .unwrap();
+                let mesh = ProcMesh::allocate(alloc).await.unwrap();
+
+                let (undeliverable_msg_tx, _) = mesh.client().open_port();
+                let ping_pong_actor_params = PingPongActorParams::new(undeliverable_msg_tx.bind(), None);
+                let actor_mesh: RootActorMesh<PingPongActor> = mesh
+                    .spawn::<PingPongActor>("ping-pong", &ping_pong_actor_params)
+                    .await
+                    .unwrap();
+
+                let ping: ActorRef<PingPongActor> = actor_mesh.get(0).unwrap();
+                let pong: ActorRef<PingPongActor> = actor_mesh.get(1).unwrap();
+                let (done_tx, done_rx) = mesh.client().open_once_port();
+                ping.send(mesh.client(), PingPongMessage(4, pong.clone(), done_tx.bind())).unwrap();
+
+                assert!(done_rx.recv().await.unwrap());
+            }
+
+            #[tokio::test]
             async fn test_cast() {
                 let alloc = $allocator
                     .allocate(AllocSpec {
@@ -744,13 +774,12 @@ mod tests {
 
                 let name = alloc.name().to_string();
                 let mesh = ProcMesh::allocate(alloc).await.unwrap();
-                let actor_mesh = mesh.spawn::<TestActor>("foo", &()).await.unwrap();
-                let unmonitored_reply_to = actor_mesh.open_port::<usize>().0.bind();
-                let (undeliverable_messages, mut undeliverable_rx) = actor_mesh.open_port::<Undeliverable<MessageEnvelope>>();
+                let unmonitored_reply_to = mesh.client().open_port::<usize>().0.bind();
+                let (undeliverable_messages, mut undeliverable_rx) = mesh.client().open_port::<Undeliverable<MessageEnvelope>>();
                 undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
                 // Send a message to a non-existent actor (the proc however exists).
-                let bad_actor = ActorRef::<TestActor>::attest(ActorId(ProcId(WorldId(name.clone()), 0), "foo".into(), 1));
+                let bad_actor = ActorRef::<TestActor>::attest(ActorId(ProcId(WorldId(name.clone()), 0), "foo".into(), 0));
                 bad_actor.send(mesh.client(), GetRank(true, unmonitored_reply_to)).unwrap();
 
                 // The message will be returned!
@@ -767,6 +796,68 @@ mod tests {
         use crate::alloc::local::LocalAllocator;
 
         actor_mesh_test_suite!(LocalAllocator);
+
+        #[tokio::test]
+        async fn test_send_failure() {
+            use hyperactor::test_utils::pingpong::PingPongActor;
+            use hyperactor::test_utils::pingpong::PingPongActorParams;
+            use hyperactor::test_utils::pingpong::PingPongMessage;
+
+            use crate::alloc::ProcStopReason;
+            use crate::proc_mesh::ProcEvent;
+
+            let config = hyperactor::config::global::lock();
+            let _guard = config.override_key(
+                hyperactor::config::MESSAGE_DELIVERY_TIMEOUT,
+                tokio::time::Duration::from_secs(1),
+            );
+
+            let alloc = LocalAllocator
+                .allocate(AllocSpec {
+                    shape: shape! { replica = 2  },
+                    constraints: Default::default(),
+                })
+                .await
+                .unwrap();
+            let monkey = alloc.chaos_monkey();
+            let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
+            let mut events = mesh.events().unwrap();
+
+            let (undeliverable_msg_tx, mut undeliverable_msg_rx) = mesh.client().open_port();
+            let ping_pong_actor_params =
+                PingPongActorParams::new(undeliverable_msg_tx.bind(), None);
+            let actor_mesh: RootActorMesh<PingPongActor> = mesh
+                .spawn::<PingPongActor>("ping-pong", &ping_pong_actor_params)
+                .await
+                .unwrap();
+
+            let ping: ActorRef<PingPongActor> = actor_mesh.get(0).unwrap();
+            let pong: ActorRef<PingPongActor> = actor_mesh.get(1).unwrap();
+
+            // Kill ping.
+            monkey(0, ProcStopReason::Killed(0, false));
+            assert_matches!(
+                events.next().await.unwrap(),
+                ProcEvent::Stopped(0, ProcStopReason::Killed(0, false))
+            );
+
+            // Get 'pong' to send 'ping' a message. Since 'ping's
+            // mailbox is stopped, the send will timeout and fail.
+            let (unmonitored_done_tx, _) = mesh.client().open_once_port();
+            pong.send(
+                mesh.client(),
+                PingPongMessage(1, ping.clone(), unmonitored_done_tx.bind()),
+            )
+            .unwrap();
+
+            // The message will be returned!
+            let Undeliverable(msg) = undeliverable_msg_rx.recv().await.unwrap();
+            assert_eq!(msg.sender(), pong.actor_id());
+            assert_eq!(
+                msg.dest(),
+                &ping.actor_id().port_id(PingPongMessage::port())
+            );
+        }
 
         // The intent is to emulate the behaviors of the Python
         // interaction of T225230867 "process hangs when i send
