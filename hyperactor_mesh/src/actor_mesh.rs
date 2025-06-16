@@ -646,19 +646,17 @@ mod tests {
                 let params = PingPongActorParams::new(undeliverable_tx.bind(), None);
                 let actor_mesh: RootActorMesh<PingPongActor> =
                     proc_mesh.spawn::<PingPongActor>("pingpong", &params).await.unwrap();
-                let shape = actor_mesh.shape();
-                let slice = shape.slice();
+                let slice = actor_mesh.shape().slice();
 
-                // Collect futures for all OncePorts.
+                let mut num_games = 0;
                 let mut futures = Vec::new();
-
                 for rank in slice.iter() {
                     let actor = actor_mesh.get(rank).unwrap();
                     let coords = (&slice.coordinates(rank).unwrap()[..]).try_into().unwrap();
                     let sizes = (&slice.sizes())[..].try_into().unwrap();
-                    let neighbors = ndslice::utils::stencil::von_neumann_neighbors::<3>();
+                    let neighbors = ndslice::utils::stencil::moore_neighbors::<3>();
                     for neighbor_coords in ndslice::utils::apply_stencil(&coords, sizes, &neighbors) {
-                        if let Ok(neighbor_rank) = shape.slice().location(&neighbor_coords) {
+                        if let Ok(neighbor_rank) = slice.location(&neighbor_coords) {
                             let neighbor = actor_mesh.get(neighbor_rank).unwrap();
                             let (done_tx, done_rx) = proc_mesh.client().open_once_port();
                             actor
@@ -667,10 +665,14 @@ mod tests {
                                     PingPongMessage(4, neighbor.clone(), done_tx.bind()),
                                 )
                                 .unwrap();
+                            num_games += 1;
                             futures.push(done_rx.recv());
                         }
                     }
                 }
+                // In this test, 316 * 5 = 1580 PingPong messages
+                // handled are handled.
+                assert_eq!(num_games, 316);
 
                 let results = join_all(futures).await;
                 for result in results {
