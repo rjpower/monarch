@@ -129,3 +129,94 @@ pub fn apply_stencil<'a, const N: usize>(
         Some(p)
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_von_neumann_neighbors_2d() {
+        let offsets = stencil::von_neumann_neighbors::<2>();
+        assert_eq!(offsets.len(), 4);
+
+        let expected: [[isize; 2]; 4] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+        for e in expected.iter() {
+            assert!(offsets.contains(e), "missing offset {:?}", e);
+        }
+    }
+
+    #[test]
+    fn test_von_neumann_neighbors_3d() {
+        let offsets = stencil::von_neumann_neighbors::<3>();
+        assert_eq!(offsets.len(), 6);
+
+        #[rustfmt::skip]
+        let expected: [[isize; 3]; 6] = [
+            [1, 0, 0],  [-1, 0, 0],
+            [0, 1, 0],  [0, -1, 0],
+            [0, 0, 1],  [0, 0, -1],
+        ];
+
+        for e in expected.iter() {
+            assert!(offsets.contains(e), "missing offset {:?}", e);
+        }
+    }
+
+    #[test]
+    fn test_moore_neighbors_2d() {
+        let offsets = stencil::moore_neighbors::<2>();
+        assert_eq!(offsets.len(), 8); // 3^2 - 1
+
+        #[rustfmt::skip]
+        let expected: [[isize; 2]; 8] = [
+            [-1, -1], [-1, 0], [-1, 1],
+            [ 0, -1],          [ 0, 1],
+            [ 1, -1], [ 1, 0], [ 1, 1],
+        ];
+
+        for e in expected.iter() {
+            assert!(offsets.contains(e), "missing offset {:?}", e);
+        }
+    }
+
+    #[test]
+    fn test_moore_neighbors_3d() {
+        let offsets = stencil::moore_neighbors::<3>();
+        assert_eq!(offsets.len(), 26); // 3^3 - 1
+
+        // Spot-check just a few offsets, no need to write out all 26
+        #[rustfmt::skip]
+        let expected: [[isize; 3]; 5] = [
+            [-1,  0,  0],
+            [ 0, -1,  0],
+            [ 0,  0, -1],
+            [ 1,  1,  1],
+            [-1, -1, -1],
+        ];
+
+        for e in expected.iter() {
+            assert!(offsets.contains(e), "missing offset {:?}", e);
+        }
+    }
+
+    #[test]
+    fn test_apply_stencil_2d() {
+        let coords: [usize; 2] = [1, 1];
+        let sizes: [usize; 2] = [3, 3];
+
+        #[rustfmt::skip]
+        let offsets: [[isize; 2]; 4] = [
+            [-1, 0], [1, 0],
+            [0, -1], [0, 1],
+        ];
+
+        let results: Vec<_> = apply_stencil(&coords, &sizes, &offsets).collect();
+        let expected: [[usize; 2]; 4] = [[0, 1], [2, 1], [1, 0], [1, 2]];
+
+        for e in expected.iter() {
+            assert!(results.contains(e), "missing result {:?}", e);
+        }
+        assert_eq!(results.len(), expected.len());
+    }
+}
