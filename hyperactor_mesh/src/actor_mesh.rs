@@ -653,10 +653,11 @@ mod tests {
                 let mut futures = Vec::new();
 
                 for rank in slice.iter() {
-                    let coords = slice.coordinates(rank).unwrap();
                     let actor = actor_mesh.get(rank).unwrap();
-                    let neighbors = ndslice::utils::stencil::von_neumann_neighbors(3usize);
-                    for neighbor_coords in ndslice::utils::apply_stencil(&coords, slice.sizes(), &neighbors) {
+                    let coords = (&slice.coordinates(rank).unwrap()[..]).try_into().unwrap();
+                    let sizes = (&slice.sizes())[..].try_into().unwrap();
+                    let neighbors = ndslice::utils::stencil::von_neumann_neighbors::<3>();
+                    for neighbor_coords in ndslice::utils::apply_stencil(&coords, sizes, &neighbors) {
                         if let Ok(neighbor_rank) = shape.slice().location(&neighbor_coords) {
                             let neighbor = actor_mesh.get(neighbor_rank).unwrap();
                             let (done_tx, done_rx) = proc_mesh.client().open_once_port();

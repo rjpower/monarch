@@ -20,20 +20,56 @@ pub mod stencil {
     /// [0, -1, 0], [0, 1, 0],
     /// [0, 0, -1], [0, 0, 1]
     /// ```
-    pub fn von_neumann_neighbors<D: Into<usize>>(ndim: D) -> Vec<Vec<isize>> {
-        let ndim = ndim.into();
-        let mut offsets = Vec::with_capacity(2 * ndim);
+    pub fn von_neumann_neighbors<const N: usize>() -> Vec<[isize; N]> {
+        let mut offsets = Vec::with_capacity(2 * N);
 
-        for axis in 0..ndim {
-            let mut offset_pos = vec![0; ndim];
+        for axis in 0..N {
+            let mut offset_pos = [0; N];
             offset_pos[axis] = 1;
             offsets.push(offset_pos);
 
-            let mut offset_neg = vec![0; ndim];
+            let mut offset_neg = [0; N];
             offset_neg[axis] = -1;
             offsets.push(offset_neg);
         }
 
+        offsets
+    }
+
+    /// Generates the Moore stencil for grids of arbitrary
+    /// dimensionality.
+    ///
+    /// The Moore neighborhood consists of all neighbors where each
+    /// coordinate offset is in {-1, 0, 1}. In `N` dimensions, this
+    /// yields `3^N - 1` neighbors (excluding the center point).
+    ///
+    /// For example, in 3D, this returns offsets like:
+    /// ```text
+    /// [-1, -1, -1], [-1, -1, 0], ..., [1, 1, 1] (excluding [0, 0, 0])
+    /// ```
+    pub fn moore_neighbors<const N: usize>() -> Vec<[isize; N]> {
+        let mut offsets = Vec::new();
+        let mut prefix = [0isize; N];
+
+        fn build<const N: usize>(
+            index: usize,
+            prefix: &mut [isize; N],
+            offsets: &mut Vec<[isize; N]>,
+        ) {
+            if index == N {
+                if prefix.iter().any(|&x| x != 0) {
+                    offsets.push(*prefix);
+                }
+                return;
+            }
+
+            for delta in -1..=1 {
+                prefix[index] = delta;
+                build::<N>(index + 1, prefix, offsets);
+            }
+        }
+
+        build::<N>(0, &mut prefix, &mut offsets);
         offsets
     }
 }
@@ -74,28 +110,21 @@ pub mod stencil {
 /// let results: Vec<_> = ndslice::utils::apply_stencil(coords, sizes, offsets).collect();
 /// // Results in: [[0, 1], [2, 1], [1, 0], [1, 2]]
 /// ```
-pub fn apply_stencil<'a, Off>(
-    coords: &'a [usize],
-    sizes: &'a [usize],
-    offsets: &'a [Off],
-) -> impl Iterator<Item = Vec<usize>> + 'a
-where
-    Off: AsRef<[isize]> + 'a,
-{
-    let ndim = coords.len();
-    assert_eq!(ndim, sizes.len());
-    assert!(offsets.iter().all(|o| o.as_ref().len() == ndim));
-
+pub fn apply_stencil<'a, const N: usize>(
+    coords: &'a [usize; N],
+    sizes: &'a [usize; N],
+    offsets: &'a [[isize; N]],
+) -> impl Iterator<Item = [usize; N]> + 'a {
     offsets.iter().filter_map(move |offset| {
-        let mut p = Vec::with_capacity(ndim);
-        for dim in 0..ndim {
+        let mut p = [0usize; N];
+        for dim in 0..N {
             let c = coords[dim] as isize;
             let size = sizes[dim] as isize;
-            let val = c + offset.as_ref()[dim];
+            let val = c + offset[dim];
             if val < 0 || val >= size {
-                return None; // Invalid coordinate, skip this offset.
+                return None;
             }
-            p.push(val as usize);
+            p[dim] = val as usize;
         }
         Some(p)
     })
