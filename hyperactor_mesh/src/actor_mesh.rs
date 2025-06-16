@@ -644,8 +644,7 @@ mod tests {
                 let proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
                 let (undeliverable_tx, _undeliverable_rx) = proc_mesh.client().open_port();
                 let params = PingPongActorParams::new(undeliverable_tx.bind(), None);
-                let actor_mesh: RootActorMesh<PingPongActor> =
-                    proc_mesh.spawn::<PingPongActor>("pingpong", &params).await.unwrap();
+                let actor_mesh = proc_mesh.spawn::<PingPongActor>("pingpong", &params).await.unwrap();
                 let slice = actor_mesh.shape().slice();
 
                 let mut num_games = 0;
