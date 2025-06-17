@@ -472,66 +472,6 @@ class _Actor:
     This class wraps the actual `Actor` instance provided by the user, and
     routes messages to it, managing argument serialization/deserialization and
     error handling.
-
-    Messages will be processed in order, on a dedicated thread for this actor.
-    """
-
-    def __init__(self) -> None:
-        self.instance: object | None = None
-
-    def handle(self, mailbox: Mailbox, message: PythonMessage) -> None:
-        return self.handle_cast(mailbox, 0, singleton_shape, message)
-
-    def handle_cast(
-        self,
-        mailbox: Mailbox,
-        rank: int,
-        shape: Shape,
-        message: PythonMessage,
-    ) -> None:
-        port = (
-            Port(message.response_port, mailbox, rank)
-            if message.response_port
-            else None
-        )
-        try:
-            ctx: MonarchContext = MonarchContext(
-                mailbox, mailbox.actor_id.proc_id, Point(rank, shape)
-            )
-            _context.set(ctx)
-
-            args, kwargs = _unpickle(message.message, mailbox)
-            if message.method == "__init__":
-                Class, *args = args
-                self.instance = Class(*args, **kwargs)
-                return None
-
-            the_method = getattr(self.instance, message.method)._method
-
-            enter_span(the_method.__module__, message.method, str(ctx.mailbox.actor_id))
-            result = the_method(self.instance, *args, **kwargs)
-            exit_span()
-            if port is not None:
-                port.send("result", result)
-        except Exception as e:
-            traceback.print_exc()
-            s = ActorError(e)
-
-            # The exception is delivered to exactly one of:
-            # (1) our caller, (2) our supervisor
-            if port is not None:
-                port.send("exception", s)
-            else:
-                raise s from None
-
-
-class _AsyncActor:
-    """
-    An async version of `_Actor`.
-
-    Messages will be processed in order, but the `handle` methods will be
-    enqueued as background tasks. Thus, if an async endpoint `await`s, the
-    scheduler may concurrently process another message.
     """
 
     def __init__(self) -> None:
@@ -562,6 +502,7 @@ class _AsyncActor:
             _context.set(ctx)
 
             args, kwargs = _unpickle(message.message, mailbox)
+
             if message.method == "__init__":
                 Class, *args = args
                 self.instance = Class(*args, **kwargs)
@@ -573,7 +514,9 @@ class _AsyncActor:
 
                 async def instrumented():
                     enter_span(
-                        the_method.__module__, message.method, str(ctx.mailbox.actor_id)
+                        the_method.__module__,
+                        message.method,
+                        str(ctx.mailbox.actor_id),
                     )
                     try:
                         result = await the_method(self.instance, *args, **kwargs)
@@ -659,7 +602,6 @@ class Actor(MeshTrait):
 
     @endpoint  # pyre-ignore
     def _set_debug_client(self, client: "DebugClient") -> None:
-        print("calling _set_debug_client")
         point = MonarchContext.get().point
         # For some reason, using a lambda instead of functools.partial
         # confuses the pdb wrapper implementation.

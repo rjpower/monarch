@@ -36,6 +36,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
 use pyo3::types::PyList;
+use pyo3::types::PyTuple;
 use pyo3::types::PyType;
 use serde::Deserialize;
 use serde::Serialize;
@@ -271,30 +272,17 @@ impl PythonActorHandle {
     }
 }
 
-/// Controls how actor method dispatch happens.
-///
-/// In order to preserve the expected behavior of things like thread-local
-/// storage, we need to perform dispatch on a consistent thread.
-#[derive(Debug)]
-enum DispatchType {
-    /// This actor is synchronous (i.e. only has `def` endpoints). Dispatch via
-    /// running Python code inline on the dedicated actor thread.
-    Sync,
-    /// This actor is asynchronous (i.e. has at least one `async def` endpoint).
-    /// Dispatch by running on a dedicated thread with an asyncio event loop.
-    Async(pyo3_async_runtimes::TaskLocals),
-}
-
 /// An actor for which message handlers are implemented in Python.
 #[derive(Debug)]
 #[hyperactor::export_spawn(PythonMessage, Cast<PythonMessage>, IndexedErasedUnbound<Cast<PythonMessage>>)]
 pub(super) struct PythonActor {
     /// The Python object that we delegate message handling to. An instance of
-    /// `monarch.actor_mesh._Actor` or `_AsyncActor`.
+    /// `monarch.actor_mesh._Actor`.
     pub(super) actor: PyObject,
 
-    /// How to dispatch methods on this actor
-    dispatch_type: DispatchType,
+    /// Stores a reference to the Python event loop to run Python coroutines on.
+    /// We give each PythonActor its own even loop in its own thread.
+    task_locals: pyo3_async_runtimes::TaskLocals,
 }
 
 #[async_trait]
@@ -307,95 +295,32 @@ impl Actor for PythonActor {
             let class_type: &Bound<'_, PyType> = unpickled.downcast()?;
             let actor = class_type.call0()?.into_pyobject(py)?;
 
-            let actor_mesh_module = Python::import(py, "monarch.actor_mesh")?;
-            let actor_class = actor_mesh_module.getattr("_AsyncActor")?;
-            let is_async = actor.is_instance(&actor_class)?;
+            // Release the GIL so that the thread spawned below can acquire it.
+            let task_locals = Python::allow_threads(py, || {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let _ = std::thread::spawn(move || {
+                    Python::with_gil(|py| {
+                        let asyncio = Python::import(py, "asyncio").unwrap();
+                        let event_loop = asyncio.call_method0("new_event_loop").unwrap();
+                        asyncio
+                            .call_method1("set_event_loop", (event_loop.clone(),))
+                            .unwrap();
 
-            let dispatch_type = if is_async {
-                // Get the event loop state to run PythonActor handlers in. We construct a
-                // fresh event loop in its own thread for us to schedule this work onto, to
-                // avoid disturbing any event loops that the user might be running.
-                //
-                // First, release the GIL so that the thread spawned below can acquire it.
-                DispatchType::Async(Python::allow_threads(py, || {
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    let _ = std::thread::spawn(move || {
-                        Python::with_gil(|py| {
-                            let asyncio = Python::import(py, "asyncio").unwrap();
-                            let event_loop = asyncio.call_method0("new_event_loop").unwrap();
-                            asyncio
-                                .call_method1("set_event_loop", (event_loop.clone(),))
-                                .unwrap();
-
-                            let task_locals =
-                                pyo3_async_runtimes::TaskLocals::new(event_loop.clone())
-                                    .copy_context(py)
-                                    .unwrap();
-                            tx.send(task_locals).unwrap();
-                            event_loop.call_method0("run_forever").unwrap();
-                        });
+                        let task_locals = pyo3_async_runtimes::TaskLocals::new(event_loop.clone())
+                            .copy_context(py)
+                            .unwrap();
+                        tx.send(task_locals).unwrap();
+                        event_loop.call_method0("run_forever").unwrap();
                     });
-                    rx.recv().unwrap()
-                }))
-            } else {
-                DispatchType::Sync
-            };
+                });
+                rx.recv().unwrap()
+            });
 
             Ok(Self {
                 actor: actor.into(),
-                dispatch_type,
+                task_locals,
             })
         })?)
-    }
-
-    /// Specialize spawn_server_task for PythonActor, because we want to run the stream on a
-    /// dedicated OS thread. We do this to guarantee tha all Python code is
-    /// executed on the same thread, since often Python code uses thread-local
-    /// state or otherwise assumes that it is called only from a single thread.
-    fn spawn_server_task<F>(future: F) -> JoinHandle<F::Output>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        let (join_tx, join_rx) = tokio::sync::oneshot::channel();
-        // It is important that we spawn a standalone thread for the work here,
-        // as opposed to using `spawn_blocking` to spawn a tokio-managed thread.
-        // This is because the worker stream may call uninterruptible FFI code
-        // that can deadlock (CUDA, NCCL).
-        // If we use a tokio-managed blocking thread, then runtime teardown will
-        // try to wait for tasks on that thread to reach an await point, and
-        // hang forever.
-        let builder = std::thread::Builder::new().name("python-actor".to_string());
-        let _thread_handle = builder.spawn(move || {
-            // Spawn a new thread with a single-threaded tokio runtime to run the
-            // actor loop.  We avoid the current-threaded runtime, so that we can
-            // use `block_in_place` for nested async-to-sync-to-async flows.
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_io()
-                .build()
-                .unwrap();
-            rt.block_on(async {
-                tokio::task::block_in_place(|| {
-                    // Allow e.g. destructing py objects on this thread, which
-                    // can happen at shutdown when the a stream actors env map
-                    // for rvalues is dropped (e.g. P1673311499).
-                    // https://github.com/PyO3/pyo3/discussions/3499
-                    Python::with_gil(|py| {
-                        py.allow_threads(|| {
-                            let result = Handle::current().block_on(future);
-                            if join_tx.send(result).is_err() {
-                                panic!("could not send join result")
-                            }
-                        })
-                    })
-                })
-            })
-        });
-
-        // In order to bridge the synchronous join handle with the async world,
-        // smuggle the result through a channel.
-        tokio::spawn(async move { join_rx.await.unwrap() })
     }
 }
 
@@ -456,44 +381,33 @@ impl Handler<PythonMessage> for PythonActor {
         let mailbox = PyMailbox {
             inner: this.mailbox_for_py().clone(),
         };
-        match &self.dispatch_type {
-            DispatchType::Sync => {
-                Python::with_gil(|py| -> Result<_, SerializablePyErr> {
-                    tokio::task::block_in_place(|| {
-                        self.actor
-                            .call_method(py, "handle", (mailbox, message), None)
-                            .map_err(|err| err.into())
-                    })
-                })?;
-            }
-            DispatchType::Async(task_locals) => {
-                // Create a channel for signaling panics in async endpoints.
-                // See [Panics in async endpoints].
-                let (sender, receiver) = oneshot::channel();
+        // Create a channel for signaling panics in async endpoints.
+        // See [Panics in async endpoints].
+        let (sender, receiver) = oneshot::channel();
 
-                let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
-                    let awaitable = self.actor.call_method(
-                        py,
-                        "handle",
-                        (
-                            mailbox,
-                            message,
-                            PanicFlag {
-                                sender: Some(sender),
-                            },
-                        ),
-                        None,
-                    )?;
-                    pyo3_async_runtimes::into_future_with_locals(
-                        task_locals,
-                        awaitable.into_bound(py),
-                    )
-                    .map_err(|err| err.into())
-                })?;
-                let handler = AsyncEndpointTask::spawn(this, ()).await?;
-                handler.run(this, PythonTask::new(future), receiver).await?;
-            }
-        }
+        let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
+            let awaitable = self.actor.call_method(
+                py,
+                "handle",
+                (
+                    mailbox,
+                    message,
+                    PanicFlag {
+                        sender: Some(sender),
+                    },
+                ),
+                None,
+            )?;
+            pyo3_async_runtimes::into_future_with_locals(
+                &self.task_locals,
+                awaitable.into_bound(py),
+            )
+            .map_err(|err| err.into())
+        })?;
+
+        // Spawn a child actor to await the Python handler method.
+        let handler = AsyncEndpointTask::spawn(this, ()).await?;
+        handler.run(this, PythonTask::new(future), receiver).await?;
         Ok(())
     }
 }
@@ -512,53 +426,36 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
         let mailbox = PyMailbox {
             inner: this.mailbox_for_py().clone(),
         };
-        match &self.dispatch_type {
-            DispatchType::Sync => {
-                Python::with_gil(|py| -> Result<_, SerializablePyErr> {
-                    tokio::task::block_in_place(|| {
-                        self.actor
-                            .call_method(
-                                py,
-                                "handle_cast",
-                                (mailbox, rank.0, PyShape::from(shape), message),
-                                None,
-                            )
-                            .map_err(|err| err.into())
-                    })
-                })?;
-            }
-            DispatchType::Async(task_locals) => {
-                // Create a channel for signaling panics in async endpoints.
-                // See [Panics in async endpoints].
-                let (sender, receiver) = oneshot::channel();
+        // Create a channel for signaling panics in async endpoints.
+        // See [Panics in async endpoints].
+        let (sender, receiver) = oneshot::channel();
 
-                let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
-                    let awaitable = self.actor.call_method(
-                        py,
-                        "handle_cast",
-                        (
-                            mailbox,
-                            rank.0,
-                            PyShape::from(shape),
-                            message,
-                            PanicFlag {
-                                sender: Some(sender),
-                            },
-                        ),
-                        None,
-                    )?;
+        let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
+            let awaitable = self.actor.call_method(
+                py,
+                "handle_cast",
+                (
+                    mailbox,
+                    rank.0,
+                    PyShape::from(shape),
+                    message,
+                    PanicFlag {
+                        sender: Some(sender),
+                    },
+                ),
+                None,
+            )?;
 
-                    pyo3_async_runtimes::into_future_with_locals(
-                        task_locals,
-                        awaitable.into_bound(py),
-                    )
-                    .map_err(|err| err.into())
-                })?;
+            pyo3_async_runtimes::into_future_with_locals(
+                &self.task_locals,
+                awaitable.into_bound(py),
+            )
+            .map_err(|err| err.into())
+        })?;
 
-                let handler = AsyncEndpointTask::spawn(this, ()).await?;
-                handler.run(this, PythonTask::new(future), receiver).await?;
-            }
-        };
+        // Spawn a child actor to await the Python handler method.
+        let handler = AsyncEndpointTask::spawn(this, ()).await?;
+        handler.run(this, PythonTask::new(future), receiver).await?;
         Ok(())
     }
 }

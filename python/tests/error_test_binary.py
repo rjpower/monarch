@@ -153,7 +153,7 @@ def error_bootstrap():
     proc_mesh(gpus=4, env={"MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING": "1"}).get()
 
 
-async def _error_unomonitored():
+async def _error_unmonitored():
     print("I actually ran")
     sys.stdout.flush()
 
@@ -173,7 +173,7 @@ async def _error_unomonitored():
 
 @main.command("error-unmonitored")
 def error_unmonitored():
-    asyncio.run(_error_unomonitored())
+    asyncio.run(_error_unmonitored())
 
 
 if __name__ == "__main__":

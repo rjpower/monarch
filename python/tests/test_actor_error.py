@@ -129,6 +129,7 @@ def test_actor_supervision(num_procs, sync_endpoint, sync_test_impl, endpoint_na
         f"--endpoint-name={endpoint_name}",
     ]
     try:
+        print("running cmd", " ".join(cmd))
         process = subprocess.run(cmd, capture_output=True, timeout=180)
     except subprocess.TimeoutExpired as e:
         print("timeout expired")
@@ -158,6 +159,7 @@ def test_proc_mesh_bootstrap_error():
         "error-bootstrap",
     ]
     try:
+        print("running cmd", " ".join(cmd))
         process = subprocess.run(cmd, capture_output=True, timeout=180)
     except subprocess.TimeoutExpired as e:
         print("timeout expired")
@@ -221,6 +223,7 @@ async def test_exception_after_wait_unmonitored():
         "error-unmonitored",
     ]
     try:
+        print("running cmd", " ".join(cmd))
         process = subprocess.run(cmd, capture_output=True, timeout=180)
     except subprocess.TimeoutExpired as e:
         print("timeout expired")

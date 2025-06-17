@@ -391,10 +391,13 @@ def test_rust_binding_modules_correct() -> None:
     check(bindings, "monarch._rust_bindings")
 
 
-@pytest.mark.skipif(
+two_gpu = pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
 )
+
+
+@two_gpu
 def test_tensor_engine() -> None:
     pm = proc_mesh(gpus=2).get()
 
@@ -434,7 +437,6 @@ def _debugee_actor_internal(rank):
 class DebugeeActor(Actor):
     @endpoint
     async def to_debug(self):
-        print("calling to_debug")
         rank = MonarchContext.get().point.rank
         return _debugee_actor_internal(rank)
 
@@ -616,6 +618,23 @@ async def test_actor_tls_full_sync() -> None:
     await am.increment.call_one()
 
     assert 4 == await am.get.call_one()
+
+
+@two_gpu
+def test_proc_mesh_tensor_engine() -> None:
+    pm = proc_mesh(gpus=2).get()
+    with pm.activate():
+        f = 10 * pm.rank_tensor("gpus").cuda()
+        a = monarch.inspect(f, hosts=0, gpus=0)
+        b = monarch.inspect(f, hosts=0, gpus=1)
+
+    one = pm.slice(gpus=1)
+    with one.activate():
+        sliced_b = monarch.slice_mesh(f, gpus=1).to_mesh(one)
+        c = monarch.inspect(sliced_b * 10)
+    assert a == 0
+    assert b == 10
+    assert c == 100
 
 
 class AsyncActor(Actor):
