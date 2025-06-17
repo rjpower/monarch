@@ -36,15 +36,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
 use pyo3::types::PyList;
-use pyo3::types::PyTuple;
 use pyo3::types::PyType;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_bytes::ByteBuf;
-use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
 
 use crate::mailbox::PyMailbox;
 use crate::proc::InstanceWrapper;
@@ -464,18 +461,18 @@ impl Handler<Cast<PythonMessage>> for PythonActor {
 ///
 /// Also so that we don't have to write this massive type signature everywhere
 struct PythonTask {
-    future: Arc<Mutex<Option<Pin<Box<dyn Future<Output = PyResult<PyObject>> + Send + 'static>>>>>,
+    future: Mutex<Pin<Box<dyn Future<Output = PyResult<PyObject>> + Send + 'static>>>,
 }
 
 impl PythonTask {
     fn new(fut: impl Future<Output = PyResult<PyObject>> + Send + 'static) -> Self {
         Self {
-            future: Arc::new(Mutex::new(Some(Box::pin(fut)))),
+            future: Mutex::new(Box::pin(fut)),
         }
     }
 
     async fn take(self) -> Pin<Box<dyn Future<Output = PyResult<PyObject>> + Send + 'static>> {
-        self.future.lock().await.take().unwrap()
+        self.future.into_inner()
     }
 }
 
