@@ -757,5 +757,5 @@ def test_actor_future():
 
     f = ActorFuture(neverfinish)
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(asyncio.exceptions.TimeoutError):
         f.get(timeout=0.1)
