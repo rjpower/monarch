@@ -379,12 +379,12 @@ impl Invocation {
                 );
             }
         }
-        return vec![];
+        vec![]
     }
 
     fn msg_result(&self) -> Option<Result<Serialized, Exception>> {
         match &self.status {
-            Status::Complete() => self.result.clone().map(|x| Ok(x)),
+            Status::Complete() => self.result.clone().map(Ok),
             Status::Errored(err) => Some(Err(err.clone())),
             Status::Incomplete(_) => {
                 panic!("Incomplete invocation doesn't have a result yet")
