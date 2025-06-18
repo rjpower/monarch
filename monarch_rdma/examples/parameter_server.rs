@@ -91,7 +91,14 @@ const BUFFER_SIZE: usize = 8;
 
 // Parameter Server Actor
 #[derive(Debug)]
-#[hyperactor::export_spawn(PsGetBuffers, PsUpdate, Log)]
+#[hyperactor::export(
+    spawn = true,
+    handlers = [
+        PsGetBuffers,
+        PsUpdate,
+        Log,
+    ],
+)]
 pub struct ParameterServerActor {
     weights_data: Box<[u8]>,
     grad_buffer_data: Box<[Box<[u8]>]>,
@@ -150,14 +157,14 @@ struct Log;
 
 // TODO(pzhang) replace the boilerplate Bind/Unbind impls with a macro.
 impl Bind for Log {
-    fn bind(self, _bindings: &Bindings) -> anyhow::Result<Self> {
-        Ok(self)
+    fn bind(&mut self, _bindings: &mut Bindings) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
 impl Unbind for Log {
-    fn bindings(&self) -> anyhow::Result<Bindings> {
-        Ok(Bindings::default())
+    fn unbind(&self, _bindings: &mut Bindings) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -252,11 +259,18 @@ impl Handler<Log> for ParameterServerActor {
 
 // Worker Actor
 #[derive(Debug)]
-#[hyperactor::export_spawn(
-    Cast<WorkerInit>, IndexedErasedUnbound<Cast<WorkerInit>>,
-    Cast<WorkerStep>, IndexedErasedUnbound<Cast<WorkerStep>>,
-    Cast<WorkerUpdate>, IndexedErasedUnbound<Cast<WorkerUpdate>>,
-    Cast<Log>, IndexedErasedUnbound<Cast<Log>>,
+#[hyperactor::export(
+    spawn = true,
+    handlers = [
+        Cast<WorkerInit>,
+        IndexedErasedUnbound<Cast<WorkerInit>>,
+        Cast<WorkerStep>,
+        IndexedErasedUnbound<Cast<WorkerStep>>,
+        Cast<WorkerUpdate>,
+        IndexedErasedUnbound<Cast<WorkerUpdate>>,
+        Cast<Log>,
+        IndexedErasedUnbound<Cast<Log>>,
+    ],
 )]
 pub struct WorkerActor {
     ps_weights_handle: Option<RdmaBuffer>,
@@ -307,14 +321,14 @@ pub struct WorkerInit(
 
 // TODO(pzhang) replace the boilerplate Bind/Unbind impls with a macro.
 impl Bind for WorkerInit {
-    fn bind(self, _bindings: &Bindings) -> anyhow::Result<Self> {
-        Ok(self)
+    fn bind(&mut self, _bindings: &mut Bindings) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
 impl Unbind for WorkerInit {
-    fn bindings(&self) -> anyhow::Result<Bindings> {
-        Ok(Bindings::default())
+    fn unbind(&self, _bindings: &mut Bindings) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -327,19 +341,14 @@ pub struct WorkerStep(PortRef<bool>);
 
 // TODO(pzhang) replace the boilerplate Bind/Unbind impls with a macro.
 impl Bind for WorkerStep {
-    fn bind(mut self, bindings: &Bindings) -> anyhow::Result<Self> {
-        let mut_ports = [self.0.port_id_mut()];
-        bindings.rebind(mut_ports.into_iter())?;
-        Ok(self)
+    fn bind(&mut self, bindings: &mut Bindings) -> anyhow::Result<()> {
+        self.0.bind(bindings)
     }
 }
 
 impl Unbind for WorkerStep {
-    fn bindings(&self) -> anyhow::Result<Bindings> {
-        let mut bindings = Bindings::default();
-        let ports = [self.0.port_id()];
-        bindings.insert(ports)?;
-        Ok(bindings)
+    fn unbind(&self, bindings: &mut Bindings) -> anyhow::Result<()> {
+        self.0.unbind(bindings)
     }
 }
 
@@ -352,19 +361,14 @@ pub struct WorkerUpdate(PortRef<bool>);
 
 // TODO(pzhang) replace the boilerplate Bind/Unbind impls with a macro.
 impl Bind for WorkerUpdate {
-    fn bind(mut self, bindings: &Bindings) -> anyhow::Result<Self> {
-        let mut_ports = [self.0.port_id_mut()];
-        bindings.rebind(mut_ports.into_iter())?;
-        Ok(self)
+    fn bind(&mut self, bindings: &mut Bindings) -> anyhow::Result<()> {
+        self.0.bind(bindings)
     }
 }
 
 impl Unbind for WorkerUpdate {
-    fn bindings(&self) -> anyhow::Result<Bindings> {
-        let mut bindings = Bindings::default();
-        let ports = [self.0.port_id()];
-        bindings.insert(ports)?;
-        Ok(bindings)
+    fn unbind(&self, bindings: &mut Bindings) -> anyhow::Result<()> {
+        self.0.unbind(bindings)
     }
 }
 
