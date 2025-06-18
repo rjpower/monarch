@@ -1082,6 +1082,23 @@ impl Mailbox {
         MailboxError::new(self.state.actor_id.clone(), err)
     }
 
+    pub(crate) fn lookup_sender<M: RemoteMessage>(&self) -> Option<UnboundedPortSender<M>> {
+        let port_index = M::port();
+        self.state.ports.get(&port_index).and_then(|boxed| {
+            boxed
+                .as_any()
+                .downcast_ref::<UnboundedSender<M>>()
+                .map(|s| {
+                    debug_assert_eq!(
+                        s.port_id,
+                        self.actor_id().port_id(port_index),
+                        "port_id mismatch in downcasted UnboundedSender"
+                    );
+                    s.sender.clone()
+                })
+        })
+    }
+
     fn bind<M: RemoteMessage>(&self, handle: &PortHandle<M>) -> PortRef<M> {
         assert_eq!(
             handle.mailbox.actor_id(),
@@ -1210,8 +1227,17 @@ impl MailboxSender for Mailbox {
 
 impl cap::sealed::CanSend for Mailbox {
     fn post(&self, dest: PortId, data: Serialized) {
+        let undeliverable_port_id = Undeliverable::<MessageEnvelope>::port();
+        let return_handle = match self.lookup_sender::<Undeliverable<MessageEnvelope>>() {
+            Some(sender) => PortHandle::new(self.clone(), undeliverable_port_id, sender),
+            None => {
+                let (handle, _) = self.open_port::<Undeliverable<MessageEnvelope>>();
+                handle.bind_to(undeliverable_port_id);
+                handle
+            }
+        };
         let envelope = MessageEnvelope::new(self.actor_id().clone(), dest, data);
-        MailboxSender::post(self, envelope, monitored_return_handle());
+        MailboxSender::post(self, envelope, return_handle);
     }
 }
 
@@ -1592,6 +1618,8 @@ pub struct SerializedSenderError {
 ///   - It abstracts over [`Port`]s and [`OncePort`]s, by dynamically tracking the
 ///     validity of the underlying port.
 trait SerializedSender: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+
     /// Send a serialized message. SerializedSender will deserialize the
     /// message (failing if it fails to deserialize), and then send the
     /// resulting message on the underlying port.
@@ -1603,7 +1631,7 @@ trait SerializedSender: Send + Sync {
 }
 
 /// A sender to an M-typed unbounded port.
-enum UnboundedPortSender<M: Message> {
+pub(crate) enum UnboundedPortSender<M: Message> {
     /// Send directly to the mpsc queue.
     Mpsc(mpsc::UnboundedSender<M>),
     /// Use the provided function to enqueue the item.
@@ -1675,6 +1703,10 @@ impl<M: Message> Clone for UnboundedSender<M> {
 }
 
 impl<M: RemoteMessage> SerializedSender for UnboundedSender<M> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn send_serialized(&self, serialized: Serialized) -> Result<bool, SerializedSenderError> {
         match serialized.deserialized() {
             Ok(message) => {
@@ -1757,6 +1789,10 @@ impl<M: Message> Clone for OnceSender<M> {
 }
 
 impl<M: RemoteMessage> SerializedSender for OnceSender<M> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn send_serialized(&self, serialized: Serialized) -> Result<bool, SerializedSenderError> {
         match serialized.deserialized() {
             Ok(message) => self.send_once(message).map_err(|e| SerializedSenderError {
@@ -1781,6 +1817,10 @@ struct UntypedUnboundedSender {
 }
 
 impl SerializedSender for UntypedUnboundedSender {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn send_serialized(&self, serialized: Serialized) -> Result<bool, SerializedSenderError> {
         (self.sender)(serialized).map_err(|(data, err)| SerializedSenderError {
             data,
