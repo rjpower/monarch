@@ -68,7 +68,7 @@ class ProcMesh(MeshTrait):
         _device_mesh: Optional[DeviceMesh] = None,
     ) -> None:
         self._proc_mesh = hy_proc_mesh
-        self._mock_shape: Optional[Shape] = None
+        self._mock_shape: Optional[Shape] = _mock_shape
         self._mailbox: Mailbox = self._proc_mesh.client
         self._rdma_manager: Optional[RDMAManager] = None
         self._maybe_device_mesh: Optional[DeviceMesh] = _device_mesh
