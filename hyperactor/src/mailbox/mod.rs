@@ -1241,9 +1241,12 @@ impl cap::sealed::CanSend for Mailbox {
         let return_handle = match self.lookup_sender::<Undeliverable<MessageEnvelope>>() {
             Some(sender) => PortHandle::new(self.clone(), undeliverable_port_id, sender),
             None => {
-                let (handle, _) = self.open_port::<Undeliverable<MessageEnvelope>>();
-                handle.bind_to(undeliverable_port_id);
-                handle
+                let bt = std::backtrace::Backtrace::capture();
+                panic!(
+                    "Mailbox {:?} attempted to post a message without binding Undeliverable<MessageEnvelope>.\nBacktrace:\n{:?}",
+                    self.actor_id(),
+                    bt,
+                )
             }
         };
         let envelope = MessageEnvelope::new(self.actor_id().clone(), dest, data);
