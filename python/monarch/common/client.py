@@ -48,7 +48,7 @@ from monarch.common.recording import flatten_messages, Recording
 
 from monarch.common.reference import Ref, Referenceable
 from monarch.common.shape import NDSlice
-from monarch.common.stream import Stream, StreamRef
+from monarch.common.stream import StreamRef
 from monarch.common.tensor import Tensor
 from monarch.common.tree import tree_map
 
@@ -449,7 +449,7 @@ class Client:
     def fetch(
         self,
         mesh: "DeviceMesh",
-        stream: "Stream",
+        stream: "StreamRef",
         shard,
         preprocess_message,
         args,
@@ -469,7 +469,7 @@ class Client:
                 preprocess_message,
                 args,
                 kwargs,
-                stream._active._to_ref(self),
+                stream,
             ),
         )
         # we have to ask for status updates
