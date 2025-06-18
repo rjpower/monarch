@@ -137,7 +137,7 @@ impl PyProcMesh {
                 client: PyMailbox {
                     inner: proc_mesh.client().clone(),
                 },
-                keepalive,
+                _keepalive: keepalive,
             };
             Ok(Python::with_gil(|py| python_actor_mesh.into_py(py)))
         })
@@ -159,7 +159,7 @@ impl PyProcMesh {
                 client: PyMailbox {
                     inner: proc_mesh.client().clone(),
                 },
-                keepalive,
+                _keepalive: keepalive,
             };
             Ok(Python::with_gil(|py| python_actor_mesh.into_py(py)))
         })?

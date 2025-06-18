@@ -29,7 +29,7 @@ use crate::shape::PyShape;
 pub struct PythonActorMesh {
     pub(super) inner: Arc<RootActorMesh<'static, PythonActor>>,
     pub(super) client: PyMailbox,
-    pub(super) keepalive: Keepalive,
+    pub(super) _keepalive: Keepalive,
 }
 
 #[pymethods]
