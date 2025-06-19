@@ -966,14 +966,9 @@ impl Mailbox {
 
     /// Create a new detached mailbox associated with the provided actor ID.
     pub fn new_detached(actor_id: ActorId) -> Self {
-        let mailbox = Self {
+        Self {
             state: Arc::new(State::new(actor_id, BOXED_PANICKING_MAILBOX_SENDER.clone())),
-        };
-        // TODO: Consider if this clause should be removed and fix
-        // call sites that panic.
-        let (_undeliverable_messages, _) = mailbox.open_port::<Undeliverable<MessageEnvelope>>();
-        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
-        mailbox
+        }
     }
 
     /// The actor id associated with this mailbox.
@@ -1242,18 +1237,20 @@ impl MailboxSender for Mailbox {
 
 impl cap::sealed::CanSend for Mailbox {
     fn post(&self, dest: PortId, data: Serialized) {
-        let undeliverable_port_id = Undeliverable::<MessageEnvelope>::port();
-        let return_handle = match self.lookup_sender::<Undeliverable<MessageEnvelope>>() {
-            Some(sender) => PortHandle::new(self.clone(), undeliverable_port_id, sender),
-            None => {
-                let bt = std::backtrace::Backtrace::capture();
-                panic!(
-                    "Mailbox {:?} attempted to post a message without binding Undeliverable<MessageEnvelope>.\nBacktrace:\n{:?}",
-                    self.actor_id(),
-                    bt,
-                )
-            }
-        };
+        let return_handle = self
+            .lookup_sender::<Undeliverable<MessageEnvelope>>()
+            .map_or_else(
+                || {
+                    let bt = std::backtrace::Backtrace::capture();
+                    tracing::warn!(
+                        actor_id = ?self.actor_id(),
+                        backtrace = ?bt,
+                        "Mailbox attempted to post a message without binding Undeliverable<MessageEnvelope>"
+                    );
+                    monitored_return_handle()
+                },
+                |sender| PortHandle::new(self.clone(), u64::MAX, sender),
+            );
         let envelope = MessageEnvelope::new(self.actor_id().clone(), dest, data);
         MailboxSender::post(self, envelope, return_handle);
     }

@@ -13,15 +13,12 @@ mod tests {
 
     use hyperactor::ActorRef;
     use hyperactor::Mailbox;
-    use hyperactor::Named;
     use hyperactor::channel::ChannelAddr;
     use hyperactor::channel::ChannelTransport;
     use hyperactor::channel::sim;
     use hyperactor::channel::sim::AddressProxyPair;
     use hyperactor::channel::sim::SimAddr;
     use hyperactor::id;
-    use hyperactor::mailbox::MessageEnvelope;
-    use hyperactor::mailbox::Undeliverable;
     use hyperactor::reference::Index;
     use hyperactor::reference::WorldId;
     use hyperactor::simnet;
@@ -62,9 +59,6 @@ mod tests {
 
         // Create a client on its individual proc that can talk to the system.
         let sys_mailbox = system.attach().await.unwrap();
-        let (_undeliverable_messages, _) =
-            sys_mailbox.open_port::<Undeliverable<MessageEnvelope>>();
-        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
         let world_id = id!(world);
 
