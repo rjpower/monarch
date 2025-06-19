@@ -966,9 +966,14 @@ impl Mailbox {
 
     /// Create a new detached mailbox associated with the provided actor ID.
     pub fn new_detached(actor_id: ActorId) -> Self {
-        Self {
+        let mailbox = Self {
             state: Arc::new(State::new(actor_id, BOXED_PANICKING_MAILBOX_SENDER.clone())),
-        }
+        };
+        // TODO: Consider if this clause should be removed and fix
+        // call sites that panic.
+        let (_undeliverable_messages, _) = mailbox.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
+        mailbox
     }
 
     /// The actor id associated with this mailbox.

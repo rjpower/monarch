@@ -228,7 +228,13 @@ mod tests {
 
             let mut system = System::new(system_handle.local_addr().clone());
             let client1 = system.attach().await.unwrap();
+            let (_undeliverable_messages, _) =
+                client1.open_port::<Undeliverable<MessageEnvelope>>();
+            _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
             let client2 = system.attach().await.unwrap();
+            let (_undeliverable_messages, _) =
+                client2.open_port::<Undeliverable<MessageEnvelope>>();
+            _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
             let (port, mut port_rx) = client2.open_port();
 
@@ -857,6 +863,8 @@ mod tests {
         // when it sends from its `DialMailboxRouter` so we expect to
         // see a `channel::dial()` there (+1 dial).
         let client1 = system.attach().await.unwrap();
+        let (_undeliverable_messages, _) = client1.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
         // `system.attach()` calls `system.send()` which
         // `channel::dial()`s the system address for a `MailboxClient`
@@ -871,6 +879,8 @@ mod tests {
         // when it sends from its `DialMailboxRouter` so we expect to
         // see a `channel::dial()` there (+1 dial).
         let client2 = system.attach().await.unwrap();
+        let (_undeliverable_messages, _) = client2.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
         // Send a message to `client2` from `client1`. This will
         // involve forwarding to the system actor using `client1`'s

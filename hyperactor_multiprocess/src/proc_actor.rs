@@ -854,6 +854,8 @@ mod tests {
     use hyperactor::forward;
     use hyperactor::id;
     use hyperactor::mailbox::Mailbox;
+    use hyperactor::mailbox::MessageEnvelope;
+    use hyperactor::mailbox::Undeliverable;
     use hyperactor::reference::ActorRef;
     use hyperactor::test_utils::pingpong::PingPongActor;
     use hyperactor::test_utils::pingpong::PingPongActorParams;
@@ -904,6 +906,8 @@ mod tests {
 
         let mut system = System::new(server_handle.local_addr().clone());
         let client = system.attach().await.unwrap();
+        let (_undeliverable_messages, _) = client.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
         // This is really not cool. We should manage state subscriptions instead.
         let start = RealClock.now();
@@ -1196,6 +1200,9 @@ mod tests {
         // A test supervisor.
         let mut system = System::new(server_handle.local_addr().clone());
         let supervisor_mailbox = system.attach().await.unwrap();
+        let (_undeliverable_messages, _) =
+            supervisor_mailbox.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
         let (supervisor_supervision_tx, mut supervisor_supervision_receiver) =
             supervisor_mailbox.open_port::<ProcSupervisionMessage>();
         supervisor_supervision_tx.bind_to(ProcSupervisionMessage::port());
@@ -1292,6 +1299,8 @@ mod tests {
         .unwrap();
         let mut system = System::new(server_handle.local_addr().clone());
         let client = system.attach().await.unwrap();
+        let (_undeliverable_messages, _) = client.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
         let world_id = id!(world);
         let proc_id = world_id.proc_id(0);
@@ -1657,6 +1666,9 @@ mod tests {
         let mut system = System::new(system_addr.clone());
 
         let system_client = system.attach().await.unwrap();
+        let (_undeliverable_messages, _) =
+            system_client.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
         // Spawn ping and pong actors to play a ping pong game.
         let ping_actor_id = id!(world[0].ping[0]);

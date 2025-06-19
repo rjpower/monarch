@@ -32,6 +32,8 @@ use hyperactor::cap;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::clock::Clock;
 use hyperactor::data::Serialized;
+use hyperactor::mailbox::MessageEnvelope;
+use hyperactor::mailbox::Undeliverable;
 use hyperactor_mesh::comm::CommActor;
 use hyperactor_mesh::comm::CommActorMode;
 use hyperactor_mesh::comm::multicast::CastMessage;
@@ -182,6 +184,8 @@ impl ControllerActor {
 
         let mut system = hyperactor_multiprocess::System::new(bootstrap_addr);
         let client = system.attach().await?;
+        let (_undeliverable_messages, _) = client.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
         let controller_actor_ref = spawn::<ControllerActor>(
             &client,
@@ -659,9 +663,14 @@ mod tests {
         let (client, client_ref, mut client_rx) = proc
             .attach_actor::<ClientActor, ClientMessage>("client")
             .unwrap();
+        let (_undeliverable_messages, _) = client.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
         let (worker, worker_ref, mut worker_rx) = proc
             .attach_actor::<WorkerActor, WorkerMessage>("worker")
             .unwrap();
+        let (_undeliverable_messages, _) = worker.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
+
         IndexedErasedUnbound::<WorkerMessage>::bind_for_test_only(worker_ref.clone(), &worker)
             .unwrap();
 
@@ -843,9 +852,13 @@ mod tests {
         let (client, client_ref, mut client_rx) = proc
             .attach_actor::<ClientActor, ClientMessage>("client")
             .unwrap();
+        let (_undeliverable_messages, _) = client.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
         let (worker, worker_ref, mut worker_rx) = proc
             .attach_actor::<WorkerActor, WorkerMessage>("worker")
             .unwrap();
+        let (_undeliverable_messages, _) = worker.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
         IndexedErasedUnbound::<WorkerMessage>::bind_for_test_only(worker_ref.clone(), &worker)
             .unwrap();
 
@@ -955,10 +968,14 @@ mod tests {
         let (client, client_ref, mut client_rx) = proc
             .attach_actor::<ClientActor, ClientMessage>("client")
             .unwrap();
+        let (_undeliverable_messages, _) = client.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
         let (worker, worker_ref, mut worker_rx) = proc
             .attach_actor::<WorkerActor, WorkerMessage>("worker")
             .unwrap();
+        let (_undeliverable_messages, _) = worker.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
         IndexedErasedUnbound::<WorkerMessage>::bind_for_test_only(worker_ref.clone(), &worker)
             .unwrap();
 
@@ -1137,14 +1154,20 @@ mod tests {
         let (client, client_ref, mut client_rx) = proc
             .attach_actor::<ClientActor, ClientMessage>("client")
             .unwrap();
+        let (_undeliverable_messages, _) = client.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
         let (worker1, worker1_ref, _) = proc
             .attach_actor::<WorkerActor, WorkerMessage>("worker")
             .unwrap();
+        let (_undeliverable_messages, _) = worker1.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
         IndexedErasedUnbound::<WorkerMessage>::bind_for_test_only(worker1_ref.clone(), &worker1)
             .unwrap();
         let (worker2, worker2_ref, _) = proc2
             .attach_actor::<WorkerActor, WorkerMessage>("worker")
             .unwrap();
+        let (_undeliverable_messages, _) = worker2.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
         IndexedErasedUnbound::<WorkerMessage>::bind_for_test_only(worker2_ref.clone(), &worker2)
             .unwrap();
 
@@ -1360,9 +1383,13 @@ mod tests {
         let (client, client_ref, mut client_rx) = proc
             .attach_actor::<ClientActor, ClientMessage>("client")
             .unwrap();
+        let (_undeliverable_messages, _) = client.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
         let (worker1, worker1_ref, _) = proc
             .attach_actor::<WorkerActor, WorkerMessage>("worker")
             .unwrap();
+        let (_undeliverable_messages, _) = worker1.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
         let controller_handle = proc
             .spawn::<ControllerActor>(
@@ -1577,6 +1604,9 @@ mod tests {
 
         let mut system = System::new(server_handle.local_addr().clone());
         let client_mailbox = system.attach().await.unwrap();
+        let (_undeliverable_messages, _) =
+            client_mailbox.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
         // Bootstrap the controller
         let controller_id = id!(controller[0].root);
@@ -1679,6 +1709,9 @@ mod tests {
         // Client actor.
         let mut system = System::new(server_handle.local_addr().clone());
         let client_mailbox = system.attach().await.unwrap();
+        let (_undeliverable_messages, _) =
+            client_mailbox.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
         let (client_supervision_tx, mut client_supervision_rx) =
             client_mailbox.open_port::<ClientMessage>();
         client_supervision_tx.bind_to(ClientMessage::port());
@@ -1822,6 +1855,9 @@ mod tests {
         // Client actor.
         let mut system = System::new(server_handle.local_addr().clone());
         let client_mailbox = system.attach().await.unwrap();
+        let (_undeliverable_messages, _) =
+            client_mailbox.open_port::<Undeliverable<MessageEnvelope>>();
+        _undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
         let (client_supervision_tx, mut client_supervision_rx) =
             client_mailbox.open_port::<ClientMessage>();
         client_supervision_tx.bind_to(ClientMessage::port());
