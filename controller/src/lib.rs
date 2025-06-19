@@ -662,7 +662,6 @@ mod tests {
         let (worker, worker_ref, mut worker_rx) = proc
             .attach_actor::<WorkerActor, WorkerMessage>("worker")
             .unwrap();
-
         IndexedErasedUnbound::<WorkerMessage>::bind_for_test_only(worker_ref.clone(), &worker)
             .unwrap();
 
