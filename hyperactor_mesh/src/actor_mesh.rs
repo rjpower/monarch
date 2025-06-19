@@ -847,8 +847,6 @@ mod tests {
 
         #[tokio::test]
         async fn test_send_failure() {
-            use hyperactor::mailbox::MessageEnvelope;
-            use hyperactor::mailbox::Undeliverable;
             use hyperactor::test_utils::pingpong::PingPongActor;
             use hyperactor::test_utils::pingpong::PingPongActorParams;
             use hyperactor::test_utils::pingpong::PingPongMessage;
@@ -875,9 +873,7 @@ mod tests {
             let mut undeliverable_msg_rx = mesh.take_client_undeliverable_receiver().unwrap();
 
             let ping_pong_actor_params = PingPongActorParams::new(
-                PortRef::<Undeliverable<MessageEnvelope>>::attest_message_port(
-                    mesh.client().actor_id(),
-                ),
+                PortRef::attest_message_port(mesh.client().actor_id()),
                 None,
             );
             let actor_mesh: RootActorMesh<PingPongActor> = mesh
