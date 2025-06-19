@@ -11,6 +11,7 @@ use std::future::IntoFuture;
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use hyperactor::Named;
 use hyperactor::actor::ActorError;
 use hyperactor::actor::ActorHandle;
 use hyperactor::channel;
@@ -104,6 +105,9 @@ impl System {
 
         // Now, pretend we are the proc actor, and use this to join the system.
         let proc_inst = proc.attach("proc")?;
+        let (undeliverable_messages, proc_inst_undeliverable_receiver) =
+            proc_inst.open_port::<Undeliverable<MessageEnvelope>>();
+        undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
         let (proc_tx, mut proc_rx) = proc_inst.open_port();
 
         system_actor::SYSTEM_ACTOR_REF
