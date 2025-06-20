@@ -6,14 +6,18 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::iter::repeat_n;
+use std::sync;
 use std::sync::Arc;
+use std::sync::atomic;
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 
-use controller::history;
 use hyperactor::ActorRef;
+use hyperactor::data::Serialized;
 use hyperactor_mesh::actor_mesh::ActorMesh;
 use hyperactor_mesh::actor_mesh::RootActorMesh;
 use hyperactor_mesh::proc_mesh::SharedSpawnable;
@@ -26,6 +30,7 @@ use monarch_hyperactor::runtime::signal_safe_block_on;
 use monarch_messages::client::Exception;
 use monarch_messages::controller::ControllerActor;
 use monarch_messages::controller::ControllerMessage;
+use monarch_messages::controller::Seq;
 use monarch_messages::debugger::DebuggerAction;
 use monarch_messages::debugger::DebuggerActor;
 use monarch_messages::debugger::DebuggerMessage;
@@ -49,7 +54,7 @@ struct _Controller {
     controller_instance: Arc<Mutex<InstanceWrapper<ControllerMessage>>>,
     workers: RootActorMesh<'static, WorkerActor>,
     pending_messages: VecDeque<PyObject>,
-    history: history::History,
+    history: History,
 }
 
 impl _Controller {
@@ -97,11 +102,25 @@ impl _Controller {
                     self.add_responses(py, responses)?;
                 }
                 ControllerMessage::RemoteFunctionFailed { seq, error } => {
-                    self.history
+                    let responses = self
+                        .history
                         .propagate_exception(seq, Exception::Error(seq, seq, error));
+                    self.add_responses(py, responses)?;
                 }
-                ControllerMessage::FetchResult { seq, value } => {
+                ControllerMessage::FetchResult {
+                    seq,
+                    value: Ok(value),
+                } => {
                     self.history.set_result(seq, value);
+                }
+                ControllerMessage::FetchResult {
+                    seq,
+                    value: Err(error),
+                } => {
+                    let responses = self
+                        .history
+                        .propagate_exception(seq, Exception::Error(seq, seq, error));
+                    self.add_responses(py, responses)?;
                 }
                 message => {
                     panic!("unexpected message: {:?}", message);
@@ -134,7 +153,7 @@ impl _Controller {
     #[new]
     fn new(py: Python, py_proc_mesh: &PyProcMesh) -> PyResult<Self> {
         let proc_mesh = py_proc_mesh.inner.as_ref();
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let id = NEXT_ID.fetch_add(1, atomic::Ordering::Relaxed);
         let controller_instance: InstanceWrapper<ControllerMessage> = InstanceWrapper::new(
             &PyProc::new_from_proc(proc_mesh.client_proc().clone()),
             &format!("tensor_engine_controller_{}", id),
@@ -175,7 +194,7 @@ impl _Controller {
             workers: workers?,
             controller_instance: Arc::new(Mutex::new(controller_instance)),
             pending_messages: VecDeque::new(),
-            history: history::History::new(world_size),
+            history: History::new(world_size),
         })
     }
 
@@ -198,9 +217,8 @@ impl _Controller {
         Ok(())
     }
 
-    fn drop_refs(&mut self, refs: Vec<Ref>) -> Result<(), anyhow::Error> {
-        self.history.delete_invocations_for_refs(refs);
-        Ok(())
+    fn drop_refs(&mut self, refs: Vec<Ref>) {
+        self.history.drop_refs(refs);
     }
 
     fn send<'py>(&mut self, ranks: Bound<'py, PyAny>, message: Bound<'py, PyAny>) -> PyResult<()> {
@@ -267,4 +285,283 @@ impl _Controller {
 pub(crate) fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<_Controller>()?;
     Ok(())
+}
+
+/// An invocation tracks a discrete node in the graph of operations executed by
+/// the worker based on instructions from the client.
+/// It is useful for tracking the dependencies of an operation and propagating
+/// failures. In the future this will be used with more data dependency tracking
+/// to support better failure handling.
+
+#[derive(Debug)]
+enum Status {
+    Errored(Exception),
+    Complete(),
+
+    /// When incomplete this holds this list of users of this invocation,
+    /// so a future error can be propagated to them.,
+    Incomplete(HashMap<Seq, Arc<sync::Mutex<Invocation>>>),
+}
+#[derive(Debug)]
+struct Invocation {
+    /// The sequence number of the invocation. This should be unique and increasing across all
+    /// invocations.
+    seq: Seq,
+    status: Status,
+    /// Result reported to a future if this invocation was a fetch
+    /// Not all Invocations will be fetched so sometimes a Invocation will complete with
+    /// both result and error == None
+    result: Option<Serialized>,
+}
+
+impl Invocation {
+    fn new(seq: Seq) -> Self {
+        Self {
+            seq,
+            status: Status::Incomplete(HashMap::new()),
+            result: None,
+        }
+    }
+
+    fn add_user(&mut self, user: Arc<sync::Mutex<Invocation>>) {
+        match &mut self.status {
+            Status::Complete() => {}
+            Status::Incomplete(users) => {
+                let seq = user.lock().unwrap().seq;
+                users.insert(seq, user);
+            }
+            Status::Errored(err) => {
+                user.lock().unwrap().set_exception(err.clone());
+            }
+        }
+    }
+
+    /// Invocation results can only go from valid to failed, or be
+    /// set if the invocation result is empty.
+    fn set_result(&mut self, result: Serialized) {
+        if self.result.is_none() {
+            self.result = Some(result);
+        }
+    }
+
+    fn succeed(&mut self) {
+        match self.status {
+            Status::Incomplete(_) => self.status = Status::Complete(),
+            _ => {}
+        }
+    }
+
+    fn set_exception(&mut self, exception: Exception) -> Vec<Arc<sync::Mutex<Invocation>>> {
+        match exception {
+            Exception::Error(_, caused_by_new, error) => {
+                let err = Status::Errored(Exception::Error(self.seq, caused_by_new, error));
+                match &self.status {
+                    Status::Errored(Exception::Error(_, caused_by_current, _))
+                        if caused_by_new < *caused_by_current =>
+                    {
+                        self.status = err;
+                    }
+                    Status::Incomplete(users) => {
+                        let users = users.values().cloned().collect();
+                        self.status = err;
+                        return users;
+                    }
+                    Status::Complete() => {
+                        panic!("Complete invocation getting an exception set")
+                    }
+                    _ => {}
+                }
+            }
+            Exception::Failure(_) => {
+                tracing::error!(
+                    "system failures {:?} can never be assigned for an invocation",
+                    exception
+                );
+            }
+        }
+        vec![]
+    }
+
+    fn msg_result(&self) -> Option<Result<Serialized, Exception>> {
+        match &self.status {
+            Status::Complete() => self.result.clone().map(Ok),
+            Status::Errored(err) => Some(Err(err.clone())),
+            Status::Incomplete(_) => {
+                panic!("Incomplete invocation doesn't have a result yet")
+            }
+        }
+    }
+}
+
+/// The history of invocations sent by the client to be executed on the workers.
+/// This is used to track dependencies between invocations and to propagate exceptions.
+/// It purges history for completed invocations to avoid memory bloat.
+/// TODO: Revisit this setup around purging refs automatically once we start doing
+/// more complex data dependency tracking. We will want to be more aware of things like
+/// borrows, drops etc. directly.
+#[derive(Debug)]
+struct History {
+    /// The first incomplete Seq for each rank. This is used to determine which
+    /// Seqs are no longer relevant and can be purged from the history.
+    first_incomplete_seqs: MinVector<Seq>,
+    /// The minimum incomplete Seq across all ranks.
+    min_incomplete_seq: Seq,
+    /// A map of seq to the invocation that it represents for all seq >= min_incomplete_seq
+    inflight_invocations: HashMap<Seq, Arc<sync::Mutex<Invocation>>>,
+    /// A map of reference to the seq for the invocation that defines it. This is used to
+    /// compute dependencies between invocations.
+    invocation_for_ref: HashMap<Ref, Arc<sync::Mutex<Invocation>>>,
+    // no new sequence numbers should be below this bound. use for
+    // sanity checking.
+    seq_lower_bound: Seq,
+}
+
+/// A vector that keeps track of the minimum value.
+#[derive(Debug)]
+struct MinVector<T> {
+    data: Vec<T>,
+    value_counts: BTreeMap<T, usize>,
+}
+
+impl<T> MinVector<T>
+where
+    T: Ord + Copy,
+{
+    fn new(data: Vec<T>) -> Self {
+        let mut value_counts = BTreeMap::new();
+        for &value in &data {
+            *value_counts.entry(value).or_insert(0) += 1;
+        }
+        MinVector { data, value_counts }
+    }
+
+    fn set(&mut self, index: usize, value: T) {
+        // Decrease the count of the old value
+        let old_value = self.data[index];
+        if let Some(count) = self.value_counts.get_mut(&old_value) {
+            *count -= 1;
+            if *count == 0 {
+                self.value_counts.remove(&old_value);
+            }
+        }
+        // Update the value in the vector
+        self.data[index] = value;
+
+        // Increase the count of the new value
+        *self.value_counts.entry(value).or_insert(0) += 1;
+    }
+
+    fn min(&self) -> T {
+        *self.value_counts.keys().next().unwrap()
+    }
+}
+
+impl History {
+    pub fn new(world_size: usize) -> Self {
+        Self {
+            first_incomplete_seqs: MinVector::new(vec![Seq::default(); world_size]),
+            min_incomplete_seq: Seq::default(),
+            invocation_for_ref: HashMap::new(),
+            inflight_invocations: HashMap::new(),
+            seq_lower_bound: 0.into(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn first_incomplete_seqs(&self) -> &[Seq] {
+        self.first_incomplete_seqs.vec()
+    }
+
+    pub fn drop_refs(&mut self, refs: Vec<Ref>) {
+        for r in refs {
+            self.invocation_for_ref.remove(&r);
+        }
+    }
+
+    /// Add an invocation to the history.
+    pub fn add_invocation(
+        &mut self,
+        seq: Seq,
+        uses: Vec<Ref>,
+        defs: Vec<Ref>,
+    ) -> Vec<(Seq, Option<Result<Serialized, Exception>>)> {
+        assert!(
+            seq >= self.seq_lower_bound,
+            "nonmonotonic seq: {:?}; current lower bound: {:?}",
+            seq,
+            self.seq_lower_bound,
+        );
+        self.seq_lower_bound = seq;
+        let invocation = Arc::new(sync::Mutex::new(Invocation::new(seq)));
+        self.inflight_invocations.insert(seq, invocation.clone());
+        for ref use_ in uses {
+            let producer = self.invocation_for_ref.get(use_).unwrap();
+            producer.lock().unwrap().add_user(invocation.clone());
+        }
+
+        for def in defs {
+            self.invocation_for_ref.insert(def, invocation.clone());
+        }
+        let invocation = invocation.lock().unwrap();
+        if matches!(invocation.status, Status::Errored(_)) {
+            vec![(seq, invocation.msg_result())]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Propagate worker error to the invocation with the given Seq. This will also propagate
+    /// to all seqs that depend on this seq directly or indirectly.
+    pub fn propagate_exception(
+        &mut self,
+        seq: Seq,
+        exception: Exception,
+    ) -> Vec<(Seq, Option<Result<Serialized, Exception>>)> {
+        let mut results = Vec::new();
+        let invocation = self.inflight_invocations.get(&seq).unwrap().clone();
+
+        let mut queue: Vec<Arc<sync::Mutex<Invocation>>> = vec![invocation];
+        let mut visited = HashSet::new();
+
+        while let Some(invocation) = queue.pop() {
+            let mut invocation = invocation.lock().unwrap();
+            if !visited.insert(invocation.seq) {
+                continue;
+            };
+            queue.extend(invocation.set_exception(exception.clone()));
+            results.push((seq, invocation.msg_result()));
+        }
+        results
+    }
+
+    /// Mark the given rank as completed up to but excluding the given Seq. This will also purge history for
+    /// any Seqs that are no longer relevant (completed on all ranks).
+    pub fn rank_completed(
+        &mut self,
+        rank: usize,
+        seq: Seq,
+    ) -> Vec<(Seq, Option<Result<Serialized, Exception>>)> {
+        self.first_incomplete_seqs.set(rank, seq);
+        let prev = self.min_incomplete_seq;
+        self.min_incomplete_seq = self.first_incomplete_seqs.min();
+
+        let mut results: Vec<(Seq, Option<Result<Serialized, Exception>>)> = Vec::new();
+        for i in Seq::iter_between(prev, self.min_incomplete_seq) {
+            let invocation = self.inflight_invocations.remove(&i).unwrap();
+            let mut invocation = invocation.lock().unwrap();
+
+            if matches!(invocation.status, Status::Errored(_)) {
+                // we already reported output early when it errored
+                continue;
+            }
+            invocation.succeed();
+            results.push((i, invocation.msg_result()));
+        }
+        results
+    }
+
+    pub fn set_result(&mut self, seq: Seq, result: Serialized) {
+        let invocation = self.inflight_invocations.get(&seq).unwrap();
+        invocation.lock().unwrap().set_result(result);
+    }
 }

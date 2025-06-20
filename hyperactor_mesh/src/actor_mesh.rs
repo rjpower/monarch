@@ -821,8 +821,7 @@ mod tests {
 
                 let name = alloc.name().to_string();
                 let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
-                let mut undeliverable_rx = mesh
-                    .take_client_undeliverable_receiver()
+                let mut undeliverable_rx = mesh.client_undeliverable_receiver().take()
                     .expect("client_undeliverable_receiver should be available");
 
                 // Send a message to a non-existent actor (the proc however exists).
@@ -870,7 +869,7 @@ mod tests {
             let monkey = alloc.chaos_monkey();
             let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
             let mut events = mesh.events().unwrap();
-            let mut undeliverable_msg_rx = mesh.take_client_undeliverable_receiver().unwrap();
+            let mut undeliverable_msg_rx = mesh.client_undeliverable_receiver().take().unwrap();
 
             let ping_pong_actor_params = PingPongActorParams::new(
                 PortRef::attest_message_port(mesh.client().actor_id()),

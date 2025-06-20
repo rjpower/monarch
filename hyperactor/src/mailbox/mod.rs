@@ -86,6 +86,7 @@ use std::task::Poll;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use dashmap::DashSet;
 use dashmap::mapref::entry::Entry;
 use serde::Deserialize;
 use serde::Serialize;
@@ -1099,7 +1100,7 @@ impl Mailbox {
                 .as_any()
                 .downcast_ref::<UnboundedSender<M>>()
                 .map(|s| {
-                    debug_assert_eq!(
+                    assert_eq!(
                         s.port_id,
                         self.actor_id().port_id(port_index),
                         "port_id mismatch in downcasted UnboundedSender"
@@ -1235,21 +1236,32 @@ impl MailboxSender for Mailbox {
     }
 }
 
+// Tracks mailboxes that have emitted a `CanSend::post` warning due to
+// missing an `Undeliverable<MessageEnvelope>` binding. In this
+// context, mailboxes are few and long-lived; unbounded growth is not
+// a realistic concern.
+static CAN_SEND_WARNED_MAILBOXES: OnceLock<DashSet<ActorId>> = OnceLock::new();
+
 impl cap::sealed::CanSend for Mailbox {
     fn post(&self, dest: PortId, data: Serialized) {
         let return_handle = self
             .lookup_sender::<Undeliverable<MessageEnvelope>>()
             .map_or_else(
                 || {
-                    let bt = std::backtrace::Backtrace::capture();
-                    tracing::warn!(
-                        actor_id = ?self.actor_id(),
-                        backtrace = ?bt,
-                        "Mailbox attempted to post a message without binding Undeliverable<MessageEnvelope>"
-                    );
+                    let actor_id = self.actor_id();
+                    if CAN_SEND_WARNED_MAILBOXES
+                        .get_or_init(DashSet::new)
+                        .insert(actor_id.clone()) {
+                        let bt = std::backtrace::Backtrace::capture();
+                        tracing::warn!(
+                            actor_id = ?actor_id,
+                            backtrace = ?bt,
+                            "mailbox attempted to post a message without binding Undeliverable<MessageEnvelope>"
+                        );
+                    }
                     monitored_return_handle()
                 },
-                |sender| PortHandle::new(self.clone(), u64::MAX, sender),
+                |sender| PortHandle::new(self.clone(), self.state.allocate_port(), sender),
             );
         let envelope = MessageEnvelope::new(self.actor_id().clone(), dest, data);
         MailboxSender::post(self, envelope, return_handle);
@@ -1633,6 +1645,11 @@ pub struct SerializedSenderError {
 ///   - It abstracts over [`Port`]s and [`OncePort`]s, by dynamically tracking the
 ///     validity of the underlying port.
 trait SerializedSender: Send + Sync {
+    /// Enables downcasting from `&dyn SerializedSender` to concrete
+    /// types.
+    ///
+    /// Used by `Mailbox::lookup_sender` to downcast to
+    /// `&UnboundedSender<M>` via `Any::downcast_ref`.
     fn as_any(&self) -> &dyn Any;
 
     /// Send a serialized message. SerializedSender will deserialize the

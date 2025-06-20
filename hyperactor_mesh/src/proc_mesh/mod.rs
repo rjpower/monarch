@@ -380,12 +380,20 @@ impl ProcMesh {
         &self.client
     }
 
-    /// Used to get the `PortReceiver<Undeliverable<MessageEnvelope>>`
-    /// bound in the client mailbox.
-    pub fn take_client_undeliverable_receiver(
+    /// Returns a mutable reference to the client mailbox's
+    /// undeliverable message port receiver.
+    ///
+    /// This allows the caller to extract the
+    /// `PortReceiver<Undeliverable<MessageEnvelope>>` by calling
+    /// `.take()` on the returned `Option`, transferring ownership of
+    /// the receiver.
+    ///
+    /// Typically used to access the port bound by
+    /// `ProcMesh::allocate`.
+    pub fn client_undeliverable_receiver(
         &mut self,
-    ) -> Option<PortReceiver<Undeliverable<MessageEnvelope>>> {
-        self.client_undeliverable_receiver.take()
+    ) -> &mut Option<PortReceiver<Undeliverable<MessageEnvelope>>> {
+        &mut self.client_undeliverable_receiver
     }
 
     pub fn client_proc(&self) -> &Proc {
