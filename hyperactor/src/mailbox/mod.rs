@@ -1091,8 +1091,8 @@ impl Mailbox {
     /// type does not match.
     ///
     /// # Panics
-    /// Panics in debug mode if the port is bound but the stored
-    /// `port_id` does not match the expected one.
+    /// Panics if the port is bound but the stored `port_id` does not
+    /// match the expected one.
     pub(crate) fn lookup_sender<M: RemoteMessage>(&self) -> Option<UnboundedPortSender<M>> {
         let port_index = M::port();
         self.state.ports.get(&port_index).and_then(|boxed| {
