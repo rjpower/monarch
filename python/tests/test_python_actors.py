@@ -9,6 +9,7 @@ import operator
 import os
 import re
 import threading
+import time
 from types import ModuleType
 from unittest.mock import AsyncMock, patch
 
@@ -28,6 +29,7 @@ from monarch.actor_mesh import (
     MonarchContext,
 )
 from monarch.debugger import init_debugging
+from monarch.future import ActorFuture
 
 from monarch.mesh_controller import spawn_tensor_engine
 
@@ -391,6 +393,16 @@ def test_rust_binding_modules_correct() -> None:
     check(bindings, "monarch._rust_bindings")
 
 
+def test_proc_mesh_liveness() -> None:
+    mesh = proc_mesh(gpus=2).get()
+    counter = mesh.spawn("counter", Counter, 1).get()
+    del mesh
+    # Give some time for the mesh to have been shut down.
+    # (It only would if there were a bug.)
+    time.sleep(0.5)
+    counter.value.call().get()
+
+
 two_gpu = pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
@@ -661,3 +673,100 @@ async def test_async_concurrency():
     # actually concurrently processing messages.
     await am.no_more.call()
     await fut
+
+
+async def awaitit(f):
+    return await f
+
+
+def test_actor_future():
+    v = 0
+
+    async def incr():
+        nonlocal v
+        v += 1
+        return v
+
+    # can use async implementation from sync
+    # if no non-blocking is provided
+    f = ActorFuture(incr)
+    assert f.get() == 1
+    assert v == 1
+    assert f.get() == 1
+    assert asyncio.run(awaitit(f)) == 1
+
+    f = ActorFuture(incr)
+    assert asyncio.run(awaitit(f)) == 2
+    assert f.get() == 2
+
+    def incr2():
+        nonlocal v
+        v += 2
+        return v
+
+    # Use non-blocking optimization if provided
+    f = ActorFuture(incr, incr2)
+    assert f.get() == 4
+    assert asyncio.run(awaitit(f)) == 4
+
+    async def nope():
+        nonlocal v
+        v += 1
+        raise ValueError("nope")
+
+    f = ActorFuture(nope)
+
+    with pytest.raises(ValueError):
+        f.get()
+
+    assert v == 5
+
+    with pytest.raises(ValueError):
+        f.get()
+
+    assert v == 5
+
+    with pytest.raises(ValueError):
+        asyncio.run(awaitit(f))
+
+    assert v == 5
+
+    def nope():
+        nonlocal v
+        v += 1
+        raise ValueError("nope")
+
+    f = ActorFuture(incr, nope)
+
+    with pytest.raises(ValueError):
+        f.get()
+
+    assert v == 6
+
+    with pytest.raises(ValueError):
+        f.result()
+
+    assert f.exception() is not None
+
+    assert v == 6
+
+    with pytest.raises(ValueError):
+        asyncio.run(awaitit(f))
+
+    assert v == 6
+
+    async def seven():
+        return 7
+
+    f = ActorFuture(seven)
+
+    assert 7 == f.get(timeout=0.001)
+
+    async def neverfinish():
+        f = asyncio.Future()
+        await f
+
+    f = ActorFuture(neverfinish)
+
+    with pytest.raises(asyncio.exceptions.TimeoutError):
+        f.get(timeout=0.1)
