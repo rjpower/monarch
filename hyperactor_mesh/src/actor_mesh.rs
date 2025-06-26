@@ -974,12 +974,8 @@ mod tests {
             );
         }
 
-        // The intent is to emulate the behaviors of the Python
-        // interaction of T225230867 "process hangs when i send
-        // messages to a dead actor".
-        #[tracing_test::traced_test]
         #[tokio::test]
-        async fn test_behaviors_on_actor_error() {
+        async fn test_cast_failure() {
             use crate::alloc::ProcStopReason;
             use crate::proc_mesh::ProcEvent;
             use crate::sel;
@@ -1025,6 +1021,7 @@ mod tests {
             actor_mesh
                 .cast(sel!(*), GetRank(false, reply_handle.bind()))
                 .unwrap();
+
             // The message will be returned.
             let Undeliverable(msg) = undeliverable_rx.recv().await.unwrap();
             assert_eq!(
