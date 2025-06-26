@@ -19,7 +19,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Weak;
+
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -54,7 +54,7 @@ use crate::proc::Instance;
 use crate::proc::InstanceCell;
 use crate::proc::Ports;
 use crate::proc::Proc;
-use crate::proc::WeakInstanceCell;
+
 use crate::reference::ActorId;
 use crate::reference::GangId;
 use crate::reference::Index;

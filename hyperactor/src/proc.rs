@@ -1836,9 +1836,7 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct LookupTestActor {
-        found_actor: Option<ActorHandle<TestActor>>,
-    }
+    struct LookupTestActor;
 
     #[derive(Handler, HandleClient, Debug)]
     enum LookupTestMessage {
@@ -1850,7 +1848,7 @@ mod tests {
         type Params = ();
 
         async fn new(_params: ()) -> Result<Self, anyhow::Error> {
-            Ok(Self { found_actor: None })
+            Ok(Self)
         }
     }
 
