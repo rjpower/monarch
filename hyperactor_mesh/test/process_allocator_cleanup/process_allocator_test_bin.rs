@@ -1,6 +1,6 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
-//  * All rights reserved.
+ * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
@@ -10,8 +10,6 @@
 /// This binary creates a ProcessAllocator and spawns several child processes,
 /// then keeps running until killed. It's designed to test whether child
 /// processes are properly cleaned up when the parent process is killed.
-use std::time::Duration;
-
 use hyperactor_mesh::alloc::Alloc;
 use hyperactor_mesh::alloc::AllocConstraints;
 use hyperactor_mesh::alloc::AllocSpec;
@@ -20,7 +18,6 @@ use hyperactor_mesh::alloc::ProcState;
 use hyperactor_mesh::alloc::ProcessAllocator;
 use ndslice::shape;
 use tokio::process::Command;
-use tokio::time::sleep;
 
 fn emit_proc_state(state: &ProcState) {
     if let Ok(json) = serde_json::to_string(state) {
@@ -52,33 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
 
-    // Wait for all children to be running
-    let mut running_count = 0;
-    while running_count < 4 {
-        match alloc.next().await {
-            Some(state) => {
-                emit_proc_state(&state);
-
-                match &state {
-                    ProcState::Running { .. } => {
-                        running_count += 1;
-                    }
-                    ProcState::Failed { description, .. } => {
-                        return Err(format!("Allocation failed: {}", description).into());
-                    }
-                    _ => {}
-                }
-            }
-            None => {
-                break;
-            }
-        }
+    while let Some(state) = alloc.next().await {
+        emit_proc_state(&state);
     }
-
-    // Keep the process running indefinitely
-    // In the test, we'll kill this process and check if children are cleaned up
-    loop {
-        #[allow(clippy::disallowed_methods)]
-        sleep(Duration::from_secs(1)).await;
-    }
+    Ok(())
 }

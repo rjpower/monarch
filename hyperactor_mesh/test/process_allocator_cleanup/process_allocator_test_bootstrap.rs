@@ -8,7 +8,8 @@
 
 /// A simple bootstrap binary that writes logs out to a file. This is useful for
 /// debugging, as normally the ProcessAllocator children logs are piped back to
-/// ProcessAllocator. When we are testing what happens when we sigkill ProcessAllocator, we want to see what is happening on the chilre
+/// ProcessAllocator. When we are testing what happens when we sigkill
+/// ProcessAllocator, we want to see what is happening on the children.
 #[tokio::main]
 async fn main() {
     // Initialize tracing to a separate log file per child
@@ -21,7 +22,7 @@ async fn main() {
         .with_ansi(false) // No color codes in file
         .init();
 
-    // Let the test know where to find our logs
+    // Let the user know where to find our logs
     eprintln!("CHILD_LOG_FILE:{}: {}", pid, log_file_path);
 
     hyperactor_mesh::bootstrap_or_die().await;

@@ -204,7 +204,7 @@ impl Alloc for LocalAlloc {
                     let created = ProcState::Created {
                         proc_id: proc_id.clone(),
                         coords,
-                        pid: 0, // Local allocator doesn't have real system PIDs
+                        pid: std::process::id(),
                     };
                     self.queue.push_back(ProcState::Running {
                         proc_id,
