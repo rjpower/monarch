@@ -75,6 +75,10 @@ impl CastMessageEnvelope {
         }
     }
 
+    pub(crate) fn sender(&self) -> &ActorId {
+        &self.sender
+    }
+
     pub(crate) fn dest_port(&self) -> &DestinationPort {
         &self.dest_port
     }
