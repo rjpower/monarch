@@ -117,7 +117,7 @@ class ControllerParams(NamedTuple):
     fail_on_worker_timeout: bool
 
 
-_PROC_ENV = {}
+_PROC_ENV: dict[str, str] = {}
 
 
 def get_controller_main() -> tuple[Path, dict[str, str]]:
