@@ -1154,16 +1154,77 @@ pub fn named_derive(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+struct HandlerSpec {
+    ty: Type,
+    cast: bool,
+}
+
+impl Parse for HandlerSpec {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let ty: Type = input.parse()?;
+
+        if input.peek(syn::token::Brace) {
+            let content;
+            syn::braced!(content in input);
+            let key: Ident = content.parse()?;
+            content.parse::<Token![=]>()?;
+            let expr: Expr = content.parse()?;
+
+            let cast = if key == "cast" {
+                if let Expr::Lit(ExprLit {
+                    lit: Lit::Bool(b), ..
+                }) = expr
+                {
+                    b.value
+                } else {
+                    return Err(syn::Error::new_spanned(expr, "expected boolean for `cast`"));
+                }
+            } else {
+                return Err(syn::Error::new_spanned(
+                    key,
+                    "unsupported field (expected `cast`)",
+                ));
+            };
+
+            Ok(HandlerSpec { ty, cast })
+        } else if input.is_empty() || input.peek(Token![,]) {
+            Ok(HandlerSpec { ty, cast: false })
+        } else {
+            // Something unexpected follows the type
+            let unexpected: proc_macro2::TokenTree = input.parse()?;
+            Err(syn::Error::new_spanned(
+                unexpected,
+                "unexpected token after type — expected `{ ... }` or nothing",
+            ))
+        }
+    }
+}
+
+impl HandlerSpec {
+    fn add_indexed(handlers: Vec<HandlerSpec>) -> Vec<Type> {
+        let mut tys = Vec::new();
+        for HandlerSpec { ty, cast } in handlers {
+            if cast {
+                let wrapped = quote! { hyperactor::message::IndexedErasedUnbound<#ty> };
+                let wrapped_ty: Type = syn::parse2(wrapped).unwrap();
+                tys.push(wrapped_ty);
+            }
+            tys.push(ty);
+        }
+        tys
+    }
+}
+
 /// Attribute Struct for [`fn export`] macro.
 struct ExportAttr {
     spawn: bool,
-    handlers: Vec<Type>,
+    handlers: Vec<HandlerSpec>,
 }
 
 impl Parse for ExportAttr {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut spawn = false;
-        let mut handlers = vec![];
+        let mut handlers: Vec<HandlerSpec> = vec![];
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -1185,14 +1246,8 @@ impl Parse for ExportAttr {
             } else if key == "handlers" {
                 let content;
                 bracketed!(content in input);
-                let types = content.parse_terminated(Type::parse, Token![,])?;
-                if types.is_empty() {
-                    return Err(syn::Error::new_spanned(
-                        types,
-                        "`handlers` must include at least one type",
-                    ));
-                }
-                handlers = types.into_iter().collect();
+                let raw_handlers = content.parse_terminated(HandlerSpec::parse, Token![,])?;
+                handlers = raw_handlers.into_iter().collect();
             } else {
                 return Err(syn::Error::new_spanned(
                     key,
@@ -1240,11 +1295,12 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
     let data_type_name = &input.ident;
 
     let ExportAttr { spawn, handlers } = parse_macro_input!(attr as ExportAttr);
+    let tys = HandlerSpec::add_indexed(handlers);
 
     let mut handles = Vec::new();
     let mut bindings = Vec::new();
 
-    for ty in &handlers {
+    for ty in &tys {
         handles.push(quote! {
             impl hyperactor::actor::RemoteHandles<#ty> for #data_type_name {}
         });
@@ -1280,6 +1336,67 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
             hyperactor::remote!(#data_type_name);
         });
     }
+
+    TokenStream::from(expanded)
+}
+
+/// Represents the full input to [`fn alias`].
+struct AliasInput {
+    alias: Ident,
+    handlers: Vec<HandlerSpec>,
+}
+
+impl syn::parse::Parse for AliasInput {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let alias: Ident = input.parse()?;
+        let _: Token![,] = input.parse()?;
+        let raw_handlers = input.parse_terminated(HandlerSpec::parse, Token![,])?;
+        let handlers = raw_handlers.into_iter().collect();
+        Ok(AliasInput { alias, handlers })
+    }
+}
+
+/// Create a [`RemoteActor`] handling a specific set of message types.
+/// This is used to create an [`ActorRef`] without having to depend on the
+/// actor's implementation. If the message type need to be cast, add `castable`
+/// flag to those types. e.g. the following example creats an alias with 5
+/// message types, and 4 of which need to be cast.
+///
+/// ```
+/// hyperactor::alias!(
+///     TestActorAlias,
+///     TestMessage { castable = true },
+///     () {castable = true },
+///     MyGeneric<()> {castable = true },
+///     u64,
+/// );
+/// ```
+#[proc_macro]
+pub fn alias(input: TokenStream) -> TokenStream {
+    let AliasInput { alias, handlers } = parse_macro_input!(input as AliasInput);
+    let tys = HandlerSpec::add_indexed(handlers);
+
+    let expanded = quote! {
+        #[doc = "The generated alias struct."]
+        #[derive(Debug, Named)]
+        #[named(dump = false)]
+        pub struct #alias;
+        impl hyperactor::actor::RemoteActor for #alias {}
+
+        impl<A> hyperactor::actor::Binds<A> for #alias
+        where
+            A: hyperactor::Actor #(+ hyperactor::Handler<#tys>)* {
+            fn bind(ports: &hyperactor::proc::Ports<A>) {
+                #(
+                    ports.bind::<#tys>();
+                )*
+            }
+        }
+
+        #(
+            impl hyperactor::actor::RemoteHandles<#tys> for #alias {}
+        )*
+    };
 
     TokenStream::from(expanded)
 }
