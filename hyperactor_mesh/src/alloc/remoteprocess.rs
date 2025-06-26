@@ -937,31 +937,23 @@ impl Alloc for RemoteProcessAlloc {
 
             break match update {
                 Some(ProcState::Created {
-                    proc_id, coords, ..
-                }) => {
-                    match self.project_proc_into_global_shape(&proc_id, &coords) {
-                        Ok(global_coords) => {
-                            tracing::debug!(
-                                "reprojected coords: {:?} -> {:?}",
-                                coords,
-                                global_coords
-                            );
-                            Some(ProcState::Created {
-                                proc_id,
-                                coords: global_coords,
-                                pid: 0, // Remote processes don't track real PIDs in this context
-                            })
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "failed to project coords for proc: {}: {}",
-                                proc_id,
-                                e
-                            );
-                            None
-                        }
+                    proc_id,
+                    coords,
+                    pid,
+                }) => match self.project_proc_into_global_shape(&proc_id, &coords) {
+                    Ok(global_coords) => {
+                        tracing::debug!("reprojected coords: {:?} -> {:?}", coords, global_coords);
+                        Some(ProcState::Created {
+                            proc_id,
+                            coords: global_coords,
+                            pid,
+                        })
                     }
-                }
+                    Err(e) => {
+                        tracing::error!("failed to project coords for proc: {}: {}", proc_id, e);
+                        None
+                    }
+                },
 
                 Some(ProcState::Failed {
                     world_id: _,
