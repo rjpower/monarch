@@ -65,6 +65,7 @@ pub fn async_timed_test(attr: TokenStream, input: TokenStream) -> TokenStream {
     let fn_vis = &input_fn.vis;
     let sig = &input_fn.sig;
     let fn_name = &sig.ident;
+    let output = &sig.output;
 
     if sig.asyncness.is_none() {
         return TokenStream::from(
@@ -75,7 +76,7 @@ pub fn async_timed_test(attr: TokenStream, input: TokenStream) -> TokenStream {
     let output = quote! {
         #[test]
         #(#fn_attrs)*
-        #fn_vis fn #fn_name() {
+        #fn_vis fn #fn_name() #output {
             use tokio::runtime::Runtime;
             use std::sync::mpsc::{channel, RecvTimeoutError};
             use std::thread;
