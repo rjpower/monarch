@@ -230,7 +230,6 @@ impl CommActor {
         seq: usize,
         last_seqs: &mut HashMap<usize, usize>,
     ) -> Result<()> {
-        tracing::info!("sf: comm handle_message sender {:#?}", sender);
         // Split ports, if any, and update message with new ports. In this
         // way, children actors will reply to this comm actor's ports, instead
         // of to the original ports provided by parent.
