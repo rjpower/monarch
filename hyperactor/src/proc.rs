@@ -61,7 +61,6 @@ use crate::actor::Binds;
 use crate::actor::RemoteActor;
 use crate::actor::RemoteHandles;
 use crate::actor::Signal;
-use crate::actor::WeakActorHandle;
 use crate::attrs::Attrs;
 use crate::cap;
 use crate::clock::Clock;
@@ -100,7 +99,9 @@ static NEXT_LOCAL_RANK: AtomicUsize = AtomicUsize::new(0);
 ///
 /// Procs are also responsible for maintaining the local supervision hierarchy.
 #[derive(Clone, Debug)]
-pub struct Proc(Arc<ProcState>);
+pub struct Proc {
+    inner: Arc<ProcState>,
+}
 
 #[derive(Debug)]
 struct ProcState {
@@ -123,9 +124,7 @@ struct ProcState {
     /// Keep track of all of the active actors in the proc.
     ledger: ActorLedger,
 
-    /// Registry of typed actor handles by name and type, for actor lookup.
-    /// Maps (actor_name, TypeId) to type-erased ActorHandle.
-    actor_registry: DashMap<(String, TypeId), Box<dyn Any + Send + Sync>>,
+    instances: DashMap<ActorId, WeakInstanceCell>,
 
     /// Used by root actors to send events to the actor coordinating
     /// supervision of root actors in this proc.
@@ -277,27 +276,27 @@ impl ActorLedger {
 
         ActorTreeSnapshot {
             pid: cell.actor_id().pid(),
-            type_name: cell.state.actor_type.type_name().to_string(),
+            type_name: cell.inner.actor_type.type_name().to_string(),
             status: cell.status().borrow().clone(),
             stats: ActorStats {
-                num_processed_messages: cell.state.num_processed_messages.load(Ordering::SeqCst),
+                num_processed_messages: cell.inner.num_processed_messages.load(Ordering::SeqCst),
             },
             handlers: cell
-                .state
+                .inner
                 .exported_named_ports
                 .iter()
                 .map(|entry| (*entry.key(), entry.value().to_string()))
                 .collect(),
             children,
             events: cell
-                .state
+                .inner
                 .recording
                 .tail()
                 .into_iter()
                 .map(Event::from)
                 .collect(),
             spans: cell
-                .state
+                .inner
                 .recording
                 .stacks()
                 .into_iter()
@@ -324,16 +323,18 @@ impl Proc {
         forwarder: BoxedMailboxSender,
         clock: ClockKind,
     ) -> Self {
-        Self(Arc::new(ProcState {
-            proc_id,
-            proc_muxer: MailboxMuxer::new(),
-            forwarder,
-            roots: DashMap::new(),
-            ledger: ActorLedger::new(),
-            actor_registry: DashMap::new(),
-            supervision_coordinator_port: OnceLock::new(),
-            clock,
-        }))
+        Self {
+            inner: Arc::new(ProcState {
+                proc_id,
+                proc_muxer: MailboxMuxer::new(),
+                forwarder,
+                roots: DashMap::new(),
+                ledger: ActorLedger::new(),
+                instances: DashMap::new(),
+                supervision_coordinator_port: OnceLock::new(),
+                clock,
+            }),
+        }
     }
 
     /// Set the supervision coordinator's port for this proc. Return Err if it is
@@ -385,12 +386,12 @@ impl Proc {
     /// Shared sender used by the proc to forward messages to remote
     /// destinations.
     pub fn forwarder(&self) -> &BoxedMailboxSender {
-        &self.0.forwarder
+        &self.inner.forwarder
     }
 
     /// Convenience accessor for state.
     fn state(&self) -> &ProcState {
-        self.0.as_ref()
+        self.inner.as_ref()
     }
 
     /// The proc's clock.
@@ -465,16 +466,7 @@ impl Proc {
             .ledger
             .insert(actor_id.clone(), instance.cell.downgrade())?;
 
-        let handle = instance.start(actor).await?;
-
-        // Register a weak reference to the actor handle in the registry for later lookup
-        let registry_key = (name.to_string(), TypeId::of::<A>());
-        let weak_handle = handle.downgrade();
-        self.state()
-            .actor_registry
-            .insert(registry_key, Box::new(weak_handle));
-
-        Ok(handle)
+        instance.start(actor).await
     }
 
     /// Spawn a child actor from the provided parent on this proc. The parent actor
@@ -659,11 +651,11 @@ struct WeakProc(Weak<ProcState>);
 
 impl WeakProc {
     fn new(proc: &Proc) -> Self {
-        Self(Arc::downgrade(&proc.0))
+        Self(Arc::downgrade(&proc.inner))
     }
 
     fn upgrade(&self) -> Option<Proc> {
-        self.0.upgrade().map(Proc)
+        self.0.upgrade().map(|inner| Proc { inner })
     }
 }
 
@@ -804,10 +796,12 @@ impl<A: Actor> Instance<A> {
         let cell = InstanceCell::new(
             actor_id,
             actor_type,
+            proc.clone(),
             signal_port,
             supervision_port,
             status_rx,
             parent,
+            ports.clone(),
         );
         let start = proc.clock().now();
 
@@ -906,7 +900,7 @@ impl<A: Actor> Instance<A> {
             A::spawn_server_task(panic_handler::with_backtrace_tracking(self.serve(actor)));
         tracing::debug!("{}: spawned with {:?}", actor_id, actor_task_handle);
         instance_cell
-            .state
+            .inner
             .actor_task_handle
             .set(actor_task_handle)
             .unwrap_or_else(|_| panic!("{}: task handle store failed", actor_id));
@@ -921,12 +915,6 @@ impl<A: Actor> Instance<A> {
             Ok(_) => ActorStatus::Stopped,
             Err(err) => ActorStatus::Failed(err.to_string()),
         };
-
-        // Clean up the actor registry entry for root actors
-        if self.cell.pid() == 0 {
-            let registry_key = (self.cell.actor_id().name().to_string(), TypeId::of::<A>());
-            self.proc.state().actor_registry.remove(&registry_key);
-        }
 
         let result = self.cell.maybe_unlink_parent();
         if let Some(parent) = result {
@@ -1077,7 +1065,7 @@ impl<A: Actor> Instance<A> {
                 }
             }
             self.cell
-                .state
+                .inner
                 .num_processed_messages
                 .fetch_add(1, Ordering::SeqCst);
         }
@@ -1195,22 +1183,6 @@ impl<A: Actor> Instance<A> {
         &self.proc
     }
 
-    /// Look up a root actor by name and type.
-    /// Returns `Some(ActorHandle<T>)` if a root actor with the given name exists and is of type T.
-    /// Returns `None` if no root actor with that name exists, if it's not of the expected type,
-    /// or if the actor has been dropped.
-    pub fn get<T: Actor>(&self, name: &str) -> Option<ActorHandle<T>> {
-        let registry_key = (name.to_string(), TypeId::of::<T>());
-
-        if let Some(entry) = self.proc.state().actor_registry.get(&registry_key) {
-            if let Some(weak_handle) = entry.downcast_ref::<WeakActorHandle<T>>() {
-                return weak_handle.upgrade();
-            }
-        }
-
-        None
-    }
-
     /// Get the current message context, if there is one.
     pub fn ctx(&self) -> Option<&InstanceMessageContext> {
         self.message_context.as_ref()
@@ -1243,6 +1215,20 @@ impl<A: Actor> cap::sealed::CanSpawn for Instance<A> {
     }
 }
 
+impl<A: Actor> cap::sealed::CanResolveActorRef for Instance<A> {
+    fn resolve_actor_ref<R: RemoteActor + Actor>(
+        &self,
+        actor_ref: &ActorRef<R>,
+    ) -> Option<ActorHandle<R>> {
+        self.proc
+            .inner
+            .instances
+            .get(actor_ref.actor_id())?
+            .upgrade()?
+            .downcast_handle()
+    }
+}
+
 #[derive(Debug)]
 enum ActorType {
     Named(&'static TypeInfo),
@@ -1266,7 +1252,7 @@ impl ActorType {
 /// InstanceCell is reference counted and cloneable.
 #[derive(Clone, Debug)]
 pub struct InstanceCell {
-    state: Arc<InstanceState>,
+    inner: Arc<InstanceState>,
 }
 
 #[derive(Debug)]
@@ -1276,6 +1262,9 @@ struct InstanceState {
 
     /// Actor info contains the actor's type information.
     actor_type: ActorType,
+
+    /// The proc in which the actor is running.
+    proc: Proc,
 
     /// The actor's signal port. This is used to send
     /// signals to the actor.
@@ -1306,6 +1295,28 @@ struct InstanceState {
     /// The log recording associated with this actor. It is used to
     /// store a 'flight record' of events while the actor is running.
     recording: Recording,
+
+    /// A type-erased reference to Ports<A>, which allows us to recover
+    /// an ActorHandle<A> by downcasting.
+    ports: Arc<dyn Any + Send + Sync>,
+}
+
+impl InstanceState {
+    /// Unlink this instance from its parent, if it has one. If it was unlinked,
+    /// the parent is returned.
+    fn maybe_unlink_parent(&self) -> Option<InstanceCell> {
+        let result = self.parent.upgrade();
+        if let Some(parent) = &result {
+            parent.inner.unlink(self);
+        }
+        result
+    }
+
+    /// Unlink this instance from a child.
+    fn unlink(&self, child: &InstanceState) {
+        assert_eq!(self.actor_id.proc_id(), child.actor_id.proc_id());
+        self.children.remove(&child.actor_id.pid());
+    }
 }
 
 impl InstanceCell {
@@ -1314,16 +1325,19 @@ impl InstanceCell {
     fn new(
         actor_id: ActorId,
         actor_type: ActorType,
+        proc: Proc,
         signal: PortHandle<Signal>,
         supervision_port: PortHandle<ActorSupervisionEvent>,
         status: watch::Receiver<ActorStatus>,
         parent: Option<InstanceCell>,
+        ports: Arc<dyn Any + Send + Sync>,
     ) -> Self {
         let _ais = actor_id.to_string();
         let cell = Self {
-            state: Arc::new(InstanceState {
-                actor_id,
+            inner: Arc::new(InstanceState {
+                actor_id: actor_id.clone(),
                 actor_type,
+                proc: proc.clone(),
                 signal,
                 supervision_port,
                 status,
@@ -1333,40 +1347,44 @@ impl InstanceCell {
                 exported_named_ports: DashMap::new(),
                 num_processed_messages: AtomicU64::new(0),
                 recording: hyperactor_telemetry::recorder().record(64),
+                ports,
             }),
         };
         cell.maybe_link_parent();
+        proc.inner
+            .instances
+            .insert(actor_id.clone(), cell.downgrade());
         cell
     }
 
-    fn wrap(state: Arc<InstanceState>) -> Self {
-        Self { state }
+    fn wrap(inner: Arc<InstanceState>) -> Self {
+        Self { inner }
     }
 
     /// The actor's ID.
     pub(crate) fn actor_id(&self) -> &ActorId {
-        &self.state.actor_id
+        &self.inner.actor_id
     }
 
     /// The actor's PID.
     pub(crate) fn pid(&self) -> Index {
-        self.state.actor_id.pid()
+        self.inner.actor_id.pid()
     }
 
     /// The actor's join handle.
     pub(crate) fn actor_task_handle(&self) -> Option<&JoinHandle<()>> {
-        self.state.actor_task_handle.get()
+        self.inner.actor_task_handle.get()
     }
 
     /// The instance's status observer.
     pub(crate) fn status(&self) -> &watch::Receiver<ActorStatus> {
-        &self.state.status
+        &self.inner.status
     }
 
     /// Send a signal to the actor.
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `ActorError`.
     pub fn signal(&self, signal: Signal) -> Result<(), ActorError> {
-        self.state.signal.send(signal).map_err(ActorError::from)
+        self.inner.signal.send(signal).map_err(ActorError::from)
     }
 
     /// Used by this actor's children to send a supervision event to this actor.
@@ -1378,7 +1396,7 @@ impl InstanceCell {
     /// cannot be delivered upstream. It is the upstream's responsibility to
     /// detect and handle crashes.
     pub fn send_supervision_event_or_crash(&self, event: ActorSupervisionEvent) {
-        if let Err(err) = self.state.supervision_port.send(event) {
+        if let Err(err) = self.inner.supervision_port.send(event) {
             tracing::error!(
                 "{}: failed to send supervision event to actor: {:?}. Crash the process.",
                 self.actor_id(),
@@ -1392,25 +1410,25 @@ impl InstanceCell {
     /// Downgrade this InstanceCell to a weak reference.
     pub fn downgrade(&self) -> WeakInstanceCell {
         WeakInstanceCell {
-            state: Arc::downgrade(&self.state),
+            inner: Arc::downgrade(&self.inner),
         }
     }
 
     /// Link this instance to a new child.
     fn link(&self, child: InstanceCell) {
         assert_eq!(self.actor_id().proc_id(), child.actor_id().proc_id());
-        self.state.children.insert(child.pid(), child);
+        self.inner.children.insert(child.pid(), child);
     }
 
     /// Unlink this instance from a child.
     fn unlink(&self, child: &InstanceCell) {
         assert_eq!(self.actor_id().proc_id(), child.actor_id().proc_id());
-        self.state.children.remove(&child.pid());
+        self.inner.children.remove(&child.pid());
     }
 
     /// Link this instance to its parent, if it has one.
     fn maybe_link_parent(&self) {
-        if let Some(parent) = self.state.parent.upgrade() {
+        if let Some(parent) = self.inner.parent.upgrade() {
             parent.link(self.clone());
         }
     }
@@ -1418,32 +1436,28 @@ impl InstanceCell {
     /// Unlink this instance from its parent, if it has one. If it was unlinked,
     /// the parent is returned.
     fn maybe_unlink_parent(&self) -> Option<InstanceCell> {
-        let result = self.state.parent.upgrade();
-        if let Some(parent) = &result {
-            parent.unlink(self);
-        }
-        result
+        self.inner.maybe_unlink_parent()
     }
 
     /// Get parent instance cell, if it exists.
     fn get_parent_cell(&self) -> Option<InstanceCell> {
-        self.state.parent.upgrade()
+        self.inner.parent.upgrade()
     }
 
     /// Return an iterator over this instance's children. This may deadlock if the
     /// caller already holds a reference to any item in map.
     fn child_iter(&self) -> impl Iterator<Item = RefMulti<'_, Index, InstanceCell>> {
-        self.state.children.iter()
+        self.inner.children.iter()
     }
 
     /// The number of children this instance has.
     fn child_count(&self) -> usize {
-        self.state.children.len()
+        self.inner.children.len()
     }
 
     /// Get a child by its PID.
     fn get_child(&self, pid: Index) -> Option<InstanceCell> {
-        self.state.children.get(&pid).map(|child| child.clone())
+        self.inner.children.get(&pid).map(|child| child.clone())
     }
 
     /// This is temporary so that we can share binding code between handle and instance.
@@ -1454,11 +1468,31 @@ impl InstanceCell {
         ports.bind::<Signal>();
         // TODO: consider sharing `ports.bound` directly.
         for entry in ports.bound.iter() {
-            self.state
+            self.inner
                 .exported_named_ports
                 .insert(*entry.key(), entry.value());
         }
         ActorRef::attest(self.actor_id().clone())
+    }
+
+    /// Attempt to downcast this cell to a concrete actor handle.
+    pub(crate) fn downcast_handle<A: Actor>(&self) -> Option<ActorHandle<A>> {
+        let ports = Arc::clone(&self.inner.ports).downcast::<Ports<A>>().ok()?;
+        Some(ActorHandle::new(self.clone(), ports))
+    }
+}
+
+impl Drop for InstanceState {
+    fn drop(&mut self) {
+        if self.maybe_unlink_parent().is_some() {
+            tracing::error!(
+                "instance {} was dropped with parent still linked",
+                self.actor_id
+            );
+        }
+        if self.proc.inner.instances.remove(&self.actor_id).is_none() {
+            tracing::error!("instance {} was dropped but not in proc", self.actor_id);
+        }
     }
 }
 
@@ -1466,18 +1500,18 @@ impl InstanceCell {
 /// linkage between actors without creating a strong reference cycle.
 #[derive(Debug, Clone)]
 pub struct WeakInstanceCell {
-    state: Weak<InstanceState>,
+    inner: Weak<InstanceState>,
 }
 
 impl WeakInstanceCell {
     /// Create a new weak instance cell that is never upgradeable.
     pub fn new() -> Self {
-        Self { state: Weak::new() }
+        Self { inner: Weak::new() }
     }
 
     /// Upgrade this weak instance cell to a strong reference, if possible.
     pub fn upgrade(&self) -> Option<InstanceCell> {
-        self.state.upgrade().map(InstanceCell::wrap)
+        self.inner.upgrade().map(InstanceCell::wrap)
     }
 }
 
@@ -1599,6 +1633,7 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::sync::atomic::AtomicBool;
 
+    use hyperactor_macros::export;
     use maplit::hashmap;
     use serde_json::json;
     use tokio::sync::Barrier;
@@ -1647,6 +1682,7 @@ mod tests {
     }
 
     #[derive(Debug)]
+    #[export]
     struct TestActor;
 
     #[derive(Handler, HandleClient, Debug)]
@@ -1806,13 +1842,11 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct LookupTestActor {
-        found_actor: Option<ActorHandle<TestActor>>,
-    }
+    struct LookupTestActor;
 
     #[derive(Handler, HandleClient, Debug)]
     enum LookupTestMessage {
-        ActorExists(String, #[reply] OncePortRef<bool>),
+        ActorExists(ActorRef<TestActor>, #[reply] OncePortRef<bool>),
     }
 
     #[async_trait]
@@ -1820,7 +1854,7 @@ mod tests {
         type Params = ();
 
         async fn new(_params: ()) -> Result<Self, anyhow::Error> {
-            Ok(Self { found_actor: None })
+            Ok(Self)
         }
     }
 
@@ -1830,10 +1864,9 @@ mod tests {
         async fn actor_exists(
             &mut self,
             this: &Instance<Self>,
-            name: String,
+            actor_ref: ActorRef<TestActor>,
         ) -> Result<bool, anyhow::Error> {
-            self.found_actor = this.get::<TestActor>(&name);
-            Ok(self.found_actor.is_some())
+            Ok(actor_ref.downcast_handle(this).is_some())
         }
     }
 
@@ -1843,18 +1876,30 @@ mod tests {
         let client = proc.attach("client").unwrap();
 
         let target_actor = proc.spawn::<TestActor>("target", ()).await.unwrap();
+        let target_actor_ref = target_actor.bind();
         let lookup_actor = proc.spawn::<LookupTestActor>("lookup", ()).await.unwrap();
 
         assert!(
             lookup_actor
-                .actor_exists(&client, "target".to_string())
+                .actor_exists(&client, target_actor_ref.clone())
                 .await
                 .unwrap()
         );
 
+        // Make up a child actor. It shouldn't exist.
         assert!(
             !lookup_actor
-                .actor_exists(&client, "nonexistent".to_string())
+                .actor_exists(
+                    &client,
+                    ActorRef::attest(target_actor.actor_id().child_id(123).clone())
+                )
+                .await
+                .unwrap()
+        );
+        // A wrongly-typed actor ref should also not obtain.
+        assert!(
+            !lookup_actor
+                .actor_exists(&client, ActorRef::attest(lookup_actor.actor_id().clone()))
                 .await
                 .unwrap()
         );
@@ -1864,7 +1909,7 @@ mod tests {
 
         assert!(
             !lookup_actor
-                .actor_exists(&client, "target".to_string())
+                .actor_exists(&client, target_actor_ref)
                 .await
                 .unwrap()
         );
@@ -1873,40 +1918,14 @@ mod tests {
         lookup_actor.await;
     }
 
-    #[tokio::test]
-    async fn test_actor_registry_cleanup() {
-        let proc = Proc::local();
-
-        let initial_size = proc.state().actor_registry.len();
-
-        for i in 0..5 {
-            let actor_name = format!("temp_actor_{}", i);
-            let actor = proc.spawn::<TestActor>(&actor_name, ()).await.unwrap();
-
-            assert_eq!(proc.state().actor_registry.len(), initial_size + 1);
-
-            actor.drain_and_stop().unwrap();
-            actor.await;
-
-            assert_eq!(
-                proc.state().actor_registry.len(),
-                initial_size,
-                "Registry should be cleaned up after actor {} stops",
-                actor_name
-            );
-        }
-
-        assert_eq!(proc.state().actor_registry.len(), initial_size);
-    }
-
     fn validate_link(child: &InstanceCell, parent: &InstanceCell) {
         assert_eq!(child.actor_id().proc_id(), parent.actor_id().proc_id());
         assert_eq!(
-            child.state.parent.upgrade().unwrap().actor_id(),
+            child.inner.parent.upgrade().unwrap().actor_id(),
             parent.actor_id()
         );
         assert_matches!(
-            parent.state.children.get(&child.pid()),
+            parent.inner.children.get(&child.pid()),
             Some(node) if node.actor_id() == child.actor_id()
         );
     }
@@ -1957,17 +1976,17 @@ mod tests {
         // Supervision tree is constructed correctly.
         validate_link(third.cell(), second.cell());
         validate_link(second.cell(), first.cell());
-        assert!(first.cell().state.parent.upgrade().is_none());
+        assert!(first.cell().inner.parent.upgrade().is_none());
 
         // Supervision tree is torn down correctly.
         third.drain_and_stop().unwrap();
         third.await;
-        assert!(second.cell().state.children.is_empty());
+        assert!(second.cell().inner.children.is_empty());
         validate_link(second.cell(), first.cell());
 
         second.drain_and_stop().unwrap();
         second.await;
-        assert!(first.cell().state.children.is_empty());
+        assert!(first.cell().inner.children.is_empty());
     }
 
     #[tokio::test]
@@ -2562,7 +2581,7 @@ mod tests {
 
             LoggingActor::wait(&handle).await;
 
-            let events = handle.cell().state.recording.tail();
+            let events = handle.cell().inner.recording.tail();
             assert_eq!(events.len(), 3);
             assert_eq!(events[0].json_value(), json!({ "message": "hello world" }));
             assert_eq!(
@@ -2575,7 +2594,7 @@ mod tests {
                 let barriers = Arc::new((Barrier::new(2), Barrier::new(2)));
                 handle.send(Arc::clone(&barriers)).unwrap();
                 barriers.0.wait().await;
-                let stacks = handle.cell().state.recording.stacks();
+                let stacks = handle.cell().inner.recording.stacks();
                 barriers.1.wait().await;
                 stacks
             };
