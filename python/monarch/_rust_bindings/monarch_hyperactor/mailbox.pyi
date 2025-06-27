@@ -8,7 +8,10 @@
 
 from typing import final, Generic, Protocol
 
-from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
+from monarch._rust_bindings.monarch_hyperactor.actor import (
+    PythonMessage,
+    UndeliverableMessageEnvelope,
+)
 
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 
@@ -79,6 +82,18 @@ class PortReceiver:
         ...
     def blocking_recv(self) -> PythonMessage:
         """Receive a single PythonMessage from the port's sender."""
+        ...
+
+@final
+class UndeliverablePortReceiver:
+    """
+    A receiver to which undeliverable message envelopes are sent.
+    """
+    async def recv(self) -> UndeliverableMessageEnvelope:
+        """Receive a single undeliverable message from the port's sender."""
+        ...
+    def blocking_recv(self) -> UndeliverableMessageEnvelope:
+        """Receive a single undeliverable message from the port's sender."""
         ...
 
 @final
@@ -155,7 +170,7 @@ class Mailbox:
         """
         ...
 
-    def undeliverable_receiver(self) -> PythonUndeliverablePortReceiver:
+    def undeliverable_receiver(self) -> UndeliverablePortReceiver:
         """
         Open a port to receive undeliverable messages.
 

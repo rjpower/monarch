@@ -361,7 +361,11 @@ impl PythonPortReceiver {
     }
 }
 
-#[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.mailbox")]
+#[derive(Debug)]
+#[pyclass(
+    name = "UndeliverableMessageEnvelope",
+    module = "monarch._rust_bindings.monarch_hyperactor.mailbox"
+)]
 pub(crate) struct PythonUndeliverableMessageEnvelope {
     #[allow(dead_code)] // At this time, field `inner` isn't read.
     pub(crate) inner: Undeliverable<MessageEnvelope>,
