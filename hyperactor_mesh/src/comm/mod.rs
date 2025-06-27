@@ -6,6 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use crate::comm::multicast::CAST_ORIGINATING_SENDER;
 pub mod multicast;
 
 use std::cmp::Ordering;
@@ -23,7 +24,6 @@ use hyperactor::Named;
 use hyperactor::PortRef;
 use hyperactor::WorldId;
 use hyperactor::attrs::Attrs;
-use hyperactor::attrs::declare_attrs;
 use hyperactor::data::Serialized;
 use hyperactor::mailbox::DeliveryError;
 use hyperactor::mailbox::Undeliverable;
@@ -36,8 +36,8 @@ use serde::Serialize;
 
 use crate::comm::multicast::CastMessage;
 use crate::comm::multicast::CastMessageEnvelope;
-use crate::comm::multicast::CastRank;
 use crate::comm::multicast::ForwardMessage;
+use crate::comm::multicast::set_cast_info_on_headers;
 
 /// Parameters to initialize the CommActor
 #[derive(Debug, Clone, Serialize, Deserialize, Named, Default)]
@@ -150,10 +150,6 @@ impl CommActorMode {
     }
 }
 
-declare_attrs! {
-    pub attr CAST_ORIGINATING_SENDER: ActorId;
-}
-
 #[async_trait]
 impl Actor for CommActor {
     type Params = CommActorParams;
@@ -247,17 +243,13 @@ impl CommActor {
 
         // Deliver message here, if necessary.
         if deliver_here {
-            message.data_mut().visit_mut::<CastRank>(|r| {
-                *r = CastRank(mode.self_rank(this.self_id()));
-                Ok(())
-            })?;
-
-            // Preserve the original sender in the headers so that if
-            // it turns out the message is returned undeliverable, we
-            // can recover it.
             let mut headers = Attrs::new();
-            headers.set(CAST_ORIGINATING_SENDER, message.sender().clone());
-
+            set_cast_info_on_headers(
+                &mut headers,
+                mode.self_rank(this.self_id()),
+                message.shape().clone(),
+                message.sender().clone(),
+            );
             // TODO(pzhang) split reply ports so children can reply to this comm
             // actor instead of parent.
             this.post(
@@ -438,7 +430,6 @@ pub mod test_utils {
     use serde::Serialize;
 
     use super::*;
-    use crate::actor_mesh::Cast;
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Named)]
     pub struct MyReply {
@@ -468,7 +459,6 @@ pub mod test_utils {
         spawn = true,
         handlers = [
             TestMessage { cast = true },
-            Cast<TestMessage> { cast = true },
         ],
     )]
     pub struct TestActor {
@@ -497,17 +487,6 @@ pub mod test_utils {
         async fn handle(&mut self, this: &Instance<Self>, msg: TestMessage) -> anyhow::Result<()> {
             self.forward_port.send(this, msg)?;
             Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl Handler<Cast<TestMessage>> for TestActor {
-        async fn handle(
-            &mut self,
-            this: &Instance<Self>,
-            msg: Cast<TestMessage>,
-        ) -> anyhow::Result<()> {
-            self.handle(this, msg.message).await
         }
     }
 }
