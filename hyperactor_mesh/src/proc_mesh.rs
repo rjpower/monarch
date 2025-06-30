@@ -82,7 +82,6 @@ pub struct ProcMesh {
     #[allow(dead_code)] // will be used in subsequent diff
     client_proc: Proc,
     client: Mailbox,
-    client_undeliverable_receiver: Option<PortReceiver<Undeliverable<MessageEnvelope>>>,
     comm_actors: Vec<ActorRef<CommActor>>,
     world_id: WorldId,
 }
@@ -222,9 +221,9 @@ impl ProcMesh {
         let (undeliverable_messages, client_undeliverable_receiver) =
             client.open_port::<Undeliverable<MessageEnvelope>>();
         undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
-        // The undeliverable message port is monitored and actor
-        // supervision events are posted when undeliverable messages
-        // are received.
+        // Monitor undeliverable messages from the client and emit
+        // corresponding actor supervision events via the supervision
+        // port.
         hyperactor::mailbox::supervise_undeliverable_messages(
             client.actor_id().clone(),
             supervision_port.clone(),
@@ -313,7 +312,6 @@ impl ProcMesh {
                 .collect(),
             client_proc,
             client,
-            client_undeliverable_receiver: None, // Some(client_undeliverable_receiver),
             comm_actors,
             world_id,
         })
@@ -406,22 +404,6 @@ impl ProcMesh {
     /// A client used to communicate with any member of this mesh.
     pub fn client(&self) -> &Mailbox {
         &self.client
-    }
-
-    /// Returns a mutable reference to the client mailbox's
-    /// undeliverable message port receiver.
-    ///
-    /// This allows the caller to extract the
-    /// `PortReceiver<Undeliverable<MessageEnvelope>>` by calling
-    /// `.take()` on the returned `Option`, transferring ownership of
-    /// the receiver.
-    ///
-    /// Typically used to access the port bound by
-    /// `ProcMesh::allocate`.
-    pub fn client_undeliverable_receiver(
-        &mut self,
-    ) -> &mut Option<PortReceiver<Undeliverable<MessageEnvelope>>> {
-        &mut self.client_undeliverable_receiver
     }
 
     pub fn client_proc(&self) -> &Proc {
@@ -517,6 +499,9 @@ impl ProcEvents {
                 Ok(event) = self.event_state.supervision_events.recv() => {
                     let (actor_id, actor_status) = event.clone().into_inner();
                     let Some(rank) = self.ranks.get(actor_id.proc_id()) else {
+                        if actor_id.name() == "client" {
+                            break Some(ProcEvent::Crashed(0, actor_status.to_string()));
+                        }
                         tracing::warn!("received supervision event for unmapped actor {}", actor_id);
                         continue;
                     };
