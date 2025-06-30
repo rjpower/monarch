@@ -211,16 +211,25 @@ impl ProcMesh {
 
         // TODO: No actor bound to "supervisor" yet.
         let supervisor = client_proc.attach("supervisor")?;
-        let (supervison_port, supervision_events) = supervisor.open_port();
+        let (supervision_port, supervision_events) = supervisor.open_port();
 
         // Now, configure the full mesh, so that the local agents are
-        // wired up to our router. Bind an undeliverable message port
-        // in the client and return the port receiver.
+        // wired up to our router.
+        // TODO: No actor bound to "client" yet.
         // No actor bound to this "client" yet
         let client = client_proc.attach("client")?;
+        // Bind an undeliverable message port in the client.
         let (undeliverable_messages, client_undeliverable_receiver) =
             client.open_port::<Undeliverable<MessageEnvelope>>();
         undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
+        // The undeliverable message port is monitored and actor
+        // supervision events are posted when undeliverable messages
+        // are received.
+        hyperactor::mailbox::supervise_undeliverable_messages(
+            client.actor_id().clone(),
+            supervision_port.clone(),
+            client_undeliverable_receiver,
+        );
 
         // Map of procs -> channel addresses
         let address_book: HashMap<_, _> = running
@@ -235,7 +244,7 @@ impl ProcMesh {
                     &client,
                     rank,
                     router_channel_addr.clone(),
-                    supervison_port.bind(),
+                    supervision_port.bind(),
                     address_book.clone(),
                     config_handle.bind(),
                 )
@@ -304,7 +313,7 @@ impl ProcMesh {
                 .collect(),
             client_proc,
             client,
-            client_undeliverable_receiver: Some(client_undeliverable_receiver),
+            client_undeliverable_receiver: None, // Some(client_undeliverable_receiver),
             comm_actors,
             world_id,
         })
