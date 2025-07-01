@@ -34,13 +34,6 @@ def invoke_main():
     # TODO: figure out what from worker_main.py we should reproduce here.
     from monarch.telemetry import TracingForwarder
 
-    try:
-        from libfb.py import pyinit
-
-        pyinit.initFacebook()
-    except ImportError:
-        logging.warning("pyinit not found, fatal signal handlers will not be installed")
-
     if os.environ.get("MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING") == "1":
         raise RuntimeError("Error during bootstrap for testing")
 
