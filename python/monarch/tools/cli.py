@@ -86,7 +86,9 @@ class CreateCmd:
             else defaults.component_fn(config.scheduler)
         )
         component_args = component_args_from_cli(component_fn, args.component_args)
-        handle = create(config, component_fn)(**component_args)
+        appdef = component_fn(**component_args)
+
+        handle = create(config, appdef)
         print(handle)
 
 
@@ -112,7 +114,7 @@ class InfoCmd:
                 file=sys.stderr,
             )
         else:
-            json.dump(server_spec.to_json(), fp=sys.stdout)
+            json.dump(server_spec.to_json(), indent=2, fp=sys.stdout)
 
 
 class KillCmd:

@@ -19,6 +19,7 @@ use enum_as_inner::EnumAsInner;
 use hyperactor::Actor;
 use hyperactor::ActorHandle;
 use hyperactor::ActorId;
+use hyperactor::Context;
 use hyperactor::Data;
 use hyperactor::HandleClient;
 use hyperactor::Handler;
@@ -88,7 +89,7 @@ pub(crate) enum MeshAgentMessage {
 
 /// A mesh agent is responsible for managing procs in a [`ProcMesh`].
 #[derive(Debug)]
-#[hyperactor::export(MeshAgentMessage)]
+#[hyperactor::export(handlers=[MeshAgentMessage])]
 pub struct MeshAgent {
     proc: Proc,
     remote: Remote,
@@ -138,7 +139,7 @@ impl Actor for MeshAgent {
         undelivered: Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
         let Undeliverable(ref envelope) = undelivered;
-        tracing::info!("took charge of a message not delivered: {}", envelope);
+        tracing::debug!("took charge of a message not delivered: {}", envelope);
 
         let sender = envelope.sender().clone();
         if this.self_id() == &sender {
@@ -161,7 +162,7 @@ impl Actor for MeshAgent {
 impl MeshAgentMessageHandler for MeshAgent {
     async fn configure(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         rank: usize,
         forwarder: ChannelAddr,
         supervisor: PortRef<ActorSupervisionEvent>,
@@ -189,7 +190,7 @@ impl MeshAgentMessageHandler for MeshAgent {
 
     async fn gspawn(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         actor_type: String,
         actor_name: String,
         params_data: Data,
@@ -211,7 +212,7 @@ impl MeshAgentMessageHandler for MeshAgent {
 impl Handler<ActorSupervisionEvent> for MeshAgent {
     async fn handle(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         event: ActorSupervisionEvent,
     ) -> anyhow::Result<()> {
         if let Some(supervisor) = &self.supervisor {
@@ -307,6 +308,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
+    use hyperactor::attrs::Attrs;
     use hyperactor::id;
     use hyperactor::mailbox::BoxedMailboxSender;
     use hyperactor::mailbox::Mailbox;
@@ -346,8 +348,13 @@ mod tests {
 
     // Helper function to create a test message envelope
     fn envelope(data: u64) -> MessageEnvelope {
-        MessageEnvelope::serialize(id!(world[0].sender), id!(world[0].receiver[0][1]), &data)
-            .unwrap()
+        MessageEnvelope::serialize(
+            id!(world[0].sender),
+            id!(world[0].receiver[0][1]),
+            &data,
+            Attrs::new(),
+        )
+        .unwrap()
     }
 
     fn return_handle() -> PortHandle<Undeliverable<MessageEnvelope>> {

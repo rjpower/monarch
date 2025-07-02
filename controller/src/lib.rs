@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::ActorId;
 use hyperactor::ActorRef;
+use hyperactor::Context;
 use hyperactor::GangId;
 use hyperactor::Handler;
 use hyperactor::Named;
@@ -59,6 +60,7 @@ use monarch_messages::worker::Ref;
 use monarch_messages::worker::WorkerActor;
 use monarch_messages::worker::WorkerMessage;
 use ndslice::Selection;
+use ndslice::Shape;
 use ndslice::Slice;
 use ndslice::reshape::Limit;
 use ndslice::reshape::ReshapeSliceExt;
@@ -74,7 +76,12 @@ const CASTING_FANOUT_SIZE: usize = 8;
 /// compute tasks. This acts a proxy managing comms with the workers and handling things like history,
 /// data dependency, worker lifecycles etc for the client abstracting it away.
 #[derive(Debug)]
-#[hyperactor::export_spawn(ControllerMessage)]
+#[hyperactor::export(
+    spawn = true,
+    handlers = [
+        ControllerMessage,
+    ],
+)]
 pub(crate) struct ControllerActor {
     client_actor_ref: OnceCell<ActorRef<ClientActor>>,
     comm_actor_ref: ActorRef<CommActor>,
@@ -206,7 +213,7 @@ impl ControllerActor {
     // M = self.worker_progress_check_interval
     async fn request_status_if_needed(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<'_, Self>,
     ) -> Result<(), anyhow::Error> {
         if let Some((expected_seq, ..)) = self.history.deadline(
             self.operations_per_worker_progress_request,
@@ -253,7 +260,7 @@ struct CheckWorkerProgress;
 impl Handler<CheckWorkerProgress> for ControllerActor {
     async fn handle(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         _check_worker_progress: CheckWorkerProgress,
     ) -> Result<(), anyhow::Error> {
         let client = self.client()?;
@@ -353,7 +360,7 @@ fn slice_to_selection(slice: Slice) -> Selection {
 impl ControllerMessageHandler for ControllerActor {
     async fn attach(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         client_actor: ActorRef<ClientActor>,
     ) -> Result<(), anyhow::Error> {
         tracing::debug!("attaching client actor {}", client_actor);
@@ -372,7 +379,7 @@ impl ControllerMessageHandler for ControllerActor {
 
     async fn node(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         seq: Seq,
         defs: Vec<Ref>,
         uses: Vec<Ref>,
@@ -389,7 +396,7 @@ impl ControllerMessageHandler for ControllerActor {
 
     async fn drop_refs(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
         refs: Vec<Ref>,
     ) -> Result<(), anyhow::Error> {
         self.history.delete_invocations_for_refs(refs);
@@ -398,7 +405,7 @@ impl ControllerMessageHandler for ControllerActor {
 
     async fn send(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         ranks: Ranks,
         message: Serialized,
     ) -> Result<(), anyhow::Error> {
@@ -425,6 +432,8 @@ impl ControllerMessageHandler for ControllerActor {
                     .name()
                     .to_string(),
             ),
+            // Not reflective of the actual shape, but this is never actually used.
+            Shape::unity(),
             message,
         );
 
@@ -448,7 +457,7 @@ impl ControllerMessageHandler for ControllerActor {
 
     async fn remote_function_failed(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         seq: Seq,
         error: WorkerError,
     ) -> Result<(), anyhow::Error> {
@@ -461,7 +470,7 @@ impl ControllerMessageHandler for ControllerActor {
 
     async fn status(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
         seq: Seq,
         worker_actor_id: ActorId,
         controller: bool,
@@ -478,7 +487,7 @@ impl ControllerMessageHandler for ControllerActor {
 
     async fn fetch_result(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
         seq: Seq,
         result: Result<Serialized, WorkerError>,
     ) -> Result<(), anyhow::Error> {
@@ -486,10 +495,7 @@ impl ControllerMessageHandler for ControllerActor {
         Ok(())
     }
 
-    async fn check_supervision(
-        &mut self,
-        this: &hyperactor::Instance<Self>,
-    ) -> Result<(), anyhow::Error> {
+    async fn check_supervision(&mut self, this: &Context<Self>) -> Result<(), anyhow::Error> {
         let gang_id: GangId = self.worker_gang_ref.clone().into();
         let world_state = self
             .system_supervision_actor_ref
@@ -557,7 +563,7 @@ impl ControllerMessageHandler for ControllerActor {
 
     async fn debugger_message(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         debugger_actor_id: ActorId,
         action: DebuggerAction,
     ) -> Result<(), anyhow::Error> {
@@ -569,7 +575,7 @@ impl ControllerMessageHandler for ControllerActor {
     #[cfg(test)]
     async fn get_first_incomplete_seqs_unit_tests_only(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
     ) -> Result<Vec<Seq>, anyhow::Error> {
         Ok(self.history.first_incomplete_seqs().to_vec())
     }
@@ -577,7 +583,7 @@ impl ControllerMessageHandler for ControllerActor {
     #[cfg(not(test))]
     async fn get_first_incomplete_seqs_unit_tests_only(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
     ) -> Result<Vec<Seq>, anyhow::Error> {
         unimplemented!("get_first_incomplete_seqs_unit_tests_only is only for unit tests")
     }
@@ -608,7 +614,6 @@ mod tests {
 
     use hyperactor::HandleClient;
     use hyperactor::Handler;
-    use hyperactor::Instance;
     use hyperactor::RefClient;
     use hyperactor::channel;
     use hyperactor::channel::ChannelTransport;
@@ -1772,7 +1777,11 @@ mod tests {
     }
 
     #[derive(Debug)]
-    #[hyperactor::export(PanickingMessage)]
+    #[hyperactor::export(
+        handlers = [
+            PanickingMessage,
+        ],
+    )]
     struct PanickingActor;
 
     #[async_trait]
@@ -1789,7 +1798,7 @@ mod tests {
     impl PanickingMessageHandler for PanickingActor {
         async fn panic(
             &mut self,
-            _this: &Instance<Self>,
+            _this: &Context<Self>,
             err_msg: String,
         ) -> Result<(), anyhow::Error> {
             panic!("{}", err_msg);

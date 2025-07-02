@@ -29,17 +29,26 @@ impl<T: sealed::CanSplitPort> CanSplitPort for T {}
 pub trait CanSpawn: sealed::CanSpawn {}
 impl<T: sealed::CanSpawn> CanSpawn for T {}
 
+/// CanResolveActorRef is a capability that confers the ability to resolve
+/// an ActorRef to a local ActorHandle if the actor is available locally.
+pub trait CanResolveActorRef: sealed::CanResolveActorRef {}
+impl<T: sealed::CanResolveActorRef> CanResolveActorRef for T {}
+
 pub(crate) mod sealed {
     use async_trait::async_trait;
 
+    use crate::ActorRef;
     use crate::PortId;
+    use crate::accum::ReducerSpec;
     use crate::actor::Actor;
     use crate::actor::ActorHandle;
+    use crate::actor::RemoteActor;
+    use crate::attrs::Attrs;
     use crate::data::Serialized;
     use crate::mailbox::Mailbox;
 
     pub trait CanSend: Send + Sync {
-        fn post(&self, dest: PortId, data: Serialized);
+        fn post(&self, dest: PortId, headers: Attrs, data: Serialized);
     }
 
     pub trait CanOpenPort: Send + Sync {
@@ -47,11 +56,22 @@ pub(crate) mod sealed {
     }
 
     pub trait CanSplitPort: Send + Sync {
-        fn split(&self, port_id: PortId, reducer: Option<u64>) -> PortId;
+        fn split(
+            &self,
+            port_id: PortId,
+            reducer_spec: Option<ReducerSpec>,
+        ) -> anyhow::Result<PortId>;
     }
 
     #[async_trait]
     pub trait CanSpawn: Send + Sync {
         async fn spawn<A: Actor>(&self, params: A::Params) -> anyhow::Result<ActorHandle<A>>;
+    }
+
+    pub trait CanResolveActorRef: Send + Sync {
+        fn resolve_actor_ref<A: RemoteActor + Actor>(
+            &self,
+            actor_ref: &ActorRef<A>,
+        ) -> Option<ActorHandle<A>>;
     }
 }

@@ -7,16 +7,22 @@
 # pyre-strict
 
 import unittest
+from datetime import timedelta
 from unittest import mock
+from unittest.mock import MagicMock
 
 from monarch.tools import commands
-from monarch.tools.commands import component_args_from_cli
+from monarch.tools.commands import component_args_from_cli, server_ready
 
 from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/config/meta:defaults
+    Config,
     defaults,
 )
 from monarch.tools.mesh_spec import MeshSpec, ServerSpec
 from torchx.specs import AppDef, AppDryRunInfo, AppState, AppStatus, Role
+
+CMD_INFO = "monarch.tools.commands.info"
+CMD_CREATE = "monarch.tools.commands.create"
 
 
 class TestCommands(unittest.TestCase):
@@ -31,10 +37,12 @@ class TestCommands(unittest.TestCase):
         self.assertDictEqual({"h": "gpu.medium", "num_hosts": 4}, args)
 
     def test_create_dryrun(self) -> None:
-        config = defaults.config("slurm")
+        scheduler = "slurm"
+        config = defaults.config(scheduler)
         config.dryrun = True
+        appdef = defaults.component_fn(scheduler)()
 
-        dryrun_info = commands.create(config)()
+        dryrun_info = commands.create(config, appdef)
         # need only assert that the return type of dryrun is a dryrun info object
         # since we delegate to torchx for job submission
         self.assertIsInstance(dryrun_info, AppDryRunInfo)
@@ -44,8 +52,10 @@ class TestCommands(unittest.TestCase):
         return_value="test_job_id",
     )
     def test_create(self, mock_schedule: mock.MagicMock) -> None:
-        config = defaults.config("slurm")
-        server_handle = commands.create(config)()
+        scheduler = "slurm"
+        config = defaults.config(scheduler)
+        appdef = defaults.component_fn(scheduler)()
+        server_handle = commands.create(config, appdef)
 
         mock_schedule.assert_called_once()
         self.assertEqual(server_handle, "slurm:///test_job_id")
@@ -88,6 +98,7 @@ class TestCommands(unittest.TestCase):
         self.assertEqual(
             ServerSpec(
                 name="monarch_test_123",
+                scheduler="slurm",
                 state=appstatus.state,
                 meshes=[
                     MeshSpec(
@@ -101,3 +112,188 @@ class TestCommands(unittest.TestCase):
             ),
             commands.info("slurm:///job-id"),
         )
+
+
+UNUSED = "__UNUSED__"
+_5_MS = timedelta(milliseconds=5)
+
+
+def server(state: AppState, name: str = UNUSED) -> ServerSpec:
+    mesh_x = MeshSpec(name="x", num_hosts=2, host_type=UNUSED, gpus=-1)
+    mesh_y = MeshSpec(name="y", num_hosts=4, host_type=UNUSED, gpus=-1)
+    meshes = [mesh_x, mesh_y]
+
+    if state == AppState.RUNNING:
+        for mesh in meshes:
+            mesh.hostnames = [f"node{i}" for i in range(mesh.num_hosts)]
+
+    return ServerSpec(name=name, scheduler="slurm", state=state, meshes=meshes)
+
+
+class TestCommandsAsync(unittest.IsolatedAsyncioTestCase):
+    async def test_server_ready_server_does_not_exist(self) -> None:
+        with mock.patch(
+            CMD_INFO,
+            return_value=None,
+        ):
+            server_info = await server_ready("slurm:///123", check_interval=_5_MS)
+            self.assertIsNone(server_info)
+
+    async def test_server_ready_pending_to_running(self) -> None:
+        with mock.patch(
+            CMD_INFO,
+            side_effect=[
+                server(AppState.UNSUBMITTED),
+                server(AppState.SUBMITTED),
+                server(AppState.PENDING),
+                server(AppState.PENDING),
+                server(AppState.RUNNING),
+                server(AppState.CANCELLED),
+            ],
+        ) as mock_info:
+            server_info = await server_ready("slurm:///123", check_interval=_5_MS)
+
+            self.assertIsNotNone(server_info)
+            self.assertTrue(server_info.is_running)
+            self.assertEqual(server_info.state, AppState.RUNNING)
+
+            mesh_x = server_info.get_mesh_spec("x")
+            mesh_y = server_info.get_mesh_spec("y")
+            self.assertListEqual(mesh_x.hostnames, ["node0", "node1"])
+            self.assertListEqual(mesh_y.hostnames, ["node0", "node1", "node2", "node3"])
+
+            mock_info.assert_called()
+            # called 5 times, once for UNSUBMITTED, SUBMITTED, PENDING, PENDING, and RUNNING
+            self.assertEqual(mock_info.call_count, 5)
+
+    async def test_server_ready_pending_to_terminal(self) -> None:
+        for terminal_state in [AppState.SUCCEEDED, AppState.FAILED, AppState.CANCELLED]:
+            with self.subTest(terminal_state=terminal_state):
+                with mock.patch(
+                    CMD_INFO,
+                    side_effect=[
+                        server(AppState.SUBMITTED),
+                        server(AppState.PENDING),
+                        server(AppState.PENDING),
+                        server(terminal_state),
+                    ],
+                ) as mock_info:
+                    server_info = await server_ready(
+                        "slurm:///123",
+                        check_interval=_5_MS,
+                    )
+
+                    self.assertIsNotNone(server_info)
+                    self.assertEqual(server_info.state, terminal_state)
+                    mock_info.assert_called()
+                    self.assertEqual(mock_info.call_count, 4)
+
+    @mock.patch(CMD_INFO, side_effect=[server(AppState.RUNNING, name="123")])
+    async def test_get_or_create_existing(self, mock_info: MagicMock) -> None:
+        config = Config(
+            scheduler="slurm",
+            scheduler_args={},
+        )
+        appdef = defaults.component_fn(config.scheduler)()
+        server_info = await commands.get_or_create("123", config, appdef)
+        self.assertEqual(server_info.server_handle, "slurm:///123")
+        mock_info.assert_called_once_with("slurm:///123")
+
+    async def test_get_or_create(self) -> None:
+        for existing_state in [
+            None,
+            server(AppState.FAILED, name="123"),
+            server(AppState.SUCCEEDED, name="123"),
+        ]:
+            with self.subTest(existing_state=existing_state):
+                with mock.patch(
+                    CMD_INFO,
+                    side_effect=[
+                        # -- state for slurm:///123
+                        existing_state,
+                        # -- states for (new) slurm:///456
+                        server(AppState.PENDING, name="456"),
+                        server(AppState.RUNNING, name="456"),
+                    ],
+                ) as mock_info, mock.patch(
+                    CMD_CREATE, return_value="slurm:///456"
+                ) as mock_create:
+                    config = Config(
+                        scheduler="slurm",
+                        scheduler_args={},
+                    )
+                    appdef = defaults.component_fn(config.scheduler)()
+                    server_info = await commands.get_or_create(
+                        "123",
+                        config,
+                        appdef,
+                        check_interval=_5_MS,
+                    )
+
+                    mock_create.called_once_with(config, appdef)
+                    self.assertEqual(server_info.server_handle, "slurm:///456")
+                    self.assertListEqual(
+                        mock_info.call_args_list,
+                        [
+                            mock.call("slurm:///123"),
+                            mock.call("slurm:///456"),
+                            mock.call("slurm:///456"),
+                        ],
+                    )
+
+    @mock.patch(
+        CMD_INFO,
+        side_effect=[
+            # -- slurm:///123 not found
+            None,
+            # -- states for (new) slurm:///456
+            server(AppState.PENDING, name="456"),
+            server(AppState.FAILED, name="456"),
+        ],
+    )
+    @mock.patch(CMD_CREATE, return_value="slurm:///456")
+    async def test_get_or_create_new_server_failed(
+        self,
+        _1: MagicMock,
+        _2: MagicMock,
+    ) -> None:
+        config = Config(
+            scheduler="slurm",
+            scheduler_args={},
+        )
+        appdef = defaults.component_fn(config.scheduler)()
+        with self.assertRaises(RuntimeError):
+            _ = await commands.get_or_create(
+                "123",
+                config,
+                appdef,
+                check_interval=_5_MS,
+            )
+
+    @mock.patch(
+        CMD_INFO,
+        side_effect=[
+            # -- slurm:///123 not found
+            None,
+            # -- (new) slurm:///456 goes missing
+            None,
+        ],
+    )
+    @mock.patch(CMD_CREATE, return_value="slurm:///456")
+    async def test_get_or_create_new_server_missing(
+        self,
+        _1: MagicMock,
+        _2: MagicMock,
+    ) -> None:
+        config = Config(
+            scheduler="slurm",
+            scheduler_args={},
+        )
+        appdef = defaults.component_fn(config.scheduler)()
+        with self.assertRaises(RuntimeError):
+            _ = await commands.get_or_create(
+                "123",
+                config,
+                appdef,
+                check_interval=_5_MS,
+            )

@@ -18,6 +18,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use hyperactor::Actor;
+use hyperactor::Context;
 use hyperactor::Data;
 use hyperactor::HandleClient;
 use hyperactor::Handler;
@@ -316,7 +317,12 @@ pub struct BootstrappedProc {
 /// the lifecycle of all of the proc's actors, and to route messages
 /// accordingly.
 #[derive(Debug)]
-#[hyperactor::export(ProcMessage, MailboxAdminMessage)]
+#[hyperactor::export(
+    handlers = [
+        ProcMessage,
+        MailboxAdminMessage,
+    ],
+)]
 pub struct ProcActor {
     params: ProcActorParams,
     state: ProcState,
@@ -554,7 +560,7 @@ impl ProcActor {
 impl MailboxAdminMessageHandler for ProcActor {
     async fn update_address(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         proc_id: ProcId,
         addr: ChannelAddr,
     ) -> Result<(), anyhow::Error> {
@@ -582,19 +588,19 @@ impl MailboxAdminMessageHandler for ProcActor {
 #[async_trait]
 #[hyperactor::forward(ProcMessage)]
 impl ProcMessageHandler for ProcActor {
-    async fn joined(&mut self, _this: &Instance<Self>) -> Result<(), anyhow::Error> {
+    async fn joined(&mut self, _this: &Context<Self>) -> Result<(), anyhow::Error> {
         self.state = ProcState::Joined;
         let _ = self.params.state_watch.send(self.state.clone());
         Ok(())
     }
 
-    async fn state(&mut self, _this: &Instance<Self>) -> Result<ProcState, anyhow::Error> {
+    async fn state(&mut self, _this: &Context<Self>) -> Result<ProcState, anyhow::Error> {
         Ok(self.state.clone())
     }
 
     async fn spawn(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         actor_type: String,
         actor_name: String,
         params_data: Data,
@@ -612,7 +618,7 @@ impl ProcMessageHandler for ProcActor {
 
     async fn spawn_proc(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         env: Environment,
         world_id: WorldId,
         proc_ids: Vec<ProcId>,
@@ -665,7 +671,7 @@ impl ProcMessageHandler for ProcActor {
         Ok(())
     }
 
-    async fn update_supervision(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
+    async fn update_supervision(&mut self, this: &Context<Self>) -> Result<(), anyhow::Error> {
         // Delay for next supervision update with some jitter.
         let delay = jitter(self.params.supervision_update_interval);
 
@@ -683,12 +689,14 @@ impl ProcMessageHandler for ProcActor {
             failed_actors: Vec::new(),
         };
 
-        match tokio::time::timeout(
-            // TODO: make the timeout configurable
-            Duration::from_secs(10),
-            self.params.supervisor_actor_ref.update(this, msg),
-        )
-        .await
+        match this
+            .clock()
+            .timeout(
+                // TODO: make the timeout configurable
+                Duration::from_secs(10),
+                self.params.supervisor_actor_ref.update(this, msg),
+            )
+            .await
         {
             Ok(_) => {
                 self.last_successful_supervision_update = this.clock().system_time_now();
@@ -720,7 +728,7 @@ impl ProcMessageHandler for ProcActor {
 
     async fn stop(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         timeout: Duration,
     ) -> Result<ProcStopResult, anyhow::Error> {
         tracing::info!("stopping proc {}", self.params.proc.proc_id());
@@ -738,19 +746,19 @@ impl ProcMessageHandler for ProcActor {
             })
     }
 
-    async fn snapshot(&mut self, _this: &Instance<Self>) -> Result<ProcSnapshot, anyhow::Error> {
+    async fn snapshot(&mut self, _this: &Context<Self>) -> Result<ProcSnapshot, anyhow::Error> {
         let state = self.state.clone();
         let actors = self.params.proc.ledger_snapshot();
         Ok(ProcSnapshot { state, actors })
     }
 
-    async fn local_addr(&mut self, _this: &Instance<Self>) -> Result<ChannelAddr, anyhow::Error> {
+    async fn local_addr(&mut self, _this: &Context<Self>) -> Result<ChannelAddr, anyhow::Error> {
         Ok(self.params.local_addr.clone())
     }
 
     async fn py_spy_dump(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         config: PySpyConfig,
     ) -> Result<StackTrace, anyhow::Error> {
         let pid = std::process::id() as i32;
@@ -779,7 +787,7 @@ impl ProcMessageHandler for ProcActor {
 impl Handler<ActorSupervisionEvent> for ProcActor {
     async fn handle(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         event: ActorSupervisionEvent,
     ) -> anyhow::Result<()> {
         let message = ProcSupervisionState {
@@ -838,7 +846,6 @@ mod tests {
     use std::collections::HashSet;
     use std::time::Duration;
 
-    use hyperactor::Instance;
     use hyperactor::actor::ActorStatus;
     use hyperactor::channel;
     use hyperactor::channel::ChannelAddr;
@@ -931,7 +938,12 @@ mod tests {
     }
 
     #[derive(Debug)]
-    #[hyperactor::export_spawn(TestActorMessage)]
+    #[hyperactor::export(
+        spawn = true,
+        handlers = [
+            TestActorMessage,
+        ],
+    )]
     struct TestActor;
 
     #[derive(Handler, HandleClient, RefClient, Serialize, Deserialize, Debug, Named)]
@@ -954,13 +966,13 @@ mod tests {
     impl TestActorMessageHandler for TestActor {
         async fn increment(
             &mut self,
-            _this: &hyperactor::Instance<Self>,
+            _this: &Context<Self>,
             num: u64,
         ) -> Result<u64, anyhow::Error> {
             Ok(num + 1)
         }
 
-        async fn fail(&mut self, _this: &Instance<Self>, err: String) -> Result<(), anyhow::Error> {
+        async fn fail(&mut self, _this: &Context<Self>, err: String) -> Result<(), anyhow::Error> {
             Err(anyhow::anyhow!(err))
         }
     }
@@ -1000,7 +1012,12 @@ mod tests {
 
     // Sleep
     #[derive(Debug)]
-    #[hyperactor::export_spawn(u64)]
+    #[hyperactor::export(
+        spawn = true,
+        handlers = [
+            u64,
+        ],
+    )]
     struct SleepActor {}
 
     #[async_trait]
@@ -1013,7 +1030,7 @@ mod tests {
 
     #[async_trait]
     impl Handler<u64> for SleepActor {
-        async fn handle(&mut self, _this: &Instance<Self>, message: u64) -> anyhow::Result<()> {
+        async fn handle(&mut self, _this: &Context<Self>, message: u64) -> anyhow::Result<()> {
             let duration = message;
             RealClock.sleep(Duration::from_secs(duration)).await;
             Ok(())
@@ -1238,8 +1255,8 @@ mod tests {
         // Since we could get messages from both the periodic task and the
         // report from the failed actor, we need to poll for a while to make
         // sure we get the right message.
-        let result =
-            tokio::time::timeout(Duration::from_secs(5), async {
+        let result = RealClock
+            .timeout(Duration::from_secs(5), async {
                 loop {
                     match supervisor_supervision_receiver.recv().await {
                         Ok(ProcSupervisionMessage::Update(state, _port)) => {
@@ -1294,7 +1311,9 @@ mod tests {
         let proc_actor_id = bootstrap.proc_actor.actor_id().clone();
         let proc_actor_ref = ActorRef::<ProcActor>::attest(proc_actor_id);
 
-        let res = tokio::time::timeout(Duration::from_secs(5), proc_actor_ref.state(&client)).await;
+        let res = RealClock
+            .timeout(Duration::from_secs(5), proc_actor_ref.state(&client))
+            .await;
         // If ProcMessage's static Named port is not bound, this test will fail
         // due to timeout.
         assert!(res.is_ok());

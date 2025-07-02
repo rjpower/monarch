@@ -58,28 +58,27 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::ActorRef;
+use hyperactor::Bind;
+use hyperactor::Context;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::OncePortRef;
 use hyperactor::PortRef;
-use hyperactor::message::Bind;
-use hyperactor::message::Bindings;
-use hyperactor::message::IndexedErasedUnbound;
-use hyperactor::message::Unbind;
+use hyperactor::Unbind;
 use hyperactor::supervision::ActorSupervisionEvent;
 use hyperactor_mesh::Mesh;
 use hyperactor_mesh::ProcMesh;
 use hyperactor_mesh::RootActorMesh;
 use hyperactor_mesh::actor_mesh::ActorMesh;
-use hyperactor_mesh::actor_mesh::Cast;
 use hyperactor_mesh::alloc::AllocSpec;
 use hyperactor_mesh::alloc::Allocator;
 use hyperactor_mesh::alloc::ProcessAllocator;
+use hyperactor_mesh::comm::multicast::CastInfo;
 use monarch_rdma::IbverbsConfig;
 use monarch_rdma::RdmaBuffer;
 use monarch_rdma::RdmaManagerActor;
-use monarch_rdma::RdmaMemoryRegionView;
+use monarch_rdma::RdmaManagerMessageClient;
 use ndslice::selection;
 use ndslice::shape;
 use serde::Deserialize;
@@ -91,7 +90,14 @@ const BUFFER_SIZE: usize = 8;
 
 // Parameter Server Actor
 #[derive(Debug)]
-#[hyperactor::export_spawn(PsGetBuffers, PsUpdate, Log)]
+#[hyperactor::export(
+    spawn = true,
+    handlers = [
+        PsGetBuffers,
+        PsUpdate,
+        Log,
+    ],
+)]
 pub struct ParameterServerActor {
     weights_data: Box<[u8]>,
     grad_buffer_data: Box<[Box<[u8]>]>,
@@ -145,46 +151,21 @@ struct PsGetBuffers(pub usize, pub OncePortRef<(RdmaBuffer, RdmaBuffer)>);
 struct PsUpdate(pub OncePortRef<bool>);
 
 // Message to log actors' weights and gradients.
-#[derive(Debug, Serialize, Deserialize, Named, Clone)]
+#[derive(Debug, Serialize, Deserialize, Named, Clone, Bind, Unbind)]
 struct Log;
-
-// TODO(pzhang) replace the boilerplate Bind/Unbind impls with a macro.
-impl Bind for Log {
-    fn bind(self, _bindings: &Bindings) -> anyhow::Result<Self> {
-        Ok(self)
-    }
-}
-
-impl Unbind for Log {
-    fn bindings(&self) -> anyhow::Result<Bindings> {
-        Ok(Bindings::default())
-    }
-}
 
 #[async_trait]
 impl Handler<PsGetBuffers> for ParameterServerActor {
     /// Returns RdmaBuffers for weights data and gradients data. Creates handles if necessary.
     async fn handle(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         PsGetBuffers(rank, reply): PsGetBuffers,
     ) -> Result<(), anyhow::Error> {
         if self.weights_handle.is_none() {
-            let client = this.mailbox_for_py();
-
-            let mr = RdmaMemoryRegionView::from_boxed_slice(&self.weights_data);
-            println!(
-                "[parameter server actor] creating RdmaBuffer for weights data (mr: {:?})",
-                mr
-            );
-
-            let weights_handle = RdmaBuffer::new(
-                "weights_buffer".to_string(),
-                self.owner_ref.clone(),
-                client,
-                mr,
-            )
-            .await?;
+            let addr = self.weights_data.as_ptr() as usize;
+            let size = self.weights_data.len();
+            let weights_handle = self.owner_ref.request_buffer(this, addr, size).await?;
             self.weights_handle = Some(weights_handle);
         }
         let weights_handle = self
@@ -196,19 +177,9 @@ impl Handler<PsGetBuffers> for ParameterServerActor {
         let grad_buffer_handle = match entry {
             std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
             std::collections::hash_map::Entry::Vacant(e) => {
-                let client = this.mailbox_for_py();
-                let mr = RdmaMemoryRegionView::from_boxed_slice(&self.grad_buffer_data[rank]);
-                println!(
-                    "[parameter server actor] creating rdma buffer for gradients for worker {} (mr: {:?})",
-                    rank, mr
-                );
-                let grad_buffer_handle = RdmaBuffer::new(
-                    format!("gradients_buffer_{}", rank),
-                    self.owner_ref.clone(),
-                    client,
-                    mr,
-                )
-                .await?;
+                let addr = self.grad_buffer_data[rank].as_ptr() as usize;
+                let size = self.grad_buffer_data[rank].len();
+                let grad_buffer_handle = self.owner_ref.request_buffer(this, addr, size).await?;
                 e.insert(grad_buffer_handle.clone());
                 grad_buffer_handle
             }
@@ -223,7 +194,7 @@ impl Handler<PsUpdate> for ParameterServerActor {
     /// Updates the parameter server's weights, given data in the gradients buffers. Gradients are wiped afterwards.
     async fn handle(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         PsUpdate(reply): PsUpdate,
     ) -> Result<(), anyhow::Error> {
         for grad in self.grad_buffer_data.iter_mut() {
@@ -241,7 +212,7 @@ impl Handler<PsUpdate> for ParameterServerActor {
 #[async_trait]
 impl Handler<Log> for ParameterServerActor {
     /// Logs the server's weights and gradient buffer
-    async fn handle(&mut self, _this_: &Instance<Self>, _msg_: Log) -> Result<(), anyhow::Error> {
+    async fn handle(&mut self, _this_: &Context<Self>, _msg_: Log) -> Result<(), anyhow::Error> {
         println!(
             "[parameter server actor] weights: {:?}, grad_buffer: {:?}",
             self.weights_data, self.grad_buffer_data,
@@ -252,11 +223,14 @@ impl Handler<Log> for ParameterServerActor {
 
 // Worker Actor
 #[derive(Debug)]
-#[hyperactor::export_spawn(
-    Cast<WorkerInit>, IndexedErasedUnbound<Cast<WorkerInit>>,
-    Cast<WorkerStep>, IndexedErasedUnbound<Cast<WorkerStep>>,
-    Cast<WorkerUpdate>, IndexedErasedUnbound<Cast<WorkerUpdate>>,
-    Cast<Log>, IndexedErasedUnbound<Cast<Log>>,
+#[hyperactor::export(
+    spawn = true,
+    handlers = [
+        WorkerInit { cast = true },
+        WorkerStep { cast = true },
+        WorkerUpdate { cast = true },
+        Log { cast = true },
+    ],
 )]
 pub struct WorkerActor {
     ps_weights_handle: Option<RdmaBuffer>,
@@ -299,103 +273,52 @@ impl Actor for WorkerActor {
 // - ActorRef<RdmaManagerActor>: the actor ref to the parameter server
 // - Vec<ActorRef<RdmaManagerActor>>: the list of RdmaManagerActors. Used for the worker to get
 //   given its casted rank.
-#[derive(Debug, Serialize, Deserialize, Named, Clone)]
+#[derive(Debug, Serialize, Deserialize, Named, Clone, Bind, Unbind)]
 pub struct WorkerInit(
     pub ActorRef<ParameterServerActor>,
     pub Vec<ActorRef<RdmaManagerActor>>,
 );
 
-// TODO(pzhang) replace the boilerplate Bind/Unbind impls with a macro.
-impl Bind for WorkerInit {
-    fn bind(self, _bindings: &Bindings) -> anyhow::Result<Self> {
-        Ok(self)
-    }
-}
-
-impl Unbind for WorkerInit {
-    fn bindings(&self) -> anyhow::Result<Bindings> {
-        Ok(Bindings::default())
-    }
-}
-
 // Message to signal the worker to update its gradients and transmit them to the server.
 // The PortRef<bool> is used to notify the main process when the operation completes.
 // - Workers compute local gradients (weights + 1)
 // - Workers write these gradients to their assigned buffer on the parameter server using RDMA
-#[derive(Debug, Serialize, Deserialize, Named, Clone)]
-pub struct WorkerStep(PortRef<bool>);
-
-// TODO(pzhang) replace the boilerplate Bind/Unbind impls with a macro.
-impl Bind for WorkerStep {
-    fn bind(mut self, bindings: &Bindings) -> anyhow::Result<Self> {
-        let mut_ports = [self.0.port_id_mut()];
-        bindings.rebind(mut_ports.into_iter())?;
-        Ok(self)
-    }
-}
-
-impl Unbind for WorkerStep {
-    fn bindings(&self) -> anyhow::Result<Bindings> {
-        let mut bindings = Bindings::default();
-        let ports = [self.0.port_id()];
-        bindings.insert(ports)?;
-        Ok(bindings)
-    }
-}
+#[derive(Debug, Serialize, Deserialize, Named, Clone, Bind, Unbind)]
+pub struct WorkerStep(#[binding(include)] PortRef<bool>);
 
 // Message to signal the worker to pull updated weights from the parameter server.
 // The PortRef<bool> is used to notify the main process when the operation completes.
 // - Workers read the updated weights from the parameter server using RDMA
 // - This happens after the parameter server has applied all gradients to update the weights
-#[derive(Debug, Serialize, Deserialize, Named, Clone)]
-pub struct WorkerUpdate(PortRef<bool>);
-
-// TODO(pzhang) replace the boilerplate Bind/Unbind impls with a macro.
-impl Bind for WorkerUpdate {
-    fn bind(mut self, bindings: &Bindings) -> anyhow::Result<Self> {
-        let mut_ports = [self.0.port_id_mut()];
-        bindings.rebind(mut_ports.into_iter())?;
-        Ok(self)
-    }
-}
-
-impl Unbind for WorkerUpdate {
-    fn bindings(&self) -> anyhow::Result<Bindings> {
-        let mut bindings = Bindings::default();
-        let ports = [self.0.port_id()];
-        bindings.insert(ports)?;
-        Ok(bindings)
-    }
-}
+#[derive(Debug, Serialize, Deserialize, Named, Clone, Bind, Unbind)]
+pub struct WorkerUpdate(#[binding(include)] PortRef<bool>);
 
 #[async_trait]
-impl Handler<Cast<WorkerInit>> for WorkerActor {
+impl Handler<WorkerInit> for WorkerActor {
     /// Initialize the worker. This involves:
     /// 1) getting RdmaBuffers from the parameter server
     /// 2) assigning the associated rdma manager
     async fn handle(
         &mut self,
-        this: &Instance<Self>,
-        Cast {
-            rank,
-            message: WorkerInit(ps_ref, rdma_managers),
-            ..
-        }: Cast<WorkerInit>,
+        this: &Context<Self>,
+        WorkerInit(ps_ref, rdma_managers): WorkerInit,
     ) -> Result<(), anyhow::Error> {
-        println!("[worker_actor_{}] initializing", *rank);
+        let (rank, _) = this.cast_info()?;
+
+        println!("[worker_actor_{}] initializing", rank);
 
         let client = this.mailbox_for_py();
         let (handle, receiver) = client.open_once_port::<(RdmaBuffer, RdmaBuffer)>();
-        ps_ref.send(client, PsGetBuffers(*rank, handle.bind()))?;
+        ps_ref.send(client, PsGetBuffers(rank, handle.bind()))?;
         let (ps_weights_handle, ps_grad_handle) = receiver.recv().await?;
         self.ps_weights_handle = Some(ps_weights_handle);
         self.ps_grad_handle = Some(ps_grad_handle);
-        if let Some(rdma_manager) = rdma_managers.get(*rank) {
+        if let Some(rdma_manager) = rdma_managers.get(rank) {
             self.rdma_manager = Some(rdma_manager.clone());
         } else {
             return Err(anyhow::anyhow!(
                 "Invalid rank: {}. No RDMA manager found.",
-                *rank
+                rank
             ));
         }
         Ok(())
@@ -403,20 +326,18 @@ impl Handler<Cast<WorkerInit>> for WorkerActor {
 }
 
 #[async_trait]
-impl Handler<Cast<WorkerStep>> for WorkerActor {
+impl Handler<WorkerStep> for WorkerActor {
     /// Takes a worker step. This involves:
     /// 1) calculating the gradient (worker + 1)
     /// 2) transmitting it to the parameter server over rdma
     /// 3) resetting the gradient to 0
     async fn handle(
         &mut self,
-        this: &Instance<Self>,
-        Cast {
-            rank,
-            message: WorkerStep(reply),
-            ..
-        }: Cast<WorkerStep>,
+        this: &Context<Self>,
+        WorkerStep(reply): WorkerStep,
     ) -> Result<(), anyhow::Error> {
+        let (rank, _) = this.cast_info()?;
+
         for (grad_value, weight) in self
             .local_gradients
             .iter_mut()
@@ -426,11 +347,8 @@ impl Handler<Cast<WorkerStep>> for WorkerActor {
         }
         println!(
             "[worker_actor_{}] pushing gradients {:?}",
-            *rank, self.local_gradients
+            rank, self.local_gradients
         );
-
-        let mr = RdmaMemoryRegionView::from_boxed_slice(&self.local_gradients);
-        let client = this.mailbox_for_py();
 
         let owner_ref = self
             .rdma_manager
@@ -438,10 +356,18 @@ impl Handler<Cast<WorkerStep>> for WorkerActor {
             .expect("worker should have been initialized");
         let ps_grad_handle = self
             .ps_grad_handle
-            .as_mut()
+            .as_ref()
             .expect("worker_actor should be initialized");
-        ps_grad_handle
-            .write_from(mr, client, owner_ref, Some(5))
+        let mut lbuffer = owner_ref
+            .request_buffer(
+                this,
+                self.local_gradients.as_ptr() as usize,
+                self.local_gradients.len(),
+            )
+            .await?;
+
+        lbuffer
+            .read_into(this.mailbox_for_py(), ps_grad_handle.clone(), 5)
             .await?;
 
         self.local_gradients.fill(0);
@@ -452,34 +378,36 @@ impl Handler<Cast<WorkerStep>> for WorkerActor {
 }
 
 #[async_trait]
-impl Handler<Cast<WorkerUpdate>> for WorkerActor {
+impl Handler<WorkerUpdate> for WorkerActor {
     /// Pulls weights from the parameter server to the worker
     async fn handle(
         &mut self,
-        this: &Instance<Self>,
-        Cast {
-            rank,
-            message: WorkerUpdate(reply),
-            ..
-        }: Cast<WorkerUpdate>,
+        this: &Context<Self>,
+        WorkerUpdate(reply): WorkerUpdate,
     ) -> Result<(), anyhow::Error> {
+        let (rank, _) = this.cast_info()?;
+
         println!(
             "[worker_actor_{}] pulling new weights from parameter server (before: {:?})",
-            *rank, self.weights_data,
+            rank, self.weights_data,
         );
-        let mr = RdmaMemoryRegionView::from_boxed_slice(&self.weights_data);
-        let client = this.mailbox_for_py();
-
-        let owner_ref = self
+        let mut lbuffer = self
             .rdma_manager
             .as_ref()
-            .expect("worker should have been initialized");
+            .expect("Rmda Manager should have been initialized")
+            .request_buffer(
+                this,
+                self.weights_data.as_ptr() as usize,
+                self.weights_data.len(),
+            )
+            .await?;
+
         let ps_weights_handle = self
             .ps_weights_handle
-            .as_mut()
+            .as_ref()
             .expect("worker_actor should be initialized");
-        ps_weights_handle
-            .read_into(mr, client, owner_ref, Some(5))
+        lbuffer
+            .write_from(this.mailbox_for_py(), ps_weights_handle.clone(), 5)
             .await?;
         reply.send(this, true)?;
         Ok(())
@@ -487,16 +415,11 @@ impl Handler<Cast<WorkerUpdate>> for WorkerActor {
 }
 
 #[async_trait]
-impl Handler<Cast<Log>> for WorkerActor {
+impl Handler<Log> for WorkerActor {
     /// Logs the worker's weights
-    async fn handle(
-        &mut self,
-        _this_: &Instance<Self>,
-        Cast {
-            rank, message: Log, ..
-        }: Cast<Log>,
-    ) -> Result<(), anyhow::Error> {
-        println!("[worker_actor_{}] weights: {:?}", *rank, self.weights_data);
+    async fn handle(&mut self, this: &Context<Self>, _: Log) -> Result<(), anyhow::Error> {
+        let (rank, _) = this.cast_info()?;
+        println!("[worker_actor_{}] weights: {:?}", rank, self.weights_data);
         Ok(())
     }
 }
@@ -519,8 +442,8 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
     let ps_ibv_config: IbverbsConfig;
     let worker_ibv_config: IbverbsConfig;
 
-    if devices.len() == 12 {
-        // On H100 machines with 12 devices, use specific devices
+    // Quick check for H100
+    if devices.len() > 4 {
         ps_ibv_config = IbverbsConfig {
             device: devices.clone().into_iter().next().unwrap(),
             ..Default::default()
@@ -534,7 +457,7 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
     } else {
         // For other configurations, use default settings (parameter server + workers all use the same ibv device)
         println!(
-            "using default IbverbsConfig as {} devices were found (expected 12 for H100)",
+            "using default IbverbsConfig as {} devices were found (expected > 4 for H100)",
             devices.len()
         );
         ps_ibv_config = IbverbsConfig::default();
@@ -690,7 +613,7 @@ pub async fn run(num_workers: usize, num_steps: usize) -> Result<(), anyhow::Err
 mod tests {
     use super::*;
 
-    #[timed_test::async_timed_test(timeout_secs = 60)]
+    #[timed_test::async_timed_test(timeout_secs = 30)]
     async fn test_parameter_server() -> Result<(), anyhow::Error> {
         run(1, 4).await
     }

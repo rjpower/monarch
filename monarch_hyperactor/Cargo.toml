@@ -8,7 +8,7 @@ edition = "2021"
 license = "BSD-3-Clause"
 
 [dependencies]
-anyhow = "1.0.95"
+anyhow = "1.0.98"
 async-trait = "0.1.86"
 bincode = "1.3.3"
 clap = { version = "4.5.38", features = ["derive", "env", "string", "unicode", "wrap_help"] }
@@ -17,9 +17,10 @@ hyperactor_extension = { version = "0.0.0", path = "../hyperactor_extension" }
 hyperactor_mesh = { version = "0.0.0", path = "../hyperactor_mesh" }
 hyperactor_multiprocess = { version = "0.0.0", path = "../hyperactor_multiprocess" }
 hyperactor_telemetry = { version = "0.0.0", path = "../hyperactor_telemetry" }
+inventory = "0.3.8"
 monarch_types = { version = "0.0.0", path = "../monarch_types" }
 ndslice = { version = "0.0.0", path = "../ndslice" }
-pyo3 = { version = "0.24", features = ["anyhow"] }
+pyo3 = { version = "0.24", features = ["anyhow", "multiple-pymethods"] }
 pyo3-async-runtimes = { git = "https://github.com/PyO3/pyo3-async-runtimes", rev = "c5a3746f110b4d246556b0f6c29f5f555919eee3", features = ["attributes", "tokio-runtime"] }
 serde = { version = "1.0.185", features = ["derive", "rc"] }
 serde_bytes = "0.11"

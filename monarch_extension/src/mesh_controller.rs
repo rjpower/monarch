@@ -45,6 +45,7 @@ use monarch_messages::worker::WorkerParams;
 use monarch_tensor_worker::AssignRankMessage;
 use monarch_tensor_worker::WorkerActor;
 use ndslice::Slice;
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use tokio::sync::Mutex;
@@ -73,7 +74,7 @@ fn to_py_error<T>(e: T) -> PyErr
 where
     T: Error,
 {
-    return PyErr::new::<PyValueError, _>(e.to_string());
+    PyErr::new::<PyValueError, _>(e.to_string())
 }
 
 #[pymethods]
@@ -293,6 +294,10 @@ impl Invocation {
         Ok(())
     }
 
+    /// Changes the status of this invocation to an Errored. If this invocation was
+    /// Incomplete, it may have users that will also become errored. This function
+    /// will return those users so the error can be propagated. It does not autmoatically
+    /// propagate the error to avoid deep recursive invocations.
     fn set_exception(
         &mut self,
         sender: &impl CanSend,

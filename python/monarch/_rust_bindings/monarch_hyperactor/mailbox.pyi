@@ -6,9 +6,12 @@
 
 # pyre-strict
 
-from typing import final
+from typing import final, Generic, Protocol
 
-from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
+from monarch._rust_bindings.monarch_hyperactor.actor import (
+    PythonMessage,
+    UndeliverableMessageEnvelope,
+)
 
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 
@@ -21,7 +24,7 @@ class PortId:
         Create a new port id given an actor id and an index.
         """
         ...
-    def __str__(self) -> str: ...
+    def __repr__(self) -> str: ...
     def __hash__(self) -> int: ...
     def __eq__(self, other: object) -> bool: ...
     @property
@@ -54,9 +57,20 @@ class PortHandle:
     def send(self, message: PythonMessage) -> None:
         """Send a message to the port's receiver."""
 
-    def bind(self) -> PortId:
-        """Bind this port. The returned port ID can be used to reach the port externally."""
+    def bind(self) -> PortRef:
+        """Bind this port. The returned port ref can be used to reach the port externally."""
         ...
+
+@final
+class PortRef:
+    """
+    A reference to a remote port over which PythonMessages can be sent.
+    """
+
+    def send(self, mailbox: Mailbox, message: PythonMessage) -> None:
+        """Send a single message to the port's receiver."""
+        ...
+    def __repr__(self) -> str: ...
 
 @final
 class PortReceiver:
@@ -71,6 +85,18 @@ class PortReceiver:
         ...
 
 @final
+class UndeliverablePortReceiver:
+    """
+    A receiver to which undeliverable message envelopes are sent.
+    """
+    async def recv(self) -> UndeliverableMessageEnvelope:
+        """Receive a single undeliverable message from the port's sender."""
+        ...
+    def blocking_recv(self) -> UndeliverableMessageEnvelope:
+        """Receive a single undeliverable message from the port's sender."""
+        ...
+
+@final
 class OncePortHandle:
     """
     A variant of PortHandle that can only send a single message.
@@ -80,9 +106,20 @@ class OncePortHandle:
         """Send a single message to the port's receiver."""
         ...
 
-    def bind(self) -> PortId:
+    def bind(self) -> OncePortRef:
         """Bind this port. The returned port ID can be used to reach the port externally."""
         ...
+
+@final
+class OncePortRef:
+    """
+    A reference to a remote once port over which a single PythonMessages can be sent.
+    """
+
+    def send(self, mailbox: Mailbox, message: PythonMessage) -> None:
+        """Send a single message to the port's receiver."""
+        ...
+    def __repr__(self) -> str: ...
 
 @final
 class OncePortReceiver:
@@ -110,7 +147,13 @@ class Mailbox:
         """Open a port to receive a single `PythonMessage` message."""
         ...
 
-    def post(self, dest: ActorId | PortId, message: PythonMessage) -> None:
+    def open_accum_port(
+        self, accumulator: Accumulator
+    ) -> tuple[PortHandle, PortReceiver]:
+        """Open a accum port."""
+        ...
+
+    def post(self, dest: ActorId, message: PythonMessage) -> None:
         """
         Post a message to the provided destination. If the destination is an actor id,
         the message is sent to the default handler for `PythonMessage` on the actor.
@@ -119,7 +162,7 @@ class Mailbox:
         ...
 
     def post_cast(
-        self, dest: ActorId | PortId, rank: int, shape: Shape, message: PythonMessage
+        self, dest: ActorId, rank: int, shape: Shape, message: PythonMessage
     ) -> None:
         """
         Post a message to the provided actor. It will be handled using the handle_cast
@@ -127,5 +170,53 @@ class Mailbox:
         """
         ...
 
+    def undeliverable_receiver(self) -> UndeliverablePortReceiver:
+        """
+        Open a port to receive undeliverable messages.
+
+        This may only be called at most once per mailbox. Calling it
+        more than once may panic due to the port already being bound.
+        """
+        ...
+
     @property
     def actor_id(self) -> ActorId: ...
+
+class Accumulator(Protocol):
+    """
+    Define the Python interface for its `trait Accumulator` counterpart in
+    Monarch Rust backend. It enables users to implement accumulators in python
+    natively.
+    """
+    def __call__(
+        self, state: PythonMessage, update: PythonMessage
+    ) -> PythonMessage: ...
+    """
+    Accumulate an `update` into the current `state`.
+
+    This method's Rust counterpart is `Accumulator::accumulate`.
+    """
+    @property
+    def initial_state(self) -> PythonMessage: ...
+    """
+    Define the initial state of this accumulator.
+    """
+    @property
+    def reducer(self) -> Reducer | None: ...
+    """
+    The reducer associated with this accumulator.
+    """
+
+class Reducer(Protocol):
+    """
+    Define the Python interface for its `trait CommReducer` counterpart in
+    Monarch Rust backend. It enables users to implement reducers in python
+    natively.
+    """
+
+    def __call__(self, left: PythonMessage, right: PythonMessage) -> PythonMessage: ...
+    """
+    Reduce 2 updates into a single update.
+
+    This method's Rust counterpart is `CommReducer::reduce`.
+    """

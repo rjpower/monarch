@@ -12,9 +12,11 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use hyperactor::Actor;
 use hyperactor::ActorRef;
 use hyperactor::Mailbox;
+use hyperactor::Named;
 use hyperactor::RemoteMessage;
 use hyperactor::WorldId;
 use hyperactor::actor::RemoteActor;
@@ -28,7 +30,9 @@ use hyperactor::mailbox::BoxedMailboxSender;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxRouter;
 use hyperactor::mailbox::MailboxServer;
+use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::PortReceiver;
+use hyperactor::mailbox::Undeliverable;
 use hyperactor::proc::Proc;
 use hyperactor::reference::ProcId;
 use hyperactor::reference::Reference;
@@ -36,6 +40,7 @@ use hyperactor::supervision::ActorSupervisionEvent;
 use ndslice::Range;
 use ndslice::Shape;
 use ndslice::ShapeError;
+use tokio::sync::mpsc;
 
 use crate::CommActor;
 use crate::Mesh;
@@ -64,18 +69,22 @@ fn global_router() -> &'static MailboxRouter {
     GLOBAL_ROUTER.get_or_init(MailboxRouter::new)
 }
 
+type ActorEventRouter = Arc<DashMap<ActorMeshName, mpsc::UnboundedSender<ActorSupervisionEvent>>>;
 /// A ProcMesh maintains a mesh of procs whose lifecycles are managed by
 /// an allocator.
 pub struct ProcMesh {
     // The underlying set of events. It is None if it has been transferred to
     // a proc event observer.
     event_state: Option<EventState>,
+    actor_event_router: ActorEventRouter,
     shape: Shape,
     ranks: Vec<(ProcId, (ChannelAddr, ActorRef<MeshAgent>))>,
     #[allow(dead_code)] // will be used in subsequent diff
     client_proc: Proc,
     client: Mailbox,
+    client_undeliverable_receiver: Option<PortReceiver<Undeliverable<MessageEnvelope>>>,
     comm_actors: Vec<ActorRef<CommActor>>,
+    world_id: WorldId,
 }
 
 struct EventState {
@@ -103,7 +112,9 @@ impl ProcMesh {
             };
 
             match state {
-                ProcState::Created { proc_id, coords } => {
+                ProcState::Created {
+                    proc_id, coords, ..
+                } => {
                     let rank = shape
                         .slice()
                         .location(&coords)
@@ -198,12 +209,18 @@ impl ProcMesh {
         global_router().bind(alloc.world_id().clone().into(), router.clone());
         global_router().bind(client_proc_id.into(), router.clone());
 
+        // TODO: No actor bound to "supervisor" yet.
         let supervisor = client_proc.attach("supervisor")?;
         let (supervison_port, supervision_events) = supervisor.open_port();
 
-        // Now, configure the full mesh, so that the local agents are wired up to
-        // our router.
+        // Now, configure the full mesh, so that the local agents are
+        // wired up to our router. Bind an undeliverable message port
+        // in the client and return the port receiver.
+        // No actor bound to this "client" yet
         let client = client_proc.attach("client")?;
+        let (undeliverable_messages, client_undeliverable_receiver) =
+            client.open_port::<Undeliverable<MessageEnvelope>>();
+        undeliverable_messages.bind_to(Undeliverable::<MessageEnvelope>::port());
 
         // Map of procs -> channel addresses
         let address_book: HashMap<_, _> = running
@@ -271,12 +288,14 @@ impl ProcMesh {
         }
 
         let shape = alloc.shape().clone();
+        let world_id = alloc.world_id().clone();
 
         Ok(Self {
             event_state: Some(EventState {
                 alloc: Box::new(alloc),
                 supervision_events,
             }),
+            actor_event_router: Arc::new(DashMap::new()),
             shape,
             ranks: proc_ids
                 .into_iter()
@@ -285,7 +304,9 @@ impl ProcMesh {
                 .collect(),
             client_proc,
             client,
+            client_undeliverable_receiver: Some(client_undeliverable_receiver),
             comm_actors,
+            world_id,
         })
     }
 
@@ -359,16 +380,39 @@ impl ProcMesh {
     where
         A::Params: RemoteMessage,
     {
-        Ok(RootActorMesh::new(
+        let (tx, rx) = mpsc::unbounded_channel::<ActorSupervisionEvent>();
+        {
+            // Instantiate supervision routing BEFORE spawning the actor mesh.
+            self.actor_event_router.insert(actor_name.to_string(), tx);
+        }
+        let root_mesh = RootActorMesh::new(
             self,
             actor_name.to_string(),
+            rx,
             Self::spawn_on_procs::<A>(&self.client, self.agents(), actor_name, params).await?,
-        ))
+        );
+        Ok(root_mesh)
     }
 
     /// A client used to communicate with any member of this mesh.
     pub fn client(&self) -> &Mailbox {
         &self.client
+    }
+
+    /// Returns a mutable reference to the client mailbox's
+    /// undeliverable message port receiver.
+    ///
+    /// This allows the caller to extract the
+    /// `PortReceiver<Undeliverable<MessageEnvelope>>` by calling
+    /// `.take()` on the returned `Option`, transferring ownership of
+    /// the receiver.
+    ///
+    /// Typically used to access the port bound by
+    /// `ProcMesh::allocate`.
+    pub fn client_undeliverable_receiver(
+        &mut self,
+    ) -> &mut Option<PortReceiver<Undeliverable<MessageEnvelope>>> {
+        &mut self.client_undeliverable_receiver
     }
 
     pub fn client_proc(&self) -> &Proc {
@@ -377,6 +421,10 @@ impl ProcMesh {
 
     pub fn proc_id(&self) -> &ProcId {
         self.client_proc.proc_id()
+    }
+
+    pub fn world_id(&self) -> &WorldId {
+        &self.world_id
     }
 
     /// An event stream of proc events. Each ProcMesh can produce only one such
@@ -390,8 +438,10 @@ impl ProcMesh {
                 .enumerate()
                 .map(|(rank, (proc_id, _))| (proc_id.clone(), rank))
                 .collect(),
+            actor_event_router: self.actor_event_router.clone(),
         })
     }
+
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
@@ -420,11 +470,14 @@ impl fmt::Display for ProcEvent {
     }
 }
 
+type ActorMeshName = String;
+
 /// An event stream of [`ProcEvent`]
 // TODO: consider using streams for this.
 pub struct ProcEvents {
     event_state: EventState,
     ranks: HashMap<ProcId, usize>,
+    actor_event_router: ActorEventRouter,
 }
 
 impl ProcEvents {
@@ -436,6 +489,7 @@ impl ProcEvents {
                 result = self.event_state.alloc.next() => {
                     // Don't disable the outer branch on None: this is always terminal.
                     let Some(alloc_event) = result else {
+                        self.actor_event_router.clear();
                         break None;
                     };
 
@@ -452,11 +506,24 @@ impl ProcEvents {
                     break Some(ProcEvent::Stopped(*rank, reason));
                 }
                 Ok(event) = self.event_state.supervision_events.recv() => {
-                    let (actor_id, actor_status) = event.into_inner();
+                    let (actor_id, actor_status) = event.clone().into_inner();
                     let Some(rank) = self.ranks.get(actor_id.proc_id()) else {
                         tracing::warn!("received supervision event for unmapped actor {}", actor_id);
                         continue;
                     };
+                    // transmit to the correct root actor mesh.
+                    {
+                        let Some(tx) = self.actor_event_router.get(actor_id.name()) else {
+                            tracing::warn!("received supervision event for unregistered actor {}", actor_id);
+                            continue;
+                        };
+                        let Ok(_) = tx.send(event) else {
+                            tracing::warn!("unable to transmit supervision event to actor {}", actor_id);
+                            continue;
+                        };
+                    }
+                    // TODO: Actor supervision events need to be wired to the frontend.
+                    // TODO: This event should be handled by the proc mesh if unhandled by actor mesh.
                     break Some(ProcEvent::Crashed(*rank, actor_status.to_string()))
                 }
             }
@@ -487,9 +554,15 @@ impl SharedSpawnable for Arc<ProcMesh> {
     where
         A::Params: RemoteMessage,
     {
+        let (tx, rx) = mpsc::unbounded_channel::<ActorSupervisionEvent>();
+        {
+            // Instantiate supervision routing BEFORE spawning the actor mesh.
+            self.actor_event_router.insert(actor_name.to_string(), tx);
+        }
         Ok(RootActorMesh::new_shared(
             Arc::clone(self),
             actor_name.to_string(),
+            rx,
             ProcMesh::spawn_on_procs::<A>(&self.client, self.agents(), actor_name, params).await?,
         ))
     }
@@ -566,6 +639,7 @@ impl Mesh for SlicedProcMesh<'_> {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use hyperactor::actor::ActorStatus;
     use ndslice::shape;
 
     use super::*;
@@ -639,7 +713,7 @@ mod tests {
         let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
         let mut events = mesh.events().unwrap();
 
-        let actors = mesh.spawn::<TestActor>("failing", &()).await.unwrap();
+        let mut actors = mesh.spawn::<TestActor>("failing", &()).await.unwrap();
 
         actors
             .cast(
@@ -653,6 +727,11 @@ mod tests {
             ProcEvent::Crashed(0, reason) if reason.contains("failmonkey")
         );
 
+        let event = actors.next().await.unwrap();
+        assert_matches!(event.actor_status(), ActorStatus::Failed(_));
+        assert_eq!(event.actor_id().1, "failing".to_string());
+        assert_eq!(event.actor_id().2, 0);
+
         stop();
         assert_matches!(
             events.next().await.unwrap(),
@@ -664,5 +743,6 @@ mod tests {
         );
 
         assert!(events.next().await.is_none());
+        assert!(actors.next().await.is_none());
     }
 }

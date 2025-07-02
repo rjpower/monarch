@@ -14,20 +14,19 @@ use std::process::ExitCode;
 use anyhow::Result;
 use async_trait::async_trait;
 use hyperactor::Actor;
+use hyperactor::Bind;
+use hyperactor::Context;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::PortRef;
-use hyperactor::message::Bind;
-use hyperactor::message::Bindings;
-use hyperactor::message::IndexedErasedUnbound;
-use hyperactor::message::Unbind;
+use hyperactor::Unbind;
 use hyperactor_mesh::ProcMesh;
 use hyperactor_mesh::actor_mesh::ActorMesh;
-use hyperactor_mesh::actor_mesh::Cast;
 use hyperactor_mesh::alloc::AllocSpec;
 use hyperactor_mesh::alloc::Allocator;
 use hyperactor_mesh::alloc::LocalAllocator;
+use hyperactor_mesh::comm::multicast::CastInfo;
 use hyperactor_mesh::selection::dsl::all;
 use hyperactor_mesh::selection::dsl::true_;
 use hyperactor_mesh::shape;
@@ -47,9 +46,11 @@ enum ChopstickStatus {
 }
 
 #[derive(Debug)]
-#[hyperactor::export_spawn(
-    Cast<PhilosopherMessage>,
-    IndexedErasedUnbound<Cast<PhilosopherMessage>>,
+#[hyperactor::export(
+    spawn = true,
+    handlers = [
+        PhilosopherMessage { cast = true },
+    ],
 )]
 struct PhilosopherActor {
     /// Status of left and right chopsticks
@@ -63,38 +64,10 @@ struct PhilosopherActor {
 }
 
 /// Message from the waiter to a philosopher
-#[derive(Debug, Serialize, Deserialize, Named, Clone)]
+#[derive(Debug, Serialize, Deserialize, Named, Clone, Bind, Unbind)]
 enum PhilosopherMessage {
-    Start(PortRef<WaiterMessage>),
+    Start(#[binding(include)] PortRef<WaiterMessage>),
     GrantChopstick(usize),
-}
-
-// TODO(pzhang) replace the boilerplate Bind/Unbind impls with a macro.
-impl Bind for PhilosopherMessage {
-    fn bind(mut self, bindings: &Bindings) -> anyhow::Result<Self> {
-        match &mut self {
-            Self::Start(port) => {
-                let mut_ports = [port.port_id_mut()];
-                bindings.rebind(mut_ports.into_iter())?;
-            }
-            Self::GrantChopstick(_) => {}
-        }
-        Ok(self)
-    }
-}
-
-impl Unbind for PhilosopherMessage {
-    fn bindings(&self) -> anyhow::Result<Bindings> {
-        let mut bindings = Bindings::default();
-        match self {
-            Self::Start(port) => {
-                let ports = [port.port_id()];
-                bindings.insert(ports)?;
-            }
-            Self::GrantChopstick(_) => {}
-        }
-        Ok(bindings)
-    }
 }
 
 /// Message from a philosopher to the waiter
@@ -163,13 +136,14 @@ impl PhilosopherActor {
 }
 
 #[async_trait]
-impl Handler<Cast<PhilosopherMessage>> for PhilosopherActor {
+impl Handler<PhilosopherMessage> for PhilosopherActor {
     async fn handle(
         &mut self,
-        this: &Instance<Self>,
-        Cast { rank, message, .. }: Cast<PhilosopherMessage>,
+        this: &Context<Self>,
+        message: PhilosopherMessage,
     ) -> Result<(), anyhow::Error> {
-        self.rank = *rank;
+        let (rank, _) = this.cast_info()?;
+        self.rank = rank;
         match message {
             PhilosopherMessage::Start(waiter) => {
                 self.waiter.set(waiter)?;

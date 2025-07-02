@@ -9,7 +9,10 @@
 import argparse
 import functools
 import inspect
+import logging
 import os
+import time
+from datetime import timedelta
 from typing import Any, Callable, Mapping, Optional, Union
 
 from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/config/meta:defaults
@@ -18,11 +21,12 @@ from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/con
 )
 
 from monarch.tools.mesh_spec import mesh_spec_from_metadata, ServerSpec
-
 from torchx.runner import Runner
-from torchx.specs import AppDef, AppDryRunInfo, CfgVal
+from torchx.specs import AppDef, AppDryRunInfo, AppState, CfgVal, parse_app_handle
 from torchx.specs.builders import parse_args
 from torchx.util.types import decode, decode_optional
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 def torchx_runner() -> Runner:
@@ -80,13 +84,9 @@ def component_args_from_cli(
 
 def create(
     config: Config,
-    component_fn: Optional[Callable[..., AppDef]] = None,
-) -> Callable[..., Union[str, AppDryRunInfo]]:
+    appdef: AppDef,
+) -> Union[str, AppDryRunInfo]:
     """Creates a monarch server by submitting it as a job to the target scheduler.
-
-    Note that this function returns a `Callable` that has to be called with the
-    same arguments that one would call the `component_fn` to actually submit
-    the job that runs the monarch server.
 
     Usage:
 
@@ -95,6 +95,8 @@ def create(
         from monarch.tools.config import defaults
 
         config = defaults.config(scheduler="slurm")
+        appdef = defaults.component_fn(scheduler=config.scheduler)()
+
         config.scheduler_args.update(
             {
                 "partition": "prod",
@@ -104,7 +106,7 @@ def create(
         )
         config.dryrun = True
 
-        create(default_config)(host_type="gpu.medium", num_hosts=4)
+        create(config, appdef)
 
 
     Args:
@@ -116,33 +118,26 @@ def create(
     """
     scheduler: str = config.scheduler
     cfg: Mapping[str, CfgVal] = config.scheduler_args
-    component: Callable[..., AppDef] = component_fn or defaults.component_fn(scheduler)
 
-    @functools.wraps(component)
-    def _run(*args: Any, **kwargs: Any) -> Union[str, AppDryRunInfo]:
-        # for logging call-site context in application metadata
-        os.environ["TORCHX_CONTEXT_NAME"] = os.getenv("TORCHX_CONTEXT_NAME", "monarch")
+    # for logging call-site context in application metadata
+    os.environ["TORCHX_CONTEXT_NAME"] = os.getenv("TORCHX_CONTEXT_NAME", "monarch")
 
-        appdef = component(*args, **kwargs)
+    with torchx_runner() as runner:
+        info = runner.dryrun(appdef, scheduler, cfg, config.workspace)
 
-        with torchx_runner() as runner:
-            info = runner.dryrun(appdef, scheduler, cfg, config.workspace)
+        info_json_fmt = AppDryRunInfo(
+            info.request,
+            fmt=defaults.dryrun_info_formatter(info),
+        )
+        info_json_fmt._app = info._app
+        info_json_fmt._cfg = info._cfg
+        info_json_fmt._scheduler = info._scheduler
 
-            info_json_fmt = AppDryRunInfo(
-                info.request,
-                fmt=defaults.dryrun_info_formatter(info),
-            )
-            info_json_fmt._app = info._app
-            info_json_fmt._cfg = info._cfg
-            info_json_fmt._scheduler = info._scheduler
-
-            if config.dryrun:
-                return info_json_fmt
-            else:
-                server_handle = runner.schedule(info)
-                return server_handle
-
-    return _run
+        if config.dryrun:
+            return info_json_fmt
+        else:
+            server_handle = runner.schedule(info)
+            return server_handle
 
 
 def info(server_handle: str) -> Optional[ServerSpec]:
@@ -165,13 +160,141 @@ def info(server_handle: str) -> Optional[ServerSpec]:
         if appdef is None:
             return None
 
+    # host status grouped by mesh (role) names
+    replica_status = {r.role: r.replicas for r in status.roles}
+
     mesh_specs = []
     for role in appdef.roles:
         spec = mesh_spec_from_metadata(appdef, role.name)
         assert spec is not None, "cannot be 'None' since we iterate over appdef's roles"
+
+        # null-guard since some schedulers do not fill replica_status
+        if host_status := replica_status.get(role.name):
+            spec.hostnames = [h.hostname for h in host_status]
+
         mesh_specs.append(spec)
 
-    return ServerSpec(name=appdef.name, state=status.state, meshes=mesh_specs)
+    scheduler, namespace, _ = parse_app_handle(server_handle)
+    return ServerSpec(
+        name=appdef.name,
+        state=status.state,
+        meshes=mesh_specs,
+        scheduler=scheduler,
+        namespace=namespace,
+    )
+
+
+_5_SECONDS = timedelta(seconds=5)
+
+
+async def server_ready(
+    server_handle: str,
+    check_interval: timedelta = _5_SECONDS,
+) -> Optional[ServerSpec]:
+    """Waits until the server's job is in RUNNING state to returns the server spec.
+    Returns `None` if the server does not exist.
+
+    NOTE: Certain fields such as `hostnames` is only filled (and valid) when the server is RUNNING.
+
+    Usage:
+
+    .. code-block:: python
+
+        server_info = await server_ready("slurm:///123")
+        if not server_info:
+            print(f"Job does not exist")
+        else:
+            if server_info.is_running:
+                for mesh in server_info.meshes:
+                    connect_to(mesh.hostnames)
+            else:
+                print(f"Job in {server_info.state} state. Hostnames are not available")
+
+    """
+
+    while True:
+        server_spec = info(server_handle)
+
+        if not server_spec:  # server not found
+            return None
+
+        if server_spec.state <= AppState.PENDING:  # UNSUBMITTED or SUBMITTED or PENDING
+            # NOTE: TorchX currently does not have async APIs so need to loop-on-interval
+            # TODO maybe inverse exponential backoff instead of constant interval?
+            check_interval_seconds = check_interval.total_seconds()
+            logger.info(
+                "waiting for %s to be %s (current: %s), will check again in %g seconds...",
+                server_handle,
+                AppState.RUNNING,
+                server_spec.state,
+                check_interval_seconds,
+            )
+            time.sleep(check_interval_seconds)
+            continue
+        else:
+            return server_spec
+
+
+async def get_or_create(
+    name: str,
+    config: Config,
+    appdef: AppDef,
+    check_interval: timedelta = _5_SECONDS,
+) -> ServerSpec:
+    """Waits for the server called `name` in the scheduler specified in the `config`
+    to be ready (e.g. RUNNING). If the server is not found then this function creates one
+    per the `appdef` spec, and waits for the server to be ready before returning.
+
+    Usage:
+
+    .. code-block:: python
+
+        import getpass
+        from monarch.tools.config import defaults
+
+        USER = getpass.getuser()
+        config = defaults.config(scheduler)
+        appdef = defaults.component_fn(config.scheduler)()
+
+        server_handle = get_or_create(f"{USER}_monarch", config, appdef)
+        server_info = info(server_handle)
+
+    Returns: A `ServerSpec` containing information about either the existing or the newly
+        created server.
+
+    """
+    assert not config.dryrun, "dryrun is not supported for get_or_create(), for dryrun use the create() API instead"
+
+    server_handle = f"{config.scheduler}:///{name}"
+    server_info = await server_ready(server_handle, check_interval)
+
+    if not server_info or not server_info.is_running:  # then create one
+        logger.info(
+            "no existing RUNNING server `%s` creating new one...", server_handle
+        )
+
+        # no dryrun (see assertion above) support so will always be a handle (str)
+        new_server_handle = str(create(config, appdef))
+
+        logger.info(f"created new `{new_server_handle}` waiting for it to be ready...")
+
+        server_info = await server_ready(new_server_handle, check_interval)
+
+        if not server_info:
+            raise RuntimeError(
+                f"the new server `{new_server_handle}` went missing (should never happen)"
+            )
+
+        if not server_info.is_running:
+            raise RuntimeError(
+                f"the new server `{new_server_handle}` has {server_info.state}"
+            )
+
+        logger.info(f"server `{new_server_handle}` is: {server_info.state}")
+        return server_info
+    else:
+        logger.info("found existing RUNNING server `%s`", server_handle)
+        return server_info
 
 
 def kill(server_handle: str) -> None:

@@ -529,6 +529,7 @@ impl RemoteProcessAlloc {
             let watcher = WatchStream::new(tx_status);
             tx_watchers.push((watcher, host.id.clone()));
         }
+        assert!(!tx_watchers.is_empty());
         let tx = self.comm_watcher_tx.clone();
         tokio::spawn(async move {
             loop {
@@ -558,6 +559,10 @@ impl RemoteProcessAlloc {
                             break;
                         }
                         tx_watchers.remove(index);
+                        if tx_watchers.is_empty() {
+                            // All of the statuses have been closed, exit the loop.
+                            break;
+                        }
                     }
                 }
             }
@@ -579,6 +584,9 @@ impl RemoteProcessAlloc {
             .initialize_alloc()
             .await
             .context("alloc initializer error")?;
+        if hosts.is_empty() {
+            anyhow::bail!("Initializer returned empty list of hosts");
+        }
         // prepare a list of host names in this allocation to be sent
         // to remote allocators.
         let hostnames: Vec<_> = hosts.iter().map(|e| e.hostname.clone()).collect();
@@ -786,7 +794,7 @@ impl Alloc for RemoteProcessAlloc {
             if let Err(e) = self.ensure_started().await {
                 break Some(ProcState::Failed {
                     world_id: self.world_id.clone(),
-                    description: format!("failed to ensure started: {}", e),
+                    description: format!("failed to ensure started: {:#}", e),
                 });
             }
 
@@ -928,29 +936,24 @@ impl Alloc for RemoteProcessAlloc {
             }
 
             break match update {
-                Some(ProcState::Created { proc_id, coords }) => {
-                    match self.project_proc_into_global_shape(&proc_id, &coords) {
-                        Ok(global_coords) => {
-                            tracing::debug!(
-                                "reprojected coords: {:?} -> {:?}",
-                                coords,
-                                global_coords
-                            );
-                            Some(ProcState::Created {
-                                proc_id,
-                                coords: global_coords,
-                            })
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "failed to project coords for proc: {}: {}",
-                                proc_id,
-                                e
-                            );
-                            None
-                        }
+                Some(ProcState::Created {
+                    proc_id,
+                    coords,
+                    pid,
+                }) => match self.project_proc_into_global_shape(&proc_id, &coords) {
+                    Ok(global_coords) => {
+                        tracing::debug!("reprojected coords: {:?} -> {:?}", coords, global_coords);
+                        Some(ProcState::Created {
+                            proc_id,
+                            coords: global_coords,
+                            pid,
+                        })
                     }
-                }
+                    Err(e) => {
+                        tracing::error!("failed to project coords for proc: {}: {}", proc_id, e);
+                        None
+                    }
+                },
 
                 Some(ProcState::Failed {
                     world_id: _,
@@ -996,6 +999,7 @@ mod test {
 
     use hyperactor::ActorRef;
     use hyperactor::channel::ChannelRx;
+    use hyperactor::clock::ClockKind;
     use hyperactor::id;
     use ndslice::shape;
     use tokio::sync::oneshot;
@@ -1044,16 +1048,19 @@ mod test {
         }
     }
 
-    fn set_procstate_execptations(alloc: &mut MockAlloc, shape: Shape) {
+    fn set_procstate_expectations(alloc: &mut MockAlloc, shape: Shape) {
         let alloc_len = shape.slice().len();
         alloc.expect_shape().return_const(shape.clone());
         for i in 0..alloc_len {
             let proc_id = format!("test[{}]", i).parse().unwrap();
             let coords = shape.slice().coordinates(i).unwrap();
-            alloc
-                .expect_next()
-                .times(1)
-                .return_once(|| Some(ProcState::Created { proc_id, coords }));
+            alloc.expect_next().times(1).return_once(|| {
+                Some(ProcState::Created {
+                    proc_id,
+                    coords,
+                    pid: 0,
+                })
+            });
         }
         for i in 0..alloc_len {
             let proc_id = format!("test[{}]", i).parse().unwrap();
@@ -1081,7 +1088,7 @@ mod test {
 
     #[timed_test::async_timed_test(timeout_secs = 5)]
     async fn test_simple() {
-        hyperactor_telemetry::initialize_logging();
+        hyperactor_telemetry::initialize_logging(ClockKind::default());
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
         let bootstrap_addr = ChannelAddr::any(ChannelTransport::Unix);
         let (_, mut rx) = channel::serve(bootstrap_addr.clone()).await.unwrap();
@@ -1099,7 +1106,7 @@ mod test {
         alloc.expect_world_id().return_const(world_id.clone());
         alloc.expect_shape().return_const(spec.shape.clone());
 
-        set_procstate_execptations(&mut alloc, spec.shape.clone());
+        set_procstate_expectations(&mut alloc, spec.shape.clone());
 
         // final none
         alloc.expect_next().return_const(None);
@@ -1146,7 +1153,11 @@ mod test {
         while i < alloc_len {
             let m = rx.recv().await.unwrap();
             match m {
-                RemoteProcessProcStateMessage::Update(ProcState::Created { proc_id, coords }) => {
+                RemoteProcessProcStateMessage::Update(ProcState::Created {
+                    proc_id,
+                    coords,
+                    ..
+                }) => {
                     let expected_proc_id = format!("test[{}]", i).parse().unwrap();
                     let expected_coords = spec.shape.slice().coordinates(i).unwrap();
                     assert_eq!(proc_id, expected_proc_id);
@@ -1215,7 +1226,7 @@ mod test {
 
     #[timed_test::async_timed_test(timeout_secs = 15)]
     async fn test_normal_stop() {
-        hyperactor_telemetry::initialize_logging();
+        hyperactor_telemetry::initialize_logging(ClockKind::default());
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
         let bootstrap_addr = ChannelAddr::any(ChannelTransport::Unix);
         let (_, mut rx) = channel::serve(bootstrap_addr.clone()).await.unwrap();
@@ -1238,7 +1249,7 @@ mod test {
         alloc.alloc.expect_world_id().return_const(world_id.clone());
         alloc.alloc.expect_shape().return_const(spec.shape.clone());
 
-        set_procstate_execptations(&mut alloc.alloc, spec.shape.clone());
+        set_procstate_expectations(&mut alloc.alloc, spec.shape.clone());
 
         alloc.alloc.expect_next().return_const(None);
         alloc.alloc.expect_stop().times(1).return_once(|| Ok(()));
@@ -1289,7 +1300,7 @@ mod test {
 
     #[timed_test::async_timed_test(timeout_secs = 15)]
     async fn test_realloc() {
-        hyperactor_telemetry::initialize_logging();
+        hyperactor_telemetry::initialize_logging(ClockKind::default());
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
         let bootstrap_addr = ChannelAddr::any(ChannelTransport::Unix);
         let (_, mut rx) = channel::serve(bootstrap_addr.clone()).await.unwrap();
@@ -1315,7 +1326,7 @@ mod test {
             .return_const(world_id.clone());
         alloc1.alloc.expect_shape().return_const(spec.shape.clone());
 
-        set_procstate_execptations(&mut alloc1.alloc, spec.shape.clone());
+        set_procstate_expectations(&mut alloc1.alloc, spec.shape.clone());
         alloc1.alloc.expect_next().return_const(None);
         alloc1.alloc.expect_stop().times(1).return_once(|| Ok(()));
         // second allocation
@@ -1330,7 +1341,7 @@ mod test {
             .expect_world_id()
             .return_const(world_id.clone());
         alloc2.alloc.expect_shape().return_const(spec.shape.clone());
-        set_procstate_execptations(&mut alloc2.alloc, spec.shape.clone());
+        set_procstate_expectations(&mut alloc2.alloc, spec.shape.clone());
         alloc2.alloc.expect_next().return_const(None);
         alloc2.alloc.expect_stop().times(1).return_once(|| Ok(()));
 
@@ -1412,7 +1423,7 @@ mod test {
             Duration::from_secs(1),
         );
 
-        hyperactor_telemetry::initialize_logging();
+        hyperactor_telemetry::initialize_logging(ClockKind::default());
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
         let bootstrap_addr = ChannelAddr::any(ChannelTransport::Unix);
         let (_, mut rx) = channel::serve(bootstrap_addr.clone()).await.unwrap();
@@ -1435,7 +1446,7 @@ mod test {
         alloc.alloc.expect_world_id().return_const(world_id.clone());
         alloc.alloc.expect_shape().return_const(spec.shape.clone());
 
-        set_procstate_execptations(&mut alloc.alloc, spec.shape.clone());
+        set_procstate_expectations(&mut alloc.alloc, spec.shape.clone());
 
         alloc.alloc.expect_next().return_const(None);
         // we expect a stop due to the failure
@@ -1494,7 +1505,7 @@ mod test {
 
     #[timed_test::async_timed_test(timeout_secs = 15)]
     async fn test_inner_alloc_failure() {
-        hyperactor_telemetry::initialize_logging();
+        hyperactor_telemetry::initialize_logging(ClockKind::default());
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
         let bootstrap_addr = ChannelAddr::any(ChannelTransport::Unix);
         let (_, mut rx) = channel::serve(bootstrap_addr.clone()).await.unwrap();
@@ -1576,6 +1587,7 @@ mod test {
 
 #[cfg(test)]
 mod test_alloc {
+    use hyperactor::clock::ClockKind;
     use ndslice::shape;
     use timed_test::async_timed_test;
 
@@ -1589,7 +1601,7 @@ mod test_alloc {
             hyperactor::config::MESSAGE_DELIVERY_TIMEOUT,
             Duration::from_secs(1),
         );
-        hyperactor_telemetry::initialize_logging();
+        hyperactor_telemetry::initialize_logging(ClockKind::default());
 
         let spec = AllocSpec {
             shape: shape!(host = 2, gpu = 2),
@@ -1650,7 +1662,9 @@ mod test_alloc {
             let proc_state = alloc.next().await.unwrap();
             tracing::debug!("test got message: {:?}", proc_state);
             match proc_state {
-                ProcState::Created { proc_id, coords } => {
+                ProcState::Created {
+                    proc_id, coords, ..
+                } => {
                     procs.insert(proc_id);
                     proc_coords.insert(coords);
                 }
@@ -1710,7 +1724,7 @@ mod test_alloc {
             hyperactor::config::MESSAGE_DELIVERY_TIMEOUT,
             Duration::from_secs(1),
         );
-        hyperactor_telemetry::initialize_logging();
+        hyperactor_telemetry::initialize_logging(ClockKind::default());
 
         let spec = AllocSpec {
             shape: shape!(host = 2, gpu = 2),
@@ -1831,7 +1845,7 @@ mod test_alloc {
         unsafe {
             std::env::set_var("MONARCH_MESSAGE_DELIVERY_TIMEOUT_SECS", "1");
         }
-        hyperactor_telemetry::initialize_logging();
+        hyperactor_telemetry::initialize_logging(ClockKind::default());
 
         let spec = AllocSpec {
             shape: shape!(host = 2, gpu = 2),
@@ -1894,7 +1908,9 @@ mod test_alloc {
             let proc_state = alloc.next().await.unwrap();
             tracing::debug!("test got message: {:?}", proc_state);
             match proc_state {
-                ProcState::Created { proc_id, coords } => {
+                ProcState::Created {
+                    proc_id, coords, ..
+                } => {
                     procs.insert(proc_id);
                     proc_coords.insert(coords);
                 }

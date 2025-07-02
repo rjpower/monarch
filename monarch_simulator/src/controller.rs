@@ -15,8 +15,10 @@ use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::ActorId;
 use hyperactor::ActorRef;
+use hyperactor::Context;
 use hyperactor::Named;
 use hyperactor::actor::ActorHandle;
+use hyperactor::attrs::Attrs;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::data::Serialized;
 use hyperactor_multiprocess::proc_actor::ProcActor;
@@ -36,7 +38,12 @@ use tokio::sync::OnceCell;
 use crate::worker::WorkerActor;
 
 #[derive(Debug)]
-#[hyperactor::export_spawn(ControllerMessage)]
+#[hyperactor::export(
+    spawn = true,
+    handlers = [
+        ControllerMessage,
+    ],
+)]
 pub struct SimControllerActor {
     client_actor_ref: OnceCell<ActorRef<ClientActor>>,
     worker_actor_ref: ActorRef<WorkerActor>,
@@ -78,7 +85,7 @@ impl Actor for SimControllerActor {
 impl ControllerMessageHandler for SimControllerActor {
     async fn attach(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
         client_actor: ActorRef<ClientActor>,
     ) -> Result<(), anyhow::Error> {
         self.client_actor_ref
@@ -88,7 +95,7 @@ impl ControllerMessageHandler for SimControllerActor {
 
     async fn node(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
         _seq: Seq,
         _uses: Vec<Ref>,
         _defs: Vec<Ref>,
@@ -99,20 +106,20 @@ impl ControllerMessageHandler for SimControllerActor {
 
     async fn send(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         ranks: Ranks,
         message: Serialized,
     ) -> Result<(), anyhow::Error> {
         tracing::info!("controller send to ranks {:?}: {}", ranks, message);
         self.worker_actor_ref
             .port::<WorkerMessage>()
-            .send_serialized(this, message);
+            .send_serialized(this, message, Attrs::new());
         Ok(())
     }
 
     async fn remote_function_failed(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
         _seq: Seq,
         _error: WorkerError,
     ) -> Result<(), anyhow::Error> {
@@ -121,7 +128,7 @@ impl ControllerMessageHandler for SimControllerActor {
 
     async fn status(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         seq: Seq,
         _worker_actor_id: ActorId,
         controller: bool,
@@ -146,7 +153,7 @@ impl ControllerMessageHandler for SimControllerActor {
 
     async fn fetch_result(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
         seq: Seq,
         result: Result<Serialized, WorkerError>,
     ) -> Result<(), anyhow::Error> {
@@ -160,16 +167,13 @@ impl ControllerMessageHandler for SimControllerActor {
         Ok(())
     }
 
-    async fn check_supervision(
-        &mut self,
-        _this: &hyperactor::Instance<Self>,
-    ) -> Result<(), anyhow::Error> {
+    async fn check_supervision(&mut self, _this: &Context<Self>) -> Result<(), anyhow::Error> {
         Ok(())
     }
 
     async fn drop_refs(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
         _refs: Vec<Ref>,
     ) -> Result<(), anyhow::Error> {
         Ok(())
@@ -177,7 +181,7 @@ impl ControllerMessageHandler for SimControllerActor {
 
     async fn debugger_message(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
         _debugger_actor_id: ActorId,
         _action: DebuggerAction,
     ) -> Result<(), anyhow::Error> {
@@ -187,7 +191,7 @@ impl ControllerMessageHandler for SimControllerActor {
     #[cfg(test)]
     async fn get_first_incomplete_seqs_unit_tests_only(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
     ) -> Result<Vec<Seq>, anyhow::Error> {
         Ok(vec![])
     }
@@ -195,7 +199,7 @@ impl ControllerMessageHandler for SimControllerActor {
     #[cfg(not(test))]
     async fn get_first_incomplete_seqs_unit_tests_only(
         &mut self,
-        _this: &hyperactor::Instance<Self>,
+        _this: &Context<Self>,
     ) -> Result<Vec<Seq>, anyhow::Error> {
         unimplemented!("get_first_incomplete_seqs_unit_tests_only is only for unit tests")
     }
