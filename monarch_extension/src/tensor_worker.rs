@@ -6,8 +6,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#![cfg(feature = "tensor_engine")]
-
 /// These are the worker messages exposed through pyo3 to python.
 /// The actual documentation of the messages can be found in [`monarch_messages::worker::WorkerMessage`]
 /// This split is currently needed to customize the constructors for the messages and due to the
@@ -36,6 +34,7 @@ use monarch_tensor_worker::bootstrap::bootstrap_pipe;
 use monarch_tensor_worker::bootstrap::bootstrap_worker_proc;
 use monarch_tensor_worker::bootstrap::worker_server;
 use monarch_types::TryIntoPyObjectUnsafe;
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -1269,7 +1268,7 @@ fn wire_values_to_args(py: Python<'_>, args: Vec<WireValue>) -> PyResult<PyObjec
 }
 
 fn wire_values_to_kwargs(py: Python<'_>, kwargs: HashMap<String, WireValue>) -> PyResult<PyObject> {
-    Ok(kwargs
+    kwargs
         .into_iter()
         .map(|(k, v)| {
             // SAFETY: This is ok as its used just to return the wire value back to the user and not
@@ -1284,7 +1283,7 @@ fn wire_values_to_kwargs(py: Python<'_>, kwargs: HashMap<String, WireValue>) -> 
             }))
         })
         .collect::<Result<HashMap<_, _>, PyErr>>()?
-        .to_object(py))
+        .into_py_any(py)
 }
 
 // TODO: This can become an impl on WorkerMessage once we adjust crate split with monarch_messages
@@ -1292,86 +1291,87 @@ pub(crate) fn worker_message_to_py(py: Python<'_>, message: &WorkerMessage) -> P
     let initializer = PyClassInitializer::from(PyWorkerMessage {
         message: message.clone(),
     });
-    let initializer = match message {
+    match message {
         WorkerMessage::BackendNetworkInit { .. } => {
-            Py::new(py, initializer.add_subclass(BackendNetworkInit {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(BackendNetworkInit {}))?.into_py_any(py)
         }
         WorkerMessage::BackendNetworkPointToPointInit { .. } => Py::new(
             py,
             initializer.add_subclass(BackendNetworkPointToPointInit {}),
         )?
-        .to_object(py),
+        .into_py_any(py),
         WorkerMessage::CallFunction { .. } => {
-            Py::new(py, initializer.add_subclass(CallFunction {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(CallFunction {}))?.into_py_any(py)
         }
         WorkerMessage::CreateStream { .. } => {
-            Py::new(py, initializer.add_subclass(CreateStream {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(CreateStream {}))?.into_py_any(py)
         }
         WorkerMessage::CreateRemoteProcessGroup { .. } => {
-            Py::new(py, initializer.add_subclass(CreateRemoteProcessGroup {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(CreateRemoteProcessGroup {}))?.into_py_any(py)
         }
         WorkerMessage::CreateDeviceMesh { .. } => {
-            Py::new(py, initializer.add_subclass(CreateDeviceMesh {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(CreateDeviceMesh {}))?.into_py_any(py)
         }
         WorkerMessage::BorrowCreate { .. } => {
-            Py::new(py, initializer.add_subclass(BorrowCreate {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(BorrowCreate {}))?.into_py_any(py)
         }
         WorkerMessage::BorrowFirstUse { .. } => {
-            Py::new(py, initializer.add_subclass(BorrowFirstUse {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(BorrowFirstUse {}))?.into_py_any(py)
         }
         WorkerMessage::BorrowLastUse { .. } => {
-            Py::new(py, initializer.add_subclass(BorrowLastUse {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(BorrowLastUse {}))?.into_py_any(py)
         }
         WorkerMessage::BorrowDrop { .. } => {
-            Py::new(py, initializer.add_subclass(BorrowDrop {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(BorrowDrop {}))?.into_py_any(py)
         }
         WorkerMessage::DeleteRefs { .. } => {
-            Py::new(py, initializer.add_subclass(DeleteRefs {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(DeleteRefs {}))?.into_py_any(py)
         }
         WorkerMessage::RequestStatus { .. } => {
-            Py::new(py, initializer.add_subclass(RequestStatus {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(RequestStatus {}))?.into_py_any(py)
         }
         WorkerMessage::Reduce { .. } => {
-            Py::new(py, initializer.add_subclass(Reduce {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(Reduce {}))?.into_py_any(py)
         }
         WorkerMessage::SendTensor { .. } => {
-            Py::new(py, initializer.add_subclass(SendTensor {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(SendTensor {}))?.into_py_any(py)
         }
         WorkerMessage::CreatePipe { .. } => {
-            Py::new(py, initializer.add_subclass(CreatePipe {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(CreatePipe {}))?.into_py_any(py)
         }
         WorkerMessage::SendValue { .. } => {
-            Py::new(py, initializer.add_subclass(SendValue {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(SendValue {}))?.into_py_any(py)
         }
         WorkerMessage::PipeRecv { .. } => {
-            Py::new(py, initializer.add_subclass(PipeRecv {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(PipeRecv {}))?.into_py_any(py)
         }
         WorkerMessage::SplitComm { .. } => {
-            Py::new(py, initializer.add_subclass(SplitComm {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(SplitComm {}))?.into_py_any(py)
         }
         WorkerMessage::SplitCommForProcessGroup { .. } => {
-            Py::new(py, initializer.add_subclass(SplitCommForProcessGroup {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(SplitCommForProcessGroup {}))?.into_py_any(py)
         }
-        WorkerMessage::Exit { .. } => Py::new(py, initializer.add_subclass(Exit {}))?.to_object(py),
+        WorkerMessage::Exit { .. } => {
+            Py::new(py, initializer.add_subclass(Exit {}))?.into_py_any(py)
+        }
         WorkerMessage::CommandGroup { .. } => {
-            Py::new(py, initializer.add_subclass(CommandGroup {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(CommandGroup {}))?.into_py_any(py)
         }
         WorkerMessage::DefineRecording { .. } => {
-            Py::new(py, initializer.add_subclass(DefineRecording {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(DefineRecording {}))?.into_py_any(py)
         }
         WorkerMessage::RecordingFormal { .. } => {
-            Py::new(py, initializer.add_subclass(RecordingFormal {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(RecordingFormal {}))?.into_py_any(py)
         }
         WorkerMessage::RecordingResult { .. } => {
-            Py::new(py, initializer.add_subclass(RecordingResult {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(RecordingResult {}))?.into_py_any(py)
         }
         WorkerMessage::CallRecording { .. } => {
-            Py::new(py, initializer.add_subclass(CallRecording {}))?.to_object(py)
+            Py::new(py, initializer.add_subclass(CallRecording {}))?.into_py_any(py)
         }
         WorkerMessage::SetRefUnitTestsOnly { .. } => unimplemented!(),
         WorkerMessage::GetRefUnitTestsOnly { .. } => unimplemented!(),
-    };
-    Ok(initializer)
+    }
 }
 
 /// The Python main entry point of the monarch worker from Python. It allows to bundle Python dependencies

@@ -9,13 +9,16 @@
 //! This crate provides hyperactor's mesh abstractions.
 
 #![feature(assert_matches)]
+#![feature(exit_status_error)]
 #![feature(impl_trait_in_bindings)]
 
 pub mod actor_mesh;
 pub mod alloc;
 mod assign;
 pub mod bootstrap;
+pub mod code_sync;
 pub mod comm;
+pub mod connect;
 pub mod mesh;
 pub mod mesh_selection;
 mod metrics;
@@ -29,6 +32,7 @@ pub use actor_mesh::SlicedActorMesh;
 pub use bootstrap::bootstrap;
 pub use bootstrap::bootstrap_or_die;
 pub use comm::CommActor;
+pub use dashmap;
 pub use hyperactor_mesh_macros::sel;
 pub use mesh::Mesh;
 pub use ndslice::sel_from_shape;

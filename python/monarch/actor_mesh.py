@@ -48,8 +48,9 @@ from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
     OncePortReceiver,
-    PortId,
+    OncePortRef,
     PortReceiver as HyPortReceiver,
+    PortRef,
 )
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
@@ -227,6 +228,8 @@ class Endpoint(Generic[P, R]):
 
         Load balanced RPC-style entrypoint for request/response messaging.
         """
+        p: Port[R]
+        r: PortReceiver[R]
         p, r = port(self, once=True)
         # pyre-ignore
         send(self, args, kwargs, port=p, selection="choose")
@@ -285,11 +288,11 @@ class Endpoint(Generic[P, R]):
 
     def broadcast(self, *args: P.args, **kwargs: P.kwargs) -> None:
         """
-        Broadcast to all actors and wait for each to acknowledge receipt.
+        Fire-and-forget broadcast to all actors without waiting for actors to
+        acknowledge receipt.
 
-        This behaves like `cast`, but ensures that each actor has received and
-        processed the message by awaiting a response from each one. Does not
-        return any results.
+        In other words, the return of this method does not guarrantee the
+        delivery of the message.
         """
         # pyre-ignore
         send(self, args, kwargs)
@@ -316,6 +319,10 @@ class Accumulator(Generic[P, R, A]):
 
 
 class ValueMesh(MeshTrait, Generic[R]):
+    """
+    Container of return values, indexed by rank.
+    """
+
     def __init__(self, shape: Shape, values: List[R]) -> None:
         self._shape = shape
         self._values = values
@@ -336,6 +343,9 @@ class ValueMesh(MeshTrait, Generic[R]):
 
     def __len__(self) -> int:
         return len(self._shape)
+
+    def __repr__(self) -> str:
+        return f"ValueMesh({self._shape})"
 
     @property
     def _ndslice(self) -> NDSlice:
@@ -362,7 +372,7 @@ def send(
     message = PythonMessage(
         endpoint._name,
         _pickle((args, kwargs)),
-        None if port is None else port._port,
+        None if port is None else port._port_ref,
         None,
     )
     endpoint._actor_mesh.cast(message, selection)
@@ -386,14 +396,16 @@ def endpoint(
 
 
 class Port(Generic[R]):
-    def __init__(self, port: PortId, mailbox: Mailbox, rank: Optional[int]) -> None:
-        self._port = port
+    def __init__(
+        self, port_ref: PortRef | OncePortRef, mailbox: Mailbox, rank: Optional[int]
+    ) -> None:
+        self._port_ref = port_ref
         self._mailbox = mailbox
         self._rank = rank
 
     def send(self, method: str, obj: R) -> None:
-        self._mailbox.post(
-            self._port,
+        self._port_ref.send(
+            self._mailbox,
             PythonMessage(method, _pickle(obj), None, self._rank),
         )
 
@@ -407,8 +419,8 @@ def port(
     handle, receiver = (
         endpoint._mailbox.open_once_port() if once else endpoint._mailbox.open_port()
     )
-    port_id: PortId = handle.bind()
-    return Port(port_id, endpoint._mailbox, rank=None), PortReceiver(
+    port_ref: PortRef | OncePortRef = handle.bind()
+    return Port(port_ref, endpoint._mailbox, rank=None), PortReceiver(
         endpoint._mailbox, receiver
     )
 
@@ -508,6 +520,23 @@ class _Actor:
                 self.instance = Class(*args, **kwargs)
                 return None
 
+            if self.instance is None:
+                # This could happen because of the following reasons. Both
+                # indicates a possible bug in the framework:
+                # 1. the execution of the previous message for "__init__" failed,
+                #    but that error is not surfaced to the caller.
+                #      - TODO(T229200522): there is a known bug. fix it.
+                # 2. this message is delivered to this actor before the previous
+                #    message of "__init__" is delivered. Out-of-order delivery
+                #    should never happen. It indicates either a bug in the
+                #    message delivery mechanism, or the framework accidentally
+                #    mixed the usage of cast and direct send.
+                raise AssertionError(
+                    f"""
+                    actor object is missing when executing method {message.method}
+                    on actor {mailbox.actor_id}
+                    """
+                )
             the_method = getattr(self.instance, message.method)._method
 
             if inspect.iscoroutinefunction(the_method):
@@ -614,7 +643,7 @@ class Actor(MeshTrait):
         )
 
 
-class ActorMeshRef(MeshTrait):
+class ActorMeshRef(MeshTrait, Generic[T]):
     def __init__(
         self, Class: Type[T], actor_mesh_ref: _ActorMeshRefImpl, mailbox: Mailbox
     ) -> None:
@@ -701,6 +730,9 @@ class ActorMeshRef(MeshTrait):
             _ActorMeshRefImpl.from_actor_ref_with_shape(self._actor_mesh_ref, shape),
             self._mailbox,
         )
+
+    def __repr__(self) -> str:
+        return f"ActorMeshRef(class={self._class}, shape={self._actor_mesh_ref._shape})"
 
 
 class ActorError(Exception):

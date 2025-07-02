@@ -20,14 +20,12 @@ use derive_more::From;
 use derive_more::TryInto;
 use enum_as_inner::EnumAsInner;
 use hyperactor::ActorRef;
+use hyperactor::Bind;
 use hyperactor::HandleClient;
 use hyperactor::Handler;
 use hyperactor::Named;
 use hyperactor::RefClient;
-use hyperactor::message::Bind;
-use hyperactor::message::Bindings;
-use hyperactor::message::IndexedErasedUnbound;
-use hyperactor::message::Unbind;
+use hyperactor::Unbind;
 use hyperactor::reference::ActorId;
 use monarch_types::SerializablePyErr;
 use ndslice::Slice;
@@ -453,12 +451,12 @@ impl Factory {
 
     #[getter]
     fn dtype<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
-        Ok(self.dtype.into_py(py).into_bound(py))
+        self.dtype.into_pyobject(py)
     }
 
     #[getter]
     fn layout<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
-        Ok(self.layout.into_py(py).into_bound(py))
+        self.layout.into_pyobject(py)
     }
 
     #[getter]
@@ -564,7 +562,9 @@ impl From<Arc<CallFunctionError>> for ValueError {
     Deserialize,
     Debug,
     Named,
-    EnumAsInner
+    EnumAsInner,
+    Bind,
+    Unbind
 )]
 pub enum WorkerMessage {
     /// Initialize backend network state.
@@ -842,20 +842,6 @@ pub enum WorkerMessage {
     },
 }
 
-// WorkerMessage currently has no accumulation reply port.
-// TODO(pzhang) add macro to auto implement these traits.
-impl Unbind for WorkerMessage {
-    fn bindings(&self) -> anyhow::Result<Bindings> {
-        Ok(Bindings::default())
-    }
-}
-
-impl Bind for WorkerMessage {
-    fn bind(self, _bindings: &Bindings) -> anyhow::Result<Self> {
-        Ok(self)
-    }
-}
-
 /// The parameters to spawn a worker actor.
 #[derive(Debug, Clone, Serialize, Deserialize, Named)]
 pub struct WorkerParams {
@@ -875,6 +861,5 @@ pub struct WorkerParams {
 
 hyperactor::alias!(
     WorkerActor,
-    WorkerMessage,
-    IndexedErasedUnbound<WorkerMessage>
+    WorkerMessage { cast = true },
 );

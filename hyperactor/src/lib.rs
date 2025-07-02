@@ -106,6 +106,8 @@ pub use cityhasher;
 pub use dashmap; // For intern_typename!
 pub use data::Named;
 #[doc(inline)]
+pub use hyperactor_macros::Bind;
+#[doc(inline)]
 pub use hyperactor_macros::HandleClient;
 #[doc(inline)]
 pub use hyperactor_macros::Handler;
@@ -114,9 +116,11 @@ pub use hyperactor_macros::Named;
 #[doc(inline)]
 pub use hyperactor_macros::RefClient;
 #[doc(inline)]
-pub use hyperactor_macros::export;
+pub use hyperactor_macros::Unbind;
 #[doc(inline)]
-pub use hyperactor_macros::export_spawn;
+pub use hyperactor_macros::alias;
+#[doc(inline)]
+pub use hyperactor_macros::export;
 #[doc(inline)]
 pub use hyperactor_macros::forward;
 #[doc(inline)]
@@ -145,6 +149,7 @@ pub use mailbox::RemoteMessage;
 pub use opentelemetry;
 #[doc(hidden)]
 pub use paste::paste;
+pub use proc::Context;
 pub use proc::Instance;
 pub use reference::ActorId;
 pub use reference::ActorRef;

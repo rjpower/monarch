@@ -39,14 +39,21 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate as hyperactor;
+use crate::Actor;
+use crate::ActorHandle;
 use crate::Named;
 use crate::RemoteHandles;
 use crate::RemoteMessage;
+use crate::accum::ReducerSpec;
 use crate::actor::RemoteActor;
+use crate::attrs::Attrs;
 use crate::cap;
 use crate::data::Serialized;
 use crate::mailbox::MailboxSenderError;
 use crate::mailbox::MailboxSenderErrorKind;
+use crate::message::Bind;
+use crate::message::Bindings;
+use crate::message::Unbind;
 use crate::parse::Lexer;
 use crate::parse::ParseError;
 use crate::parse::Token;
@@ -611,6 +618,21 @@ impl<A: RemoteActor> ActorRef<A> {
         self.port().send(cap, message)
     }
 
+    /// Send an [`M`]-typed message to the referenced actor, with additional context provided by
+    /// headers.
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
+    pub fn send_with_headers<M: RemoteMessage>(
+        &self,
+        cap: &impl cap::CanSend,
+        headers: Attrs,
+        message: M,
+    ) -> Result<(), MailboxSenderError>
+    where
+        A: RemoteHandles<M>,
+    {
+        self.port().send_with_headers(cap, headers, message)
+    }
+
     /// The caller guarantees that the provided actor ID is also a valid,
     /// typed reference.  This is usually invoked to provide a guarantee
     /// that an externally-provided actor ID (e.g., through a command
@@ -630,6 +652,16 @@ impl<A: RemoteActor> ActorRef<A> {
     /// Convert this actor reference into its corresponding actor ID.
     pub fn into_actor_id(self) -> ActorId {
         self.actor_id
+    }
+
+    /// Attempt to downcast this reference into a (local) actor handle.
+    /// This will only succeed when the referenced actor is in the same
+    /// proc as the caller.
+    pub fn downcast_handle(&self, cap: &impl cap::CanResolveActorRef) -> Option<ActorHandle<A>>
+    where
+        A: Actor,
+    {
+        cap.resolve_actor_ref(self)
     }
 }
 
@@ -720,13 +752,29 @@ impl PortId {
     /// such as [`crate::actor::Instance`]. It is the sender's responsibility
     /// to ensure that the provided message is well-typed.
     pub fn send(&self, caps: &impl cap::CanSend, serialized: &Serialized) {
-        caps.post(self.clone(), serialized.clone());
+        caps.post(self.clone(), Attrs::new(), serialized.clone());
+    }
+
+    /// Send a serialized message to this port, provided a sending capability,
+    /// such as [`crate::actor::Instance`], with additional context provided by headers.
+    /// It is the sender's responsibility to ensure that the provided message is well-typed.
+    pub fn send_with_headers(
+        &self,
+        caps: &impl cap::CanSend,
+        serialized: &Serialized,
+        headers: Attrs,
+    ) {
+        caps.post(self.clone(), headers, serialized.clone());
     }
 
     /// Split this port, returning a new port that relays messages to the port
     /// through a local proxy, which may coalesce messages.
-    pub fn split(&self, caps: &impl cap::CanSplitPort, reducer_typehash: Option<u64>) -> PortId {
-        caps.split(self.clone(), reducer_typehash)
+    pub fn split(
+        &self,
+        caps: &impl cap::CanSplitPort,
+        reducer_spec: Option<ReducerSpec>,
+    ) -> anyhow::Result<PortId> {
+        caps.split(self.clone(), reducer_spec)
     }
 }
 
@@ -760,7 +808,7 @@ pub struct PortRef<M: RemoteMessage> {
         Ord = "ignore",
         Hash = "ignore"
     )]
-    reducer_typehash: Option<u64>,
+    reducer_spec: Option<ReducerSpec>,
     phantom: PhantomData<M>,
 }
 
@@ -770,17 +818,17 @@ impl<M: RemoteMessage> PortRef<M> {
     pub fn attest(port_id: PortId) -> Self {
         Self {
             port_id,
-            reducer_typehash: None,
+            reducer_spec: None,
             phantom: PhantomData,
         }
     }
 
     /// The caller attests that the provided PortId can be
     /// converted to a reachable, typed port reference.
-    pub(crate) fn attest_reducible(port_id: PortId, reducer_typehash: Option<u64>) -> Self {
+    pub fn attest_reducible(port_id: PortId, reducer_spec: Option<ReducerSpec>) -> Self {
         Self {
             port_id,
-            reducer_typehash,
+            reducer_spec,
             phantom: PhantomData,
         }
     }
@@ -793,18 +841,13 @@ impl<M: RemoteMessage> PortRef<M> {
 
     /// The typehash of this port's reducer, if any. Reducers
     /// may be used to coalesce messages sent to a port.
-    pub fn reducer_typehash(&self) -> &Option<u64> {
-        &self.reducer_typehash
+    pub fn reducer_spec(&self) -> &Option<ReducerSpec> {
+        &self.reducer_spec
     }
 
     /// This port's ID.
     pub fn port_id(&self) -> &PortId {
         &self.port_id
-    }
-
-    /// Mutable reference to this port's ID.
-    pub fn port_id_mut(&mut self) -> &mut PortId {
-        &mut self.port_id
     }
 
     /// Convert this PortRef into its corresponding port id.
@@ -822,20 +865,33 @@ impl<M: RemoteMessage> PortRef<M> {
     /// [`crate::actor::Instance`].
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     pub fn send(&self, caps: &impl cap::CanSend, message: M) -> Result<(), MailboxSenderError> {
+        self.send_with_headers(caps, Attrs::new(), message)
+    }
+
+    /// Send a message to this port, provided a sending capability, such as
+    /// [`crate::actor::Instance`]. Additional context can be provided in the form of
+    /// headers.
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
+    pub fn send_with_headers(
+        &self,
+        caps: &impl cap::CanSend,
+        headers: Attrs,
+        message: M,
+    ) -> Result<(), MailboxSenderError> {
         let serialized = Serialized::serialize(&message).map_err(|err| {
             MailboxSenderError::new_bound(
                 self.port_id.clone(),
                 MailboxSenderErrorKind::Serialize(err.into()),
             )
         })?;
-        self.send_serialized(caps, serialized);
+        self.send_serialized(caps, serialized, headers);
         Ok(())
     }
 
     /// Send a serialized message to this port, provided a sending capability, such as
     /// [`crate::actor::Instance`].
-    pub fn send_serialized(&self, caps: &impl cap::CanSend, message: Serialized) {
-        caps.post(self.port_id.clone(), message);
+    pub fn send_serialized(&self, caps: &impl cap::CanSend, message: Serialized, headers: Attrs) {
+        caps.post(self.port_id.clone(), headers, message);
     }
 }
 
@@ -843,7 +899,7 @@ impl<M: RemoteMessage> Clone for PortRef<M> {
     fn clone(&self) -> Self {
         Self {
             port_id: self.port_id.clone(),
-            reducer_typehash: self.reducer_typehash.clone(),
+            reducer_spec: self.reducer_spec.clone(),
             phantom: PhantomData,
         }
     }
@@ -858,6 +914,38 @@ impl<M: RemoteMessage> fmt::Display for PortRef<M> {
 impl<M: RemoteMessage> Named for PortRef<M> {
     fn typename() -> &'static str {
         crate::data::intern_typename!(Self, "hyperactor::mailbox::PortRef<{}>", M)
+    }
+}
+
+/// The parameters extracted from [`PortRef`] to [`Bindings`].
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Named)]
+pub struct UnboundPort(pub PortId, pub Option<ReducerSpec>);
+
+impl UnboundPort {
+    /// Update the port id of this binding.
+    pub fn update(&mut self, port_id: PortId) {
+        self.0 = port_id;
+    }
+}
+
+impl<M: RemoteMessage> From<&PortRef<M>> for UnboundPort {
+    fn from(port_ref: &PortRef<M>) -> Self {
+        UnboundPort(port_ref.port_id.clone(), port_ref.reducer_spec.clone())
+    }
+}
+
+impl<M: RemoteMessage> Unbind for PortRef<M> {
+    fn unbind(&self, bindings: &mut Bindings) -> anyhow::Result<()> {
+        bindings.push_back(&UnboundPort::from(self))
+    }
+}
+
+impl<M: RemoteMessage> Bind for PortRef<M> {
+    fn bind(&mut self, bindings: &mut Bindings) -> anyhow::Result<()> {
+        let bound = bindings.try_pop_front::<UnboundPort>()?;
+        self.port_id = bound.0;
+        self.reducer_spec = bound.1;
+        Ok(())
     }
 }
 
@@ -892,13 +980,25 @@ impl<M: RemoteMessage> OncePortRef<M> {
     /// [`crate::actor::Instance`].
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     pub fn send(self, caps: &impl cap::CanSend, message: M) -> Result<(), MailboxSenderError> {
+        self.send_with_headers(caps, Attrs::new(), message)
+    }
+
+    /// Send a message to this port, provided a sending capability, such as
+    /// [`crate::actor::Instance`]. Additional context can be provided in the form of headers.
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
+    pub fn send_with_headers(
+        self,
+        caps: &impl cap::CanSend,
+        headers: Attrs,
+        message: M,
+    ) -> Result<(), MailboxSenderError> {
         let serialized = Serialized::serialize(&message).map_err(|err| {
             MailboxSenderError::new_bound(
                 self.port_id.clone(),
                 MailboxSenderErrorKind::Serialize(err.into()),
             )
         })?;
-        caps.post(self.port_id.clone(), serialized);
+        caps.post(self.port_id.clone(), headers, serialized);
         Ok(())
     }
 }
@@ -921,6 +1021,21 @@ impl<M: RemoteMessage> fmt::Display for OncePortRef<M> {
 impl<M: RemoteMessage> Named for OncePortRef<M> {
     fn typename() -> &'static str {
         crate::data::intern_typename!(Self, "hyperactor::mailbox::OncePortRef<{}>", M)
+    }
+}
+
+// We do not split PortRef, because it can only receive a single response, and
+// there is no meaningful performance gain to make that response going through
+// comm actors.
+impl<M: RemoteMessage> Unbind for OncePortRef<M> {
+    fn unbind(&self, _bindings: &mut Bindings) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl<M: RemoteMessage> Bind for OncePortRef<M> {
+    fn bind(&mut self, _bindings: &mut Bindings) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -980,29 +1095,6 @@ impl FromStr for GangId {
             Reference::Gang(gang_id) => Ok(gang_id),
             _ => Err(ReferenceParsingError::WrongType("gang".into())),
         }
-    }
-}
-
-/// A reference to a remote port of a gang.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Hash, Ord)]
-pub struct GangPortRef<M: RemoteMessage> {
-    gang_id: GangId,
-    phantom: PhantomData<M>,
-}
-
-impl<M: RemoteMessage> GangPortRef<M> {
-    /// The caller attests that the provided gang is reachable through the
-    /// provided remote message type's named port.
-    pub fn attest(gang_id: GangId) -> Self {
-        Self {
-            gang_id,
-            phantom: PhantomData,
-        }
-    }
-
-    /// Return the port ID for the provided rank
-    pub fn port_id(&self, rank: Index) -> PortId {
-        PortId(self.gang_id.actor_id(rank), M::port())
     }
 }
 

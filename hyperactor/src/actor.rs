@@ -19,7 +19,6 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Weak;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -50,11 +49,11 @@ use crate::mailbox::UndeliverableMessageError;
 use crate::mailbox::log::MessageLogError;
 use crate::message::Castable;
 use crate::message::IndexedErasedUnbound;
+use crate::proc::Context;
 use crate::proc::Instance;
 use crate::proc::InstanceCell;
 use crate::proc::Ports;
 use crate::proc::Proc;
-use crate::proc::WeakInstanceCell;
 use crate::reference::ActorId;
 use crate::reference::GangId;
 use crate::reference::Index;
@@ -71,9 +70,9 @@ pub mod remote;
 /// Actors are assumed to be _deterministic_: that is, the state of an
 /// actor is determined by the set (and order) of messages it receives.
 #[async_trait]
-pub trait Actor: Sized + Send + Sync + Debug + 'static {
+pub trait Actor: Sized + Send + Debug + 'static {
     /// The type of initialization parameters accepted by this actor.
-    type Params: Send + Sync + 'static;
+    type Params: Send + 'static;
 
     /// Creates a new actor instance given its instantiation parameters.
     async fn new(params: Self::Params) -> Result<Self, anyhow::Error>;
@@ -144,7 +143,7 @@ pub trait Actor: Sized + Send + Sync + Debug + 'static {
 #[async_trait]
 pub trait Handler<M>: Actor {
     /// Handle the next M-typed message.
-    async fn handle(&mut self, this: &Instance<Self>, message: M) -> Result<(), anyhow::Error>;
+    async fn handle(&mut self, this: &Context<Self>, message: M) -> Result<(), anyhow::Error>;
 }
 
 /// We provide this handler to indicate that actors can handle the [`Signal`] message.
@@ -153,7 +152,7 @@ pub trait Handler<M>: Actor {
 impl<A: Actor> Handler<Signal> for A {
     async fn handle(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         _message: Signal,
     ) -> Result<(), anyhow::Error> {
         unimplemented!("signal handler should not be called directly")
@@ -166,7 +165,7 @@ impl<A: Actor> Handler<Signal> for A {
 impl<A: Actor> Handler<Undeliverable<MessageEnvelope>> for A {
     async fn handle(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         message: Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
         self.handle_undeliverable_message(this, message).await
@@ -183,7 +182,7 @@ where
 {
     async fn handle(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         msg: IndexedErasedUnbound<M>,
     ) -> anyhow::Result<()> {
         let message = msg.downcast()?.bind()?;
@@ -569,14 +568,6 @@ impl<A: Actor> ActorHandle<A> {
     pub fn bind<R: Binds<A>>(&self) -> ActorRef<R> {
         self.cell.bind(self.ports.as_ref())
     }
-
-    /// Downgrade this ActorHandle to a weak reference.
-    pub fn downgrade(&self) -> WeakActorHandle<A> {
-        WeakActorHandle {
-            cell: self.cell.downgrade(),
-            ports: Arc::downgrade(&self.ports),
-        }
-    }
 }
 
 /// IntoFuture allows users to await the handle to join it. The future
@@ -615,43 +606,6 @@ impl<A: Actor> Clone for ActorHandle<A> {
     }
 }
 
-/// A weak reference to an [`ActorHandle`]. This allows holding references to actors
-/// without preventing them from being garbage collected when all strong references
-/// are dropped.
-#[derive(Debug)]
-pub struct WeakActorHandle<A: Actor> {
-    cell: WeakInstanceCell,
-    ports: Weak<Ports<A>>,
-}
-
-impl<A: Actor> WeakActorHandle<A> {
-    /// Create a new weak actor handle that is never upgradeable.
-    pub fn new() -> Self {
-        Self {
-            cell: WeakInstanceCell::new(),
-            ports: Weak::new(),
-        }
-    }
-
-    /// Upgrade this weak actor handle to a strong reference, if possible.
-    /// Returns `Some(ActorHandle<A>)` if the actor is still alive, `None` otherwise.
-    pub fn upgrade(&self) -> Option<ActorHandle<A>> {
-        match (self.cell.upgrade(), self.ports.upgrade()) {
-            (Some(cell), Some(ports)) => Some(ActorHandle::new(cell, ports)),
-            _ => None,
-        }
-    }
-}
-
-impl<A: Actor> Clone for WeakActorHandle<A> {
-    fn clone(&self) -> Self {
-        Self {
-            cell: self.cell.clone(),
-            ports: self.ports.clone(),
-        }
-    }
-}
-
 /// RemoteActor is a marker trait for types that can be used as
 /// remote actor references. All [`Actor`]s are thus referencable;
 /// but other types may also implement this in order to separately
@@ -668,34 +622,6 @@ pub trait Binds<A: Actor>: RemoteActor {
 /// Handles is a marker trait specifying that message type [`M`]
 /// is handled by a specific actor type.
 pub trait RemoteHandles<M: RemoteMessage>: RemoteActor {}
-
-/// Create a [`RemoteActor`] handling a specific set of message types.
-/// This is used to create an [`ActorRef`] without having to
-/// depend on the actor's implementation.
-/// Currently only a single message type is supported. This
-/// restriction will be lifted once we enable multi-handle [`ActorRef`]s.
-#[macro_export(local_inner_macros)]
-macro_rules! alias {
-    ($alias:ident, $($message:ty),+) => {
-        #[doc = "The generated alias struct."]
-        #[derive(Debug, Named)]
-        #[named(dump = false)]
-        pub struct $alias;
-        impl $crate::actor::RemoteActor for $alias {}
-
-        impl<A> $crate::actor::Binds<A> for $alias
-        where
-            A: $crate::Actor $(+ $crate::actor::Handler<$message>)+ {
-            fn bind(ports: &$crate::proc::Ports<A>) {
-                $(
-                    ports.bind::<$message>();
-                )+
-            }
-        }
-
-        $(impl $crate::actor::RemoteHandles<$message> for $alias {})+
-    };
-}
 
 /// GangRefs are typed references to gangs.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Hash, Ord)]
@@ -787,7 +713,7 @@ mod tests {
     impl Handler<u64> for EchoActor {
         async fn handle(
             &mut self,
-            this: &Instance<Self>,
+            this: &Context<Self>,
             message: u64,
         ) -> Result<(), anyhow::Error> {
             let Self(port) = self;
@@ -893,7 +819,7 @@ mod tests {
     impl Handler<OncePortHandle<bool>> for InitActor {
         async fn handle(
             &mut self,
-            _this: &Instance<Self>,
+            _this: &Context<Self>,
             port: OncePortHandle<bool>,
         ) -> Result<(), anyhow::Error> {
             port.send(self.0)?;
@@ -936,7 +862,7 @@ mod tests {
 
     #[async_trait]
     impl Handler<u64> for CheckpointActor {
-        async fn handle(&mut self, this: &Instance<Self>, value: u64) -> Result<(), anyhow::Error> {
+        async fn handle(&mut self, this: &Context<Self>, value: u64) -> Result<(), anyhow::Error> {
             self.sum += value;
             self.port.send(this, self.sum)?;
             Ok(())
@@ -1005,7 +931,7 @@ mod tests {
     impl MultiValuesTest {}
 
     #[derive(Debug)]
-    #[hyperactor::export(u64, String)]
+    #[hyperactor::export(handlers = [u64, String])]
     struct MultiActor(MultiValues);
 
     #[async_trait]
@@ -1021,7 +947,7 @@ mod tests {
     impl Handler<u64> for MultiActor {
         async fn handle(
             &mut self,
-            _this: &Instance<Self>,
+            _this: &Context<Self>,
             message: u64,
         ) -> Result<(), anyhow::Error> {
             let mut vals = self.0.lock().unwrap();
@@ -1034,7 +960,7 @@ mod tests {
     impl Handler<String> for MultiActor {
         async fn handle(
             &mut self,
-            _this: &Instance<Self>,
+            _this: &Context<Self>,
             message: String,
         ) -> Result<(), anyhow::Error> {
             let mut vals = self.0.lock().unwrap();
@@ -1047,7 +973,7 @@ mod tests {
     impl Handler<OncePortHandle<bool>> for MultiActor {
         async fn handle(
             &mut self,
-            _this: &Instance<Self>,
+            _this: &Context<Self>,
             message: OncePortHandle<bool>,
         ) -> Result<(), anyhow::Error> {
             message.send(true).unwrap();
@@ -1090,5 +1016,33 @@ mod tests {
 
         test.sync().await;
         assert_eq!(test.get_values(), (999u64, "biz".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_actor_handle_downcast() {
+        #[derive(Debug)]
+        struct NothingActor;
+
+        #[async_trait]
+        impl Actor for NothingActor {
+            type Params = ();
+
+            async fn new(_: ()) -> Result<Self, anyhow::Error> {
+                Ok(Self)
+            }
+        }
+
+        // Just test that we can round-trip the handle through a downcast.
+
+        let proc = Proc::local();
+        let handle = proc.spawn::<NothingActor>("nothing", ()).await.unwrap();
+        let cell = handle.cell();
+
+        // Invalid actor doesn't succeed.
+        assert!(cell.downcast_handle::<EchoActor>().is_none());
+
+        let handle = cell.downcast_handle::<NothingActor>().unwrap();
+        handle.drain_and_stop().unwrap();
+        handle.await;
     }
 }

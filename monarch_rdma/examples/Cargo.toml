@@ -13,13 +13,15 @@ path = "parameter_server.rs"
 [[bin]]
 name = "parameter_server_bootstrap"
 path = "bootstrap.rs"
+test = false
 
 [[bin]]
 name = "parameter_server_example"
 path = "main.rs"
+test = false
 
 [dependencies]
-anyhow = "1.0.95"
+anyhow = "1.0.98"
 async-trait = "0.1.86"
 buck-resources = "1"
 hyperactor = { version = "0.0.0", path = "../../hyperactor" }

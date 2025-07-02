@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::ActorId;
 use hyperactor::ActorRef;
+use hyperactor::Context;
 use hyperactor::HandleClient;
 use hyperactor::Handler;
 use hyperactor::Instance;
@@ -555,8 +556,8 @@ enum PyArg<'a> {
 }
 
 /// Serialize into a `PyObject`.
-impl<'b> TryIntoPyObjectUnsafe<PyAny> for &PyArg<'b> {
-    unsafe fn try_to_object_unsafe<'a>(self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
+impl<'a, 'py> TryIntoPyObjectUnsafe<'py, PyAny> for &PyArg<'a> {
+    unsafe fn try_to_object_unsafe(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match self {
             // SAFETY: This inherits the unsafety of `rvalue_to_ivalue` (see comment
             // above).
@@ -925,7 +926,7 @@ impl StreamActor {
 impl StreamMessageHandler for StreamActor {
     async fn call_function(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         params: CallFunctionParams,
         device_meshes: HashMap<Ref, DeviceMesh>,
         remote_process_groups: HashMap<
@@ -1005,7 +1006,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn borrow_create(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         borrow: u64,
         tensor: Ref,
         first_use_sender: PortHandle<(Option<Event>, TensorCellResult)>,
@@ -1045,7 +1046,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn borrow_first_use(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         borrow: u64,
         result: Ref,
         first_use_receiver: Arc<Mutex<PortReceiver<(Option<Event>, TensorCellResult)>>>,
@@ -1096,7 +1097,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn borrow_last_use(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         borrow: u64,
         result: Ref,
         last_use_sender: PortHandle<(Option<Event>, TensorCellResult)>,
@@ -1131,7 +1132,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn borrow_drop(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         borrow: u64,
         last_use_receiver: Arc<Mutex<PortReceiver<(Option<Event>, TensorCellResult)>>>,
     ) -> Result<()> {
@@ -1168,7 +1169,7 @@ impl StreamMessageHandler for StreamActor {
         Ok(())
     }
 
-    async fn delete_refs(&mut self, _this: &Instance<Self>, refs: Vec<Ref>) -> Result<()> {
+    async fn delete_refs(&mut self, _this: &Context<Self>, refs: Vec<Ref>) -> Result<()> {
         if let Some((recording, _)) = self.get_defining_recording() {
             recording.messages.push(StreamMessage::DeleteRefs(refs));
             return Ok(());
@@ -1180,7 +1181,7 @@ impl StreamMessageHandler for StreamActor {
         Ok(())
     }
 
-    async fn request_status(&mut self, _this: &Instance<Self>) -> Result<()> {
+    async fn request_status(&mut self, _this: &Context<Self>) -> Result<()> {
         if self.get_defining_recording().is_some() {
             bail!("request_status not allowed in recording");
         }
@@ -1190,7 +1191,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn init_comm(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         comm: ActorHandle<NcclCommActor>,
     ) -> Result<()> {
         if self.get_defining_recording().is_some() {
@@ -1203,7 +1204,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn reduce(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         comm: Arc<ActorHandle<NcclCommActor>>,
         dim_size: i64,
         result: Ref,
@@ -1323,7 +1324,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn send_tensor(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         result: Ref,
         from_rank: Option<usize>,
         to_rank: Option<usize>,
@@ -1417,7 +1418,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn send_value(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         seq: Seq,
         worker_actor_id: ActorId,
         mutates: Vec<Ref>,
@@ -1553,7 +1554,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn set_value(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         results: Vec<Option<Ref>>,
         pipe: Result<PortHandle<PipeMessage>, Arc<CallFunctionError>>,
     ) -> Result<()> {
@@ -1595,7 +1596,7 @@ impl StreamMessageHandler for StreamActor {
         Ok(())
     }
 
-    async fn define_recording(&mut self, _this: &Instance<Self>, recording: Ref) -> Result<()> {
+    async fn define_recording(&mut self, _this: &Context<Self>, recording: Ref) -> Result<()> {
         if self.active_recording.is_some() {
             bail!("different recording already active");
         }
@@ -1610,7 +1611,7 @@ impl StreamMessageHandler for StreamActor {
         Ok(())
     }
 
-    async fn finalize_recording(&mut self, _this: &Instance<Self>, recording: Ref) -> Result<()> {
+    async fn finalize_recording(&mut self, _this: &Context<Self>, recording: Ref) -> Result<()> {
         match self.active_recording {
             Some(RecordingState::Defining {
                 recording: active_recording,
@@ -1629,7 +1630,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn recording_formal(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         result: Ref,
         argument_index: usize,
     ) -> Result<()> {
@@ -1647,7 +1648,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn recording_result(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         result: Ref,
         output_index: usize,
     ) -> Result<()> {
@@ -1665,7 +1666,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn call_recording(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         seq: Seq,
         recording: Ref,
         results: Vec<Ref>,
@@ -1888,7 +1889,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn set_ref_unit_tests_only(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         reference: Ref,
         value: WireValue,
     ) -> Result<()> {
@@ -1899,7 +1900,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn set_tensor_ref_unit_tests_only(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         reference: Ref,
         tensor_result: TensorCellResult,
     ) -> Result<()> {
@@ -1916,7 +1917,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn get_ref_unit_tests_only(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         reference: Ref,
     ) -> Result<Option<Result<WireValue, Arc<CallFunctionError>>>> {
         /// For testing only, doesn't support Tensor or TensorList.
@@ -1945,7 +1946,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn get_tensor_ref_unit_tests_only(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         reference: Ref,
     ) -> Result<Option<TensorCellResult>> {
         match self.env.get(&reference) {
@@ -1968,6 +1969,7 @@ mod tests {
     use monarch_messages::controller::ControllerMessage;
     use monarch_messages::worker::StreamCreationMode;
     use monarch_types::PickledPyObject;
+    use pyo3::IntoPyObjectExt;
     use timed_test::async_timed_test;
     use torch_sys::factory_float_tensor;
     use torch_sys::testing::allclose;
@@ -2052,12 +2054,11 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            let b = allclose(
+            allclose(
                 &factory_float_tensor(data, "cpu".try_into().unwrap()),
                 &actual.borrow(),
             )
-            .unwrap();
-            b
+            .unwrap()
         }
 
         async fn validate_dependent_error(
@@ -2121,8 +2122,9 @@ mod tests {
         seq: Seq,
         reference: Ref,
     ) {
-        let ref_to_send =
-            Python::with_gil(|py| PickledPyObject::pickle(reference.into_py(py).bind(py)).unwrap());
+        let ref_to_send = Python::with_gil(|py| {
+            PickledPyObject::pickle(&reference.into_bound_py_any(py).unwrap()).unwrap()
+        });
 
         stream_actor
             .send_value(

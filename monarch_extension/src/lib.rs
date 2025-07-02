@@ -10,6 +10,7 @@
 
 #[cfg(feature = "tensor_engine")]
 mod client;
+pub mod code_sync;
 #[cfg(feature = "tensor_engine")]
 mod controller;
 #[cfg(feature = "tensor_engine")]
@@ -18,10 +19,12 @@ pub mod convert;
 mod debugger;
 #[cfg(feature = "tensor_engine")]
 mod mesh_controller;
+mod simulation_tools;
 mod simulator_client;
 #[cfg(feature = "tensor_engine")]
 mod tensor_worker;
 
+mod blocking;
 mod panic;
 use pyo3::prelude::*;
 
@@ -117,7 +120,10 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
             "monarch_extension.mesh_controller",
         )?)?;
     }
-
+    simulation_tools::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_extension.simulation_tools",
+    )?)?;
     monarch_hyperactor::bootstrap::register_python_bindings(&get_or_add_new_module(
         module,
         "monarch_hyperactor.bootstrap",
@@ -167,10 +173,19 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module,
         "hyperactor_extension.telemetry",
     )?)?;
+    code_sync::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_extension.code_sync",
+    )?)?;
 
     crate::panic::register_python_bindings(&get_or_add_new_module(
         module,
         "monarch_extension.panic",
+    )?)?;
+
+    crate::blocking::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_extension.blocking",
     )?)?;
 
     // Add feature detection function

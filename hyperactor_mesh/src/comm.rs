@@ -6,6 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use crate::comm::multicast::CAST_ORIGINATING_SENDER;
 pub mod multicast;
 
 use std::cmp::Ordering;
@@ -17,12 +18,17 @@ use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::ActorId;
 use hyperactor::ActorRef;
+use hyperactor::Context;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
-use hyperactor::PortId;
+use hyperactor::PortRef;
 use hyperactor::WorldId;
 use hyperactor::data::Serialized;
+use hyperactor::mailbox::DeliveryError;
+use hyperactor::mailbox::Undeliverable;
+use hyperactor::mailbox::UndeliverableMessageError;
+use hyperactor::reference::UnboundPort;
 use ndslice::Slice;
 use ndslice::selection::routing::RoutingFrame;
 use serde::Deserialize;
@@ -30,8 +36,8 @@ use serde::Serialize;
 
 use crate::comm::multicast::CastMessage;
 use crate::comm::multicast::CastMessageEnvelope;
-use crate::comm::multicast::CastRank;
 use crate::comm::multicast::ForwardMessage;
+use crate::comm::multicast::set_cast_info_on_headers;
 
 /// Parameters to initialize the CommActor
 #[derive(Debug, Clone, Serialize, Deserialize, Named, Default)]
@@ -66,7 +72,14 @@ struct ReceiveState {
 /// This is the comm actor used for efficient and scalable message multicasting
 /// and result accumulation.
 #[derive(Debug)]
-#[hyperactor::export_spawn(CommActorMode, CastMessage, ForwardMessage)]
+#[hyperactor::export(
+    spawn = true,
+    handlers = [
+        CommActorMode,
+        CastMessage,
+        ForwardMessage,
+    ],
+)]
 pub struct CommActor {
     /// Each world will use its own seq num from this caster.
     send_seq: HashMap<Slice, usize>,
@@ -148,6 +161,46 @@ impl Actor for CommActor {
             mode: Default::default(),
         })
     }
+
+    // This is an override of the default actor behavior.
+    async fn handle_undeliverable_message(
+        &mut self,
+        this: &Instance<Self>,
+        undelivered: hyperactor::mailbox::Undeliverable<hyperactor::mailbox::MessageEnvelope>,
+    ) -> Result<(), anyhow::Error> {
+        let Undeliverable(mut message_envelope) = undelivered;
+
+        // 1. Case delivery failure at a "forwarding" step.
+        if let Ok(ForwardMessage { message, .. }) =
+            message_envelope.deserialized::<ForwardMessage>()
+        {
+            let sender = message.sender();
+            let return_port = PortRef::attest_message_port(sender);
+            return_port
+                .send(this, Undeliverable(message_envelope.clone()))
+                .map_err(|err| {
+                    message_envelope
+                        .try_set_error(DeliveryError::BrokenLink(format!("send failure: {err}")));
+                    UndeliverableMessageError::return_failure(&message_envelope)
+                })?;
+            return Ok(());
+        }
+
+        // 2. Case delivery failure at a "deliver here" step.
+        if let Some(sender) = message_envelope.headers().get(CAST_ORIGINATING_SENDER) {
+            let return_port = PortRef::attest_message_port(sender);
+            return_port
+                .send(this, Undeliverable(message_envelope.clone()))
+                .map_err(|err| {
+                    message_envelope
+                        .try_set_error(DeliveryError::BrokenLink(format!("send failure: {err}")));
+                    UndeliverableMessageError::return_failure(&message_envelope)
+                })?;
+            return Ok(());
+        }
+
+        unreachable!()
+    }
 }
 
 impl CommActor {
@@ -164,7 +217,7 @@ impl CommActor {
     }
 
     fn handle_message(
-        this: &Instance<Self>,
+        this: &Context<Self>,
         mode: &CommActorMode,
         deliver_here: bool,
         next_steps: HashMap<usize, Vec<RoutingFrame>>,
@@ -176,23 +229,27 @@ impl CommActor {
         // Split ports, if any, and update message with new ports. In this
         // way, children actors will reply to this comm actor's ports, instead
         // of to the original ports provided by parent.
-        let reply_ports = message.data().get::<PortId>()?;
-        if !reply_ports.is_empty() {
-            let split_ports = reply_ports
-                .iter()
-                .map(|p| p.split(this, message.reducer_typehash().clone()))
-                .collect::<Vec<_>>();
-            message.data_mut().replace::<PortId>(split_ports.iter())?;
+        message
+            .data_mut()
+            .visit_mut::<UnboundPort>(|UnboundPort(port_id, reducer_spec)| {
+                let split = port_id.split(this, reducer_spec.clone())?;
 
-            #[cfg(test)]
-            tests::collect_split_ports(&reply_ports, &split_ports, deliver_here);
-        }
+                #[cfg(test)]
+                tests::collect_split_port(port_id, &split, deliver_here);
+
+                *port_id = split;
+                Ok(())
+            })?;
 
         // Deliver message here, if necessary.
         if deliver_here {
-            message
-                .data_mut()
-                .maybe_replace(&CastRank(mode.self_rank(this.self_id())))?;
+            let mut headers = this.headers().clone();
+            set_cast_info_on_headers(
+                &mut headers,
+                mode.self_rank(this.self_id()),
+                message.shape().clone(),
+                message.sender().clone(),
+            );
             // TODO(pzhang) split reply ports so children can reply to this comm
             // actor instead of parent.
             this.post(
@@ -200,6 +257,7 @@ impl CommActor {
                     .proc_id()
                     .actor_id(message.dest_port().actor_name(), 0)
                     .port_id(message.dest_port().port()),
+                headers,
                 Serialized::serialize(message.data())?,
             );
         }
@@ -232,7 +290,7 @@ impl CommActor {
 
 #[async_trait]
 impl Handler<CommActorMode> for CommActor {
-    async fn handle(&mut self, _this: &Instance<Self>, mode: CommActorMode) -> Result<()> {
+    async fn handle(&mut self, _this: &Context<Self>, mode: CommActorMode) -> Result<()> {
         self.mode = mode;
         Ok(())
     }
@@ -241,7 +299,7 @@ impl Handler<CommActorMode> for CommActor {
 // TODO(T218630526): reliable casting for mutable topology
 #[async_trait]
 impl Handler<CastMessage> for CommActor {
-    async fn handle(&mut self, this: &Instance<Self>, cast_message: CastMessage) -> Result<()> {
+    async fn handle(&mut self, this: &Context<Self>, cast_message: CastMessage) -> Result<()> {
         // Always forward the message to the root rank of the slice, casting starts from there.
         let slice = cast_message.dest.slice.clone();
         let selection = cast_message.dest.selection.clone();
@@ -271,7 +329,7 @@ impl Handler<CastMessage> for CommActor {
 
 #[async_trait]
 impl Handler<ForwardMessage> for CommActor {
-    async fn handle(&mut self, this: &Instance<Self>, fwd_message: ForwardMessage) -> Result<()> {
+    async fn handle(&mut self, this: &Context<Self>, fwd_message: ForwardMessage) -> Result<()> {
         let ForwardMessage {
             sender,
             dests,
@@ -362,20 +420,16 @@ pub mod test_utils {
     use async_trait::async_trait;
     use hyperactor::Actor;
     use hyperactor::ActorId;
+    use hyperactor::Bind;
+    use hyperactor::Context;
     use hyperactor::Handler;
-    use hyperactor::Instance;
     use hyperactor::Named;
-    use hyperactor::PortId;
     use hyperactor::PortRef;
-    use hyperactor::message::Bind;
-    use hyperactor::message::Bindings;
-    use hyperactor::message::IndexedErasedUnbound;
-    use hyperactor::message::Unbind;
+    use hyperactor::Unbind;
     use serde::Deserialize;
     use serde::Serialize;
 
     use super::*;
-    use crate::actor_mesh::Cast;
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Named)]
     pub struct MyReply {
@@ -383,68 +437,30 @@ pub mod test_utils {
         pub value: u64,
     }
 
-    #[derive(Debug, Named, Serialize, Deserialize, PartialEq, Clone)]
+    #[derive(Debug, Named, Serialize, Deserialize, PartialEq, Clone, Bind, Unbind)]
     #[named(dump = false)]
     pub enum TestMessage {
         Forward(String),
         CastAndReply {
             arg: String,
+            // Intentionally not including 0. As a result, this port will not be
+            // split.
+            // #[binding(include)]
             reply_to0: PortRef<String>,
+            #[binding(include)]
             reply_to1: PortRef<u64>,
+            #[binding(include)]
             reply_to2: PortRef<MyReply>,
         },
     }
 
-    // TODO(pzhang) add macro to auto implement these traits.
-    impl Unbind for TestMessage {
-        fn bindings(&self) -> anyhow::Result<Bindings> {
-            match &self {
-                TestMessage::Forward(_) => Ok(Bindings::default()),
-                TestMessage::CastAndReply {
-                    reply_to1,
-                    reply_to2,
-                    ..
-                } => {
-                    let mut bindings = Bindings::default();
-                    let ports = [
-                        // Intentionally not visiting 0. As a result, this port
-                        // will not be split.
-                        // reply_to0.port_id().clone(),
-                        reply_to1.port_id(),
-                        reply_to2.port_id(),
-                    ];
-                    bindings.insert::<PortId>(ports.into_iter())?;
-                    Ok(bindings)
-                }
-            }
-        }
-    }
-
-    impl Bind for TestMessage {
-        fn bind(mut self, bindings: &Bindings) -> anyhow::Result<Self> {
-            match &mut self {
-                TestMessage::Forward(_) => Ok(self),
-                TestMessage::CastAndReply {
-                    reply_to1,
-                    reply_to2,
-                    ..
-                } => {
-                    let mut_ports = [
-                        // Intentionally not visiting 0. As a result, this port
-                        // will not be split.
-                        // reply_to0.port_id_mut(),
-                        reply_to1.port_id_mut(),
-                        reply_to2.port_id_mut(),
-                    ];
-                    bindings.rebind(mut_ports.into_iter())?;
-                    Ok(self)
-                }
-            }
-        }
-    }
-
     #[derive(Debug)]
-    #[hyperactor::export_spawn(TestMessage, Cast<TestMessage>, IndexedErasedUnbound<TestMessage>, IndexedErasedUnbound<Cast<TestMessage>>)]
+    #[hyperactor::export(
+        spawn = true,
+        handlers = [
+            TestMessage { cast = true },
+        ],
+    )]
     pub struct TestActor {
         // Forward the received message to this port, so it can be inspected by
         // the unit test.
@@ -468,20 +484,9 @@ pub mod test_utils {
 
     #[async_trait]
     impl Handler<TestMessage> for TestActor {
-        async fn handle(&mut self, this: &Instance<Self>, msg: TestMessage) -> anyhow::Result<()> {
+        async fn handle(&mut self, this: &Context<Self>, msg: TestMessage) -> anyhow::Result<()> {
             self.forward_port.send(this, msg)?;
             Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl Handler<Cast<TestMessage>> for TestActor {
-        async fn handle(
-            &mut self,
-            this: &Instance<Self>,
-            msg: Cast<TestMessage>,
-        ) -> anyhow::Result<()> {
-            self.handle(this, msg.message).await
         }
     }
 }
@@ -501,9 +506,10 @@ mod tests {
     use hyperactor::PortRef;
     use hyperactor::accum;
     use hyperactor::accum::Accumulator;
-    use hyperactor::accum::CommReducer;
+    use hyperactor::accum::ReducerSpec;
     use hyperactor::clock::Clock;
     use hyperactor::clock::RealClock;
+    use hyperactor::config;
     use hyperactor::mailbox::PortReceiver;
     use hyperactor::mailbox::open_port;
     use hyperactor::reference::Index;
@@ -544,17 +550,15 @@ mod tests {
 
     // Collect the relationships between original ports and split ports into
     // SPLIT_PORT_TREE. This is used by tests to verify that ports are split as expected.
-    pub(crate) fn collect_split_ports(original: &[PortId], split: &[PortId], deliver_here: bool) {
+    pub(crate) fn collect_split_port(original: &PortId, split: &PortId, deliver_here: bool) {
         let mutex = SPLIT_PORT_TREE.get_or_init(|| Mutex::new(vec![]));
         let mut tree = mutex.lock().unwrap();
 
-        for (o, s) in original.iter().zip(split.iter()) {
-            tree.deref_mut().push(Edge {
-                from: o.clone(),
-                to: s.clone(),
-                is_leaf: deliver_here,
-            });
-        }
+        tree.deref_mut().push(Edge {
+            from: original.clone(),
+            to: split.clone(),
+            is_leaf: deliver_here,
+        });
     }
 
     // A representation of a tree.
@@ -696,25 +700,21 @@ mod tests {
         reply_tos: Vec<(PortRef<u64>, PortRef<MyReply>)>,
     }
 
-    // Placeholder to make compiler happy.
-    #[derive(Debug, Clone, Serialize, Deserialize, Named)]
-    struct NonReducer;
-    impl CommReducer for NonReducer {
-        type Update = u64;
-
-        fn reduce(&self, _left: Self::Update, _right: Self::Update) -> Self::Update {
-            unimplemented!()
-        }
-    }
-
     struct NoneAccumulator;
 
     impl Accumulator for NoneAccumulator {
         type State = u64;
         type Update = u64;
-        type Reducer = NonReducer;
 
-        fn accumulate(&self, _state: &mut Self::State, _update: Self::Update) {
+        fn accumulate(
+            &self,
+            _state: &mut Self::State,
+            _update: Self::Update,
+        ) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+
+        fn reducer_spec(&self) -> Option<ReducerSpec> {
             unimplemented!()
         }
     }
@@ -902,20 +902,25 @@ mod tests {
         dur: Duration,
     ) -> anyhow::Result<()> {
         // timeout wraps the entire async block
-        tokio::time::timeout(dur, async {
-            loop {
-                let msg = receiver.recv().await.unwrap();
-                if msg == expected {
-                    break;
+        RealClock
+            .timeout(dur, async {
+                loop {
+                    let msg = receiver.recv().await.unwrap();
+                    if msg == expected {
+                        break;
+                    }
                 }
-            }
-        })
-        .await?;
+            })
+            .await?;
         Ok(())
     }
 
     #[async_timed_test(timeout_secs = 30)]
     async fn test_cast_and_accum() -> Result<()> {
+        let config = config::global::lock();
+        // Use temporary config for this test
+        let _guard1 = config.override_key(config::SPLIT_MAX_BUFFER_SIZE, 1);
+
         let MeshSetup {
             actor_mesh,
             mut reply1_rx,

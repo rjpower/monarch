@@ -27,10 +27,13 @@ use crate::attrs::declare_attrs;
 // Declare configuration keys using the new attrs system with defaults
 declare_attrs! {
     /// Maximum frame length for codec
-    pub attr CODEC_MAX_FRAME_LENGTH: usize = 8 * 1024 * 1024; // 8 MB
+    pub attr CODEC_MAX_FRAME_LENGTH: usize = 1024 * 1024 * 1024; // 1GB
 
     /// Message delivery timeout
     pub attr MESSAGE_DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Timeout used by allocator for stopping a proc.
+    pub attr PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
     /// Message acknowledgment interval
     pub attr MESSAGE_ACK_TIME_INTERVAL: Duration = Duration::from_millis(500);
@@ -40,9 +43,6 @@ declare_attrs! {
 
     /// Maximum buffer size for split port messages
     pub attr SPLIT_MAX_BUFFER_SIZE: usize = 5;
-
-    /// Flag indicating if this is a managed subprocess
-    pub attr IS_MANAGED_SUBPROCESS: bool = false;
 }
 
 /// Load configuration from environment variables
@@ -84,8 +84,6 @@ pub fn from_env() -> Attrs {
         }
     }
 
-    config[IS_MANAGED_SUBPROCESS] = env::var("HYPERACTOR_MANAGED_SUBPROCESS").is_ok();
-
     config
 }
 
@@ -120,9 +118,6 @@ pub fn merge(config: &mut Attrs, other: &Attrs) {
     }
     if other.contains_key(SPLIT_MAX_BUFFER_SIZE) {
         config[SPLIT_MAX_BUFFER_SIZE] = other[SPLIT_MAX_BUFFER_SIZE];
-    }
-    if other.contains_key(IS_MANAGED_SUBPROCESS) {
-        config[IS_MANAGED_SUBPROCESS] = other[IS_MANAGED_SUBPROCESS];
     }
 }
 
@@ -286,7 +281,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Attrs::new();
-        assert_eq!(config[CODEC_MAX_FRAME_LENGTH], 8 * 1024 * 1024);
+        assert_eq!(config[CODEC_MAX_FRAME_LENGTH], 1024 * 1024 * 1024);
         assert_eq!(config[MESSAGE_DELIVERY_TIMEOUT], Duration::from_secs(30));
         assert_eq!(
             config[MESSAGE_ACK_TIME_INTERVAL],
@@ -294,7 +289,6 @@ mod tests {
         );
         assert_eq!(config[MESSAGE_ACK_EVERY_N_MESSAGES], 1000);
         assert_eq!(config[SPLIT_MAX_BUFFER_SIZE], 5);
-        assert!(!config[IS_MANAGED_SUBPROCESS]);
     }
 
     #[test]
@@ -341,12 +335,12 @@ mod tests {
         // Reset global config to defaults to avoid interference from other tests
         global::reset_to_defaults();
 
-        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 8 * 1024 * 1024);
+        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024 * 1024 * 1024);
         {
             let _guard = config.override_key(CODEC_MAX_FRAME_LENGTH, 1024);
             assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024);
         }
-        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 8 * 1024 * 1024);
+        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024 * 1024 * 1024);
 
         {
             let _guard = config.override_key(CODEC_MAX_FRAME_LENGTH, 1024);
@@ -355,7 +349,7 @@ mod tests {
             // The configuration will be automatically restored when _guard goes out of scope
         }
 
-        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 8 * 1024 * 1024);
+        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024 * 1024 * 1024);
     }
 
     #[test]
@@ -367,7 +361,7 @@ mod tests {
         assert!(config.is_empty());
 
         // But getters should still return the defaults from the keys
-        assert_eq!(config[CODEC_MAX_FRAME_LENGTH], 8 * 1024 * 1024);
+        assert_eq!(config[CODEC_MAX_FRAME_LENGTH], 1024 * 1024 * 1024);
         assert_eq!(config[MESSAGE_DELIVERY_TIMEOUT], Duration::from_secs(30));
         assert_eq!(
             config[MESSAGE_ACK_TIME_INTERVAL],
@@ -375,7 +369,6 @@ mod tests {
         );
         assert_eq!(config[MESSAGE_ACK_EVERY_N_MESSAGES], 1000);
         assert_eq!(config[SPLIT_MAX_BUFFER_SIZE], 5);
-        assert!(!config[IS_MANAGED_SUBPROCESS]);
 
         // Verify the keys have defaults
         assert!(CODEC_MAX_FRAME_LENGTH.has_default());
@@ -383,10 +376,12 @@ mod tests {
         assert!(MESSAGE_ACK_TIME_INTERVAL.has_default());
         assert!(MESSAGE_ACK_EVERY_N_MESSAGES.has_default());
         assert!(SPLIT_MAX_BUFFER_SIZE.has_default());
-        assert!(IS_MANAGED_SUBPROCESS.has_default());
 
         // Verify we can get defaults directly from keys
-        assert_eq!(CODEC_MAX_FRAME_LENGTH.default(), Some(&(8 * 1024 * 1024)));
+        assert_eq!(
+            CODEC_MAX_FRAME_LENGTH.default(),
+            Some(&(1024 * 1024 * 1024))
+        );
         assert_eq!(
             MESSAGE_DELIVERY_TIMEOUT.default(),
             Some(&Duration::from_secs(30))
@@ -397,7 +392,6 @@ mod tests {
         );
         assert_eq!(MESSAGE_ACK_EVERY_N_MESSAGES.default(), Some(&1000));
         assert_eq!(SPLIT_MAX_BUFFER_SIZE.default(), Some(&5));
-        assert_eq!(IS_MANAGED_SUBPROCESS.default(), Some(&false));
     }
 
     #[test]
@@ -435,7 +429,7 @@ mod tests {
         global::reset_to_defaults();
 
         // Test the new lock/override API for individual config values
-        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 8 * 1024 * 1024);
+        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024 * 1024 * 1024);
         assert_eq!(
             global::get(MESSAGE_DELIVERY_TIMEOUT),
             Duration::from_secs(30)
@@ -452,7 +446,7 @@ mod tests {
         }
 
         // Values should be restored after guard is dropped
-        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 8 * 1024 * 1024);
+        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024 * 1024 * 1024);
 
         // Test multiple overrides
         {
@@ -467,7 +461,7 @@ mod tests {
         }
 
         // All values should be restored
-        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 8 * 1024 * 1024);
+        assert_eq!(global::get(CODEC_MAX_FRAME_LENGTH), 1024 * 1024 * 1024);
         assert_eq!(
             global::get(MESSAGE_DELIVERY_TIMEOUT),
             Duration::from_secs(30)

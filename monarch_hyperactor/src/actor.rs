@@ -16,17 +16,15 @@ use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::ActorHandle;
 use hyperactor::ActorId;
+use hyperactor::Context;
 use hyperactor::HandleClient;
 use hyperactor::Handler;
-use hyperactor::Instance;
 use hyperactor::Named;
-use hyperactor::PortId;
 use hyperactor::forward;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;
-use hyperactor::message::IndexedErasedUnbound;
 use hyperactor::message::Unbind;
-use hyperactor_mesh::actor_mesh::Cast;
+use hyperactor_mesh::comm::multicast::CastInfo;
 use monarch_types::PickledPyObject;
 use monarch_types::SerializablePyErr;
 use pyo3::conversion::IntoPyObjectExt;
@@ -43,6 +41,7 @@ use serde_bytes::ByteBuf;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
+use crate::mailbox::EitherPortRef;
 use crate::mailbox::PyMailbox;
 use crate::proc::InstanceWrapper;
 use crate::proc::PyActorId;
@@ -144,7 +143,7 @@ impl PickledMessageClientActor {
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
             .into_iter()
             .map(|message| message.into_py_any(py))
-            .collect::<PyResult<Vec<PyObject>>>()?;
+            .collect::<PyResult<Vec<_>>>()?;
         PyList::new(py, messages)
     }
 
@@ -171,11 +170,11 @@ impl PickledMessageClientActor {
 }
 
 #[pyclass(frozen, module = "monarch._rust_bindings.monarch_hyperactor.actor")]
-#[derive(Clone, Serialize, Deserialize, Named, PartialEq)]
+#[derive(Default, Clone, Serialize, Deserialize, Named, PartialEq)]
 pub struct PythonMessage {
-    method: String,
-    message: ByteBuf,
-    response_port: Option<PortId>,
+    pub(crate) method: String,
+    pub(crate) message: ByteBuf,
+    response_port: Option<EitherPortRef>,
     rank: Option<usize>,
 }
 
@@ -192,21 +191,14 @@ impl std::fmt::Debug for PythonMessage {
 }
 
 impl Unbind for PythonMessage {
-    fn bindings(&self) -> anyhow::Result<Bindings> {
-        let mut bindings = Bindings::default();
-        if let Some(response_port) = &self.response_port {
-            bindings.push(response_port)?;
-        }
-        Ok(bindings)
+    fn unbind(&self, bindings: &mut Bindings) -> anyhow::Result<()> {
+        self.response_port.unbind(bindings)
     }
 }
 
 impl Bind for PythonMessage {
-    fn bind(mut self, bindings: &Bindings) -> anyhow::Result<Self> {
-        if let Some(response_port) = &mut self.response_port {
-            bindings.rebind::<PortId>([response_port].into_iter())?;
-        }
-        Ok(self)
+    fn bind(&mut self, bindings: &mut Bindings) -> anyhow::Result<()> {
+        self.response_port.bind(bindings)
     }
 }
 
@@ -217,13 +209,13 @@ impl PythonMessage {
     fn new(
         method: String,
         message: Vec<u8>,
-        response_port: Option<crate::mailbox::PyPortId>,
+        response_port: Option<EitherPortRef>,
         rank: Option<usize>,
     ) -> Self {
         Self {
             method,
             message: ByteBuf::from(message),
-            response_port: response_port.map(Into::into),
+            response_port,
             rank,
         }
     }
@@ -239,8 +231,8 @@ impl PythonMessage {
     }
 
     #[getter]
-    fn response_port(&self) -> Option<crate::mailbox::PyPortId> {
-        self.response_port.clone().map(Into::into)
+    fn response_port(&self) -> Option<EitherPortRef> {
+        self.response_port.clone()
     }
 
     #[getter]
@@ -271,7 +263,12 @@ impl PythonActorHandle {
 
 /// An actor for which message handlers are implemented in Python.
 #[derive(Debug)]
-#[hyperactor::export_spawn(PythonMessage, Cast<PythonMessage>, IndexedErasedUnbound<Cast<PythonMessage>>)]
+#[hyperactor::export(
+    spawn = true,
+    handlers = [
+        PythonMessage { cast = true },
+    ],
+)]
 pub(super) struct PythonActor {
     /// The Python object that we delegate message handling to. An instance of
     /// `monarch.actor_mesh._Actor`.
@@ -290,7 +287,7 @@ impl Actor for PythonActor {
         Ok(Python::with_gil(|py| -> Result<Self, SerializablePyErr> {
             let unpickled = actor_type.unpickle(py)?;
             let class_type: &Bound<'_, PyType> = unpickled.downcast()?;
-            let actor = class_type.call0()?.into_pyobject(py)?;
+            let actor: PyObject = class_type.call0()?.into_py_any(py)?;
 
             // Release the GIL so that the thread spawned below can acquire it.
             let task_locals = Python::allow_threads(py, || {
@@ -313,10 +310,7 @@ impl Actor for PythonActor {
                 rx.recv().unwrap()
             });
 
-            Ok(Self {
-                actor: actor.into(),
-                task_locals,
-            })
+            Ok(Self { actor, task_locals })
         })?)
     }
 }
@@ -370,11 +364,7 @@ impl PanicFlag {
 
 #[async_trait]
 impl Handler<PythonMessage> for PythonActor {
-    async fn handle(
-        &mut self,
-        this: &Instance<Self>,
-        message: PythonMessage,
-    ) -> anyhow::Result<()> {
+    async fn handle(&mut self, this: &Context<Self>, message: PythonMessage) -> anyhow::Result<()> {
         let mailbox = PyMailbox {
             inner: this.mailbox_for_py().clone(),
         };
@@ -383,65 +373,34 @@ impl Handler<PythonMessage> for PythonActor {
         let (sender, receiver) = oneshot::channel();
 
         let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
-            let awaitable = self.actor.call_method(
-                py,
-                "handle",
-                (
-                    mailbox,
-                    message,
-                    PanicFlag {
-                        sender: Some(sender),
-                    },
-                ),
-                None,
-            )?;
-            pyo3_async_runtimes::into_future_with_locals(
-                &self.task_locals,
-                awaitable.into_bound(py),
-            )
-            .map_err(|err| err.into())
-        })?;
-
-        // Spawn a child actor to await the Python handler method.
-        let handler = AsyncEndpointTask::spawn(this, ()).await?;
-        handler.run(this, PythonTask::new(future), receiver).await?;
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl Handler<Cast<PythonMessage>> for PythonActor {
-    async fn handle(
-        &mut self,
-        this: &Instance<Self>,
-        Cast {
-            message,
-            rank,
-            shape,
-        }: Cast<PythonMessage>,
-    ) -> anyhow::Result<()> {
-        let mailbox = PyMailbox {
-            inner: this.mailbox_for_py().clone(),
-        };
-        // Create a channel for signaling panics in async endpoints.
-        // See [Panics in async endpoints].
-        let (sender, receiver) = oneshot::channel();
-
-        let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
-            let awaitable = self.actor.call_method(
-                py,
-                "handle_cast",
-                (
-                    mailbox,
-                    rank.0,
-                    PyShape::from(shape),
-                    message,
-                    PanicFlag {
-                        sender: Some(sender),
-                    },
-                ),
-                None,
-            )?;
+            let awaitable = match this.maybe_cast_info() {
+                Some((rank, shape)) => self.actor.call_method(
+                    py,
+                    "handle_cast",
+                    (
+                        mailbox,
+                        rank,
+                        PyShape::from(shape),
+                        message,
+                        PanicFlag {
+                            sender: Some(sender),
+                        },
+                    ),
+                    None,
+                )?,
+                None => self.actor.call_method(
+                    py,
+                    "handle",
+                    (
+                        mailbox,
+                        message,
+                        PanicFlag {
+                            sender: Some(sender),
+                        },
+                    ),
+                    None,
+                )?,
+            };
 
             pyo3_async_runtimes::into_future_with_locals(
                 &self.task_locals,
@@ -511,7 +470,7 @@ impl Actor for AsyncEndpointTask {
 impl AsyncEndpointInvocationHandler for AsyncEndpointTask {
     async fn run(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         task: PythonTask,
         side_channel: oneshot::Receiver<PyObject>,
     ) -> anyhow::Result<()> {
@@ -568,20 +527,43 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
 
 #[cfg(test)]
 mod tests {
+    use hyperactor::PortRef;
+    use hyperactor::accum::ReducerSpec;
+    use hyperactor::data::Serialized;
     use hyperactor::id;
+    use hyperactor::message::ErasedUnbound;
+    use hyperactor::message::Unbound;
+    use hyperactor::reference::UnboundPort;
 
     use super::*;
 
     #[test]
     fn test_python_message_bind_unbind() {
+        let reducer_spec = ReducerSpec {
+            typehash: 123,
+            builder_params: Some(Serialized::serialize(&"abcdefg12345".to_string()).unwrap()),
+        };
+        let port_ref = PortRef::<PythonMessage>::attest_reducible(
+            id!(world[0].client[0][123]),
+            Some(reducer_spec),
+        );
         let message = PythonMessage {
             method: "test".to_string(),
             message: ByteBuf::from(vec![1, 2, 3]),
-            response_port: Some(id!(world[0].client[0][123])),
+            response_port: Some(EitherPortRef::Unbounded(port_ref.clone().into())),
             rank: None,
         };
         {
-            let unbound = message.clone().unbind().unwrap();
+            let mut erased = ErasedUnbound::try_from_message(message.clone()).unwrap();
+            let mut bindings = vec![];
+            erased
+                .visit_mut::<UnboundPort>(|b| {
+                    bindings.push(b.clone());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(bindings, vec![UnboundPort::from(&port_ref)]);
+            let unbound = Unbound::try_from_message(message.clone()).unwrap();
             assert_eq!(message, unbound.bind().unwrap());
         }
 
@@ -590,7 +572,16 @@ mod tests {
             ..message
         };
         {
-            let unbound = no_port_message.clone().unbind().unwrap();
+            let mut erased = ErasedUnbound::try_from_message(no_port_message.clone()).unwrap();
+            let mut bindings = vec![];
+            erased
+                .visit_mut::<UnboundPort>(|b| {
+                    bindings.push(b.clone());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(bindings.len(), 0);
+            let unbound = Unbound::try_from_message(no_port_message.clone()).unwrap();
             assert_eq!(no_port_message, unbound.bind().unwrap());
         }
     }

@@ -8,17 +8,20 @@
 
 //! The comm actor that provides message casting and result accumulation.
 
-use std::ops::Deref;
-
+use hyperactor::Actor;
+use hyperactor::Context;
 use hyperactor::Named;
 use hyperactor::RemoteHandles;
 use hyperactor::RemoteMessage;
 use hyperactor::actor::RemoteActor;
+use hyperactor::attrs::Attrs;
 use hyperactor::data::Serialized;
+use hyperactor::declare_attrs;
 use hyperactor::message::Castable;
 use hyperactor::message::ErasedUnbound;
 use hyperactor::message::IndexedErasedUnbound;
 use hyperactor::reference::ActorId;
+use ndslice::Shape;
 use ndslice::Slice;
 use ndslice::selection::Selection;
 use ndslice::selection::routing::RoutingFrame;
@@ -49,6 +52,8 @@ pub struct CastMessageEnvelope {
     data: ErasedUnbound,
     /// typehash of the reducer used to accumulate the message in split ports.
     pub reducer_typehash: Option<u64>,
+    /// The shape of the cast.
+    shape: Shape,
 }
 
 impl CastMessageEnvelope {
@@ -56,6 +61,7 @@ impl CastMessageEnvelope {
     pub fn new<T: Castable + Serialize + Named>(
         sender: ActorId,
         dest_port: DestinationPort,
+        shape: Shape,
         message: T,
         reducer_typehash: Option<u64>,
     ) -> Result<Self, anyhow::Error> {
@@ -65,19 +71,30 @@ impl CastMessageEnvelope {
             dest_port,
             data,
             reducer_typehash,
+            shape,
         })
     }
 
     /// Create a new CastMessageEnvelope from serialized data. Only use this
     /// when the message do not contain reply ports. Or it does but you are okay
     /// with the destination actors reply to the client actor directly.
-    pub fn from_serialized(sender: ActorId, dest_port: DestinationPort, data: Serialized) -> Self {
+    pub fn from_serialized(
+        sender: ActorId,
+        dest_port: DestinationPort,
+        shape: Shape,
+        data: Serialized,
+    ) -> Self {
         Self {
             sender,
             dest_port,
             data: ErasedUnbound::new(data),
             reducer_typehash: None,
+            shape,
         }
+    }
+
+    pub(crate) fn sender(&self) -> &ActorId {
+        &self.sender
     }
 
     pub(crate) fn dest_port(&self) -> &DestinationPort {
@@ -92,8 +109,8 @@ impl CastMessageEnvelope {
         &mut self.data
     }
 
-    pub(crate) fn reducer_typehash(&self) -> &Option<u64> {
-        &self.reducer_typehash
+    pub(crate) fn shape(&self) -> &Shape {
+        &self.shape
     }
 }
 
@@ -161,14 +178,50 @@ pub(crate) struct ForwardMessage {
     pub(crate) message: CastMessageEnvelope,
 }
 
-/// This type is re-bound by the comm actor to contain the message destination rank.
-#[derive(Clone, Debug, Named, Serialize, Deserialize)]
-pub struct CastRank(pub usize);
+declare_attrs! {
+    /// Used inside headers for cast messages to store
+    /// the rank of the receiver.
+    attr CAST_RANK: usize;
+    /// Used inside headers to store the shape of the
+    /// actor mesh that a message was cast to.
+    attr CAST_SHAPE: Shape;
+    /// Used inside headers to store the originating sender of a cast.
+    pub attr CAST_ORIGINATING_SENDER: ActorId;
+}
 
-impl Deref for CastRank {
-    type Target = usize;
+pub fn set_cast_info_on_headers(headers: &mut Attrs, rank: usize, shape: Shape, sender: ActorId) {
+    headers.set(CAST_RANK, rank);
+    headers.set(CAST_SHAPE, shape);
+    headers.set(CAST_ORIGINATING_SENDER, sender);
+}
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
+pub trait CastInfo {
+    /// Get the cast rank and cast shape, returning an error
+    /// if the relevant info isn't available.
+    fn cast_info(&self) -> anyhow::Result<(usize, Shape)>;
+
+    /// Get the cast rank and cast shape, returning None
+    /// if the relevant info isn't available.
+    fn maybe_cast_info(&self) -> Option<(usize, Shape)>;
+}
+
+impl<A: Actor> CastInfo for Context<'_, A> {
+    fn cast_info(&self) -> anyhow::Result<(usize, Shape)> {
+        let headers = self.headers();
+        let rank = headers
+            .get(CAST_RANK)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in headers", CAST_RANK.name()))?;
+        let shape = headers
+            .get(CAST_SHAPE)
+            .ok_or_else(|| anyhow::anyhow!("{} not found in headers", CAST_SHAPE.name()))?
+            .clone();
+        Ok((*rank, shape))
+    }
+
+    fn maybe_cast_info(&self) -> Option<(usize, Shape)> {
+        let headers = self.headers();
+        headers
+            .get(CAST_RANK)
+            .map(|rank| headers.get(CAST_SHAPE).map(|shape| (*rank, shape.clone())))?
     }
 }

@@ -8,40 +8,24 @@
 
 use async_trait::async_trait;
 use hyperactor::Actor;
+use hyperactor::Bind;
+use hyperactor::Context;
 use hyperactor::Handler;
-use hyperactor::Instance;
 use hyperactor::Named;
-use hyperactor::message::Bind;
-use hyperactor::message::Bindings;
-use hyperactor::message::IndexedErasedUnbound;
-use hyperactor::message::Unbind;
+use hyperactor::Unbind;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::actor_mesh::Cast;
-
 /// Message that can be sent to an EmptyActor.
-#[derive(Serialize, Deserialize, Debug, Named, Clone)]
+#[derive(Serialize, Deserialize, Debug, Named, Clone, Bind, Unbind)]
 pub struct EmptyMessage();
-
-// TODO(pzhang) replace the boilerplate Bind/Unbind impls with a macro.
-impl Bind for EmptyMessage {
-    fn bind(self, _bindings: &Bindings) -> anyhow::Result<Self> {
-        Ok(self)
-    }
-}
-
-impl Unbind for EmptyMessage {
-    fn bindings(&self) -> anyhow::Result<Bindings> {
-        Ok(Bindings::default())
-    }
-}
 
 /// No-op actor.
 #[derive(Debug, PartialEq)]
 #[hyperactor::export(
-    EmptyMessage,
-    Cast<EmptyMessage>, IndexedErasedUnbound<Cast<EmptyMessage>>
+    handlers = [
+        EmptyMessage { cast = true },
+    ],
 )]
 pub struct EmptyActor();
 
@@ -56,18 +40,7 @@ impl Actor for EmptyActor {
 
 #[async_trait]
 impl Handler<EmptyMessage> for EmptyActor {
-    async fn handle(&mut self, _: &Instance<Self>, _: EmptyMessage) -> Result<(), anyhow::Error> {
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl Handler<Cast<EmptyMessage>> for EmptyActor {
-    async fn handle(
-        &mut self,
-        _: &Instance<Self>,
-        _: Cast<EmptyMessage>,
-    ) -> Result<(), anyhow::Error> {
+    async fn handle(&mut self, _: &Context<Self>, _: EmptyMessage) -> Result<(), anyhow::Error> {
         Ok(())
     }
 }

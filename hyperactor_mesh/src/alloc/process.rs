@@ -28,6 +28,7 @@ use hyperactor::channel::ChannelTx;
 use hyperactor::channel::Rx;
 use hyperactor::channel::Tx;
 use hyperactor::channel::TxStatus;
+use hyperactor::sync::flag;
 use hyperactor::sync::monitor;
 use ndslice::Shape;
 use tokio::io;
@@ -130,6 +131,7 @@ enum ChannelState {
 struct Child {
     channel: ChannelState,
     group: monitor::Group,
+    exit_flag: Option<flag::Flag>,
     stdout: LogTailer,
     stderr: LogTailer,
     stop_reason: Arc<OnceLock<ProcStopReason>>,
@@ -140,6 +142,7 @@ impl Child {
         mut process: tokio::process::Child,
     ) -> (Self, impl Future<Output = ProcStopReason>) {
         let (group, handle) = monitor::group();
+        let (exit_flag, exit_guard) = flag::guarded();
 
         let stdout = LogTailer::tee(
             MAX_TAIL_LOG_LINES,
@@ -156,6 +159,7 @@ impl Child {
         let child = Self {
             channel: ChannelState::NotConnected,
             group,
+            exit_flag: Some(exit_flag),
             stdout,
             stderr,
             stop_reason: Arc::clone(&stop_reason),
@@ -178,6 +182,8 @@ impl Child {
                 }
                 result = process.wait() => Self::exit_status_to_reason(result),
             };
+            exit_guard.signal();
+
             stop_reason.get_or_init(|| reason).clone()
         };
 
@@ -234,10 +240,24 @@ impl Child {
         true
     }
 
+    fn spawn_watchdog(&mut self) {
+        let Some(exit_flag) = self.exit_flag.take() else {
+            return;
+        };
+        let group = self.group.clone();
+        let stop_reason = self.stop_reason.clone();
+        tokio::spawn(async move {
+            let exit_timeout =
+                hyperactor::config::global::get(hyperactor::config::PROCESS_EXIT_TIMEOUT);
+            if tokio::time::timeout(exit_timeout, exit_flag).await.is_err() {
+                let _ = stop_reason.set(ProcStopReason::Watchdog);
+                group.fail();
+            }
+        });
+    }
+
     #[hyperactor::instrument_infallible]
     fn post(&mut self, message: Allocator2Process) {
-        // We're here simply assuming that if we're not connected, we're about to
-        // be killed.
         if let ChannelState::Connected(channel) = &mut self.channel {
             channel.post(message);
         } else {
@@ -321,7 +341,7 @@ impl ProcessAlloc {
         match cmd.spawn() {
             Err(err) => {
                 // Likely retry won't help here so fail permanently.
-                let message = format!("spawn {}: {}", index, err);
+                let message = format!("spawn index: {}, command: {:?}: {}", index, cmd, err);
                 tracing::error!(message);
                 self.failed = true;
                 Some(ProcState::Failed {
@@ -329,22 +349,29 @@ impl ProcessAlloc {
                     description: message,
                 })
             }
-            Ok(mut process) => match self.ranks.assign(index) {
-                Err(_index) => {
-                    tracing::info!("could not assign rank to {}", proc_id);
-                    let _ = process.kill().await;
-                    None
+            Ok(mut process) => {
+                let pid = process.id().unwrap_or(0);
+                match self.ranks.assign(index) {
+                    Err(_index) => {
+                        tracing::info!("could not assign rank to {}", proc_id);
+                        let _ = process.kill().await;
+                        None
+                    }
+                    Ok(rank) => {
+                        let (handle, monitor) = Child::monitored(process);
+                        self.children.spawn(async move { (index, monitor.await) });
+                        self.active.insert(index, handle);
+                        // Adjust for shape slice offset for non-zero shapes (sub-shapes).
+                        let rank = rank + self.spec.shape.slice().offset();
+                        let coords = self.spec.shape.slice().coordinates(rank).unwrap();
+                        Some(ProcState::Created {
+                            proc_id,
+                            coords,
+                            pid,
+                        })
+                    }
                 }
-                Ok(rank) => {
-                    let (handle, monitor) = Child::monitored(process);
-                    self.children.spawn(async move { (index, monitor.await) });
-                    self.active.insert(index, handle);
-                    // Adjust for shape slice offset for non-zero shapes (sub-shapes).
-                    let rank = rank + self.spec.shape.slice().offset();
-                    let coords = self.spec.shape.slice().coordinates(rank).unwrap();
-                    Some(ProcState::Created { proc_id, coords })
-                }
-            },
+            }
         }
     }
 
@@ -439,6 +466,7 @@ impl Alloc for ProcessAlloc {
         // for liveness.
         for (_index, child) in self.active.iter_mut() {
             child.post(Allocator2Process::StopAndExit(0));
+            child.spawn_watchdog();
         }
 
         self.running = false;

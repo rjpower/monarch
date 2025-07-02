@@ -26,6 +26,7 @@ use hyperactor::Actor;
 use hyperactor::ActorHandle;
 use hyperactor::ActorId;
 use hyperactor::ActorRef;
+use hyperactor::Context;
 use hyperactor::HandleClient;
 use hyperactor::Instance;
 use hyperactor::Named;
@@ -1085,7 +1086,13 @@ enum SystemStopMessage {
 /// procs. The system actor also provides a central mailbox that can
 /// route messages to any live actor in the system.
 #[derive(Debug, Clone)]
-#[hyperactor::export(SystemMessage, ProcSupervisionMessage, WorldSupervisionMessage)]
+#[hyperactor::export(
+    handlers = [
+        SystemMessage,
+        ProcSupervisionMessage,
+        WorldSupervisionMessage,
+    ],
+)]
 pub struct SystemActor {
     params: SystemActorParams,
     supervision_state: SystemSupervisionState,
@@ -1248,7 +1255,7 @@ impl Actor for SystemActor {
 impl SystemMessageHandler for SystemActor {
     async fn join(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         world_id: WorldId,
         proc_id: ProcId,
         proc_message_port: PortRef<ProcMessage>,
@@ -1335,7 +1342,7 @@ impl SystemMessageHandler for SystemActor {
 
     async fn upsert_world(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         world_id: WorldId,
         shape: Shape,
         num_procs_per_host: usize,
@@ -1406,7 +1413,7 @@ impl SystemMessageHandler for SystemActor {
 
     async fn snapshot(
         &mut self,
-        _this: &Instance<Self>,
+        _this: &Context<Self>,
         filter: SystemSnapshotFilter,
     ) -> Result<SystemSnapshot, anyhow::Error> {
         let world_snapshots = self
@@ -1428,7 +1435,7 @@ impl SystemMessageHandler for SystemActor {
 
     async fn stop(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         worlds: Option<Vec<WorldId>>,
         proc_timeout: Duration,
         reply_port: OncePortRef<()>,
@@ -1550,11 +1557,7 @@ impl SystemMessageHandler for SystemActor {
 
 #[async_trait]
 impl Handler<MaintainWorldHealth> for SystemActor {
-    async fn handle(
-        &mut self,
-        this: &hyperactor::Instance<Self>,
-        _: MaintainWorldHealth,
-    ) -> anyhow::Result<()> {
+    async fn handle(&mut self, this: &Context<Self>, _: MaintainWorldHealth) -> anyhow::Result<()> {
         // TODO: this needn't be async
 
         // Find the world with the oldest unhealthy time so we can schedule the next check.
@@ -1668,7 +1671,7 @@ impl Handler<MaintainWorldHealth> for SystemActor {
 impl Handler<ProcSupervisionMessage> for SystemActor {
     async fn handle(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         msg: ProcSupervisionMessage,
     ) -> anyhow::Result<()> {
         match msg {
@@ -1685,7 +1688,7 @@ impl Handler<ProcSupervisionMessage> for SystemActor {
 impl Handler<WorldSupervisionMessage> for SystemActor {
     async fn handle(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         msg: WorldSupervisionMessage,
     ) -> anyhow::Result<()> {
         match msg {
@@ -1705,11 +1708,7 @@ impl Handler<WorldSupervisionMessage> for SystemActor {
 // messages. Can be remove after T214365263 is implemented.
 #[async_trait]
 impl Handler<ProcStopResult> for SystemActor {
-    async fn handle(
-        &mut self,
-        this: &hyperactor::Instance<Self>,
-        msg: ProcStopResult,
-    ) -> anyhow::Result<()> {
+    async fn handle(&mut self, this: &Context<Self>, msg: ProcStopResult) -> anyhow::Result<()> {
         fn stopping_proc_msg<'a>(sprocs: impl Iterator<Item = &'a ProcId>) -> String {
             let sprocs = sprocs.collect::<Vec<_>>();
             if sprocs.is_empty() {
@@ -1768,7 +1767,7 @@ impl Handler<ProcStopResult> for SystemActor {
 impl Handler<SystemStopMessage> for SystemActor {
     async fn handle(
         &mut self,
-        this: &hyperactor::Instance<Self>,
+        this: &Context<Self>,
         message: SystemStopMessage,
     ) -> anyhow::Result<()> {
         match message {
@@ -1809,6 +1808,7 @@ mod tests {
     use anyhow::Result;
     use hyperactor::PortId;
     use hyperactor::actor::ActorStatus;
+    use hyperactor::attrs::Attrs;
     use hyperactor::channel;
     use hyperactor::channel::ChannelTransport;
     use hyperactor::channel::Rx;
@@ -1935,6 +1935,7 @@ mod tests {
                 local_proc_mbox.actor_id().clone(),
                 local_u64_port.bind().port_id().clone(),
                 Serialized::serialize(&123u64).unwrap(),
+                Attrs::new(),
             ),
             monitored_return_handle(),
         );
@@ -2747,7 +2748,8 @@ mod tests {
         // We expect message delivery failure prevents the game from
         // ending within the timeout.
         assert!(
-            tokio::time::timeout(tokio::time::Duration::from_secs(4), on_game_over.recv())
+            RealClock
+                .timeout(tokio::time::Duration::from_secs(4), on_game_over.recv())
                 .await
                 .is_err()
         );
@@ -2826,6 +2828,7 @@ mod tests {
             src_id,
             PortId(id!(proc[1].actor), 9999u64),
             Serialized::serialize(&1u64).unwrap(),
+            Attrs::new(),
         ));
 
         let envelope = rx.recv().await.unwrap();

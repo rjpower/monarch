@@ -6,13 +6,13 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#![cfg(feature = "tensor_engine")]
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use hyperactor::ActorRef;
 use hyperactor::WorldId;
+use hyperactor::clock::Clock;
+use hyperactor::clock::RealClock;
 use hyperactor::data::Serialized;
 use hyperactor_multiprocess::system_actor::SYSTEM_ACTOR_REF;
 use hyperactor_multiprocess::system_actor::SystemMessageClient;
@@ -39,6 +39,7 @@ use monarch_messages::debugger::DebuggerAction;
 use monarch_messages::worker::Ref;
 use monarch_types::PyTree;
 use monarch_types::TryIntoPyObjectUnsafe;
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -98,7 +99,7 @@ impl WorkerResponse {
     fn result(&self, py: Python<'_>) -> PyResult<PyObject> {
         if let Some(result) = &self.result {
             if result.is_err() {
-                Ok(PyNone::get(py).into_py(py))
+                PyNone::get(py).into_py_any(py)
             } else {
                 // TODO: Use better shared error class
                 let rvalue = result
@@ -113,15 +114,15 @@ impl WorkerResponse {
                 Ok(unsafe { rvalue.try_to_object_unsafe(py)?.unbind() })
             }
         } else {
-            Ok(PyNone::get(py).into_py(py))
+            PyNone::get(py).into_py_any(py)
         }
     }
 
     fn exception(&self, py: Python<'_>) -> PyResult<PyObject> {
         match self.result.as_ref() {
-            Some(Ok(_)) => Ok(PyNone::get(py).into_py(py)),
+            Some(Ok(_)) => PyNone::get(py).into_py_any(py),
             Some(Err(exc)) => Ok(PyException::exception_to_py(py, exc)?),
-            None => Ok(PyNone::get(py).into_py(py)),
+            None => PyNone::get(py).into_py_any(py),
         }
     }
 
@@ -146,20 +147,17 @@ pub struct PyWorldState {
 impl PyWorldState {
     #[getter]
     fn labels(self_: PyRef<Self>, py: Python) -> PyResult<PyObject> {
-        Ok(self_
-            .inner
-            .labels
-            .clone()
-            .into_py_dict(py)?
-            .into_any()
-            .unbind())
+        self_.inner.labels.clone().into_py_dict(py)?.into_py_any(py)
     }
 
     #[getter]
     fn procs(self_: PyRef<Self>, py: Python) -> PyResult<PyObject> {
         let proc_dict = PyDict::new(py);
         for (proc_id, proc_info) in self_.inner.procs.clone() {
-            proc_dict.set_item(proc_id.to_string(), PyProcInfo::from(proc_info).into_py(py))?;
+            proc_dict.set_item(
+                proc_id.to_string(),
+                PyProcInfo::from(proc_info).into_pyobject(py)?,
+            )?;
         }
         Ok(proc_dict.into())
     }
@@ -198,36 +196,34 @@ impl PySystemSnapshotFilter {
     }
 
     #[getter]
-    fn worlds(self_: PyRef<Self>, py: Python) -> PyObject {
+    fn worlds(self_: PyRef<Self>, py: Python) -> PyResult<PyObject> {
         self_
             .inner
             .worlds
             .iter()
             .map(|world_id| world_id.name())
             .collect::<Vec<_>>()
-            .into_py(py)
+            .into_py_any(py)
     }
 
     #[getter]
     fn world_labels(self_: PyRef<Self>, py: Python) -> PyResult<PyObject> {
-        Ok(self_
+        self_
             .inner
             .world_labels
             .clone()
             .into_py_dict(py)?
-            .into_any()
-            .unbind())
+            .into_py_any(py)
     }
 
     #[getter]
     fn proc_labels(self_: PyRef<Self>, py: Python) -> PyResult<PyObject> {
-        Ok(self_
+        self_
             .inner
             .proc_labels
             .clone()
             .into_py_dict(py)?
-            .into_any()
-            .unbind())
+            .into_py_any(py)
     }
 }
 
@@ -269,8 +265,8 @@ impl From<WorldSnapshotProcInfo> for PyProcInfo {
 #[pymethods]
 impl PyProcInfo {
     #[getter]
-    fn labels(self_: PyRef<Self>, py: Python) -> PyObject {
-        self_.inner.labels.clone().into_py_dict_bound(py).into()
+    fn labels(self_: PyRef<Self>, py: Python) -> PyResult<PyObject> {
+        Ok(self_.inner.labels.clone().into_py_dict(py)?.into())
     }
 }
 
@@ -287,14 +283,14 @@ pub struct PyException {
 impl PyException {
     pub(crate) fn exception_to_py(py: Python<'_>, exc: &Exception) -> PyResult<PyObject> {
         let initializer = PyClassInitializer::from(PyException { inner: exc.clone() });
-        Ok(match exc {
+        match exc {
             Exception::Error(_, _, _) => {
-                Py::new(py, initializer.add_subclass(PyError))?.to_object(py)
+                Py::new(py, initializer.add_subclass(PyError))?.into_py_any(py)
             }
             Exception::Failure(_) => {
-                Py::new(py, initializer.add_subclass(PyFailure))?.to_object(py)
+                Py::new(py, initializer.add_subclass(PyFailure))?.into_py_any(py)
             }
-        })
+        }
     }
 }
 
@@ -345,7 +341,7 @@ impl PyError {
             ),
         })
         .add_subclass(Self);
-        Ok(Py::new(py, initializer)?.to_object(py))
+        Py::new(py, initializer)?.into_py_any(py)
     }
 
     #[getter]
@@ -485,7 +481,7 @@ impl PyFailure {
             }),
         })
         .add_subclass(Self);
-        Ok(Py::new(py, initializer)?.to_object(py))
+        Py::new(py, initializer)?.into_py_any(py)
     }
 
     #[getter]
@@ -552,7 +548,7 @@ impl ClientActor {
                 .stop(&mailbox, worlds_ids, timeout, tx.bind())
                 .await?;
             let timeout = tokio::time::Duration::from_secs(10);
-            match tokio::time::timeout(timeout, rx.recv()).await {
+            match RealClock.timeout(timeout, rx.recv()).await {
                 Ok(result) => result.map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
                 Err(_) => {
                     tracing::info!(
@@ -661,22 +657,22 @@ impl ClientActor {
         Python::with_gil(|py| {
             match result {
                 Ok(Some(ClientMessage::Result { seq, result })) => {
-                    Ok(WorkerResponse { seq, result }.into_py(py))
+                    WorkerResponse { seq, result }.into_py_any(py)
                 }
-                Ok(Some(ClientMessage::Log { level, message })) => Ok(LogMessage {
+                Ok(Some(ClientMessage::Log { level, message })) => LogMessage {
                     level: PyLogLevel::from(level),
                     message,
                 }
-                .into_py(py)),
+                .into_py_any(py),
                 Ok(Some(ClientMessage::DebuggerMessage {
                     debugger_actor_id,
                     action,
-                })) => Ok(DebuggerMessage {
+                })) => DebuggerMessage {
                     debugger_actor_id: debugger_actor_id.into(),
                     action,
                 }
-                .into_py(py)),
-                Ok(None) => Ok(PyNone::get(py).into_py(py)),
+                .into_py_any(py),
+                Ok(None) => PyNone::get(py).into_py_any(py),
                 Err(err) => {
                     if let Some(ControllerError::Failed(controller_id, err_msg)) =
                         err.downcast_ref::<ControllerError>()
@@ -686,11 +682,11 @@ impl ClientActor {
                             address: "".to_string(), // Controller is always task 0 for now.
                             backtrace: err_msg.clone(),
                         };
-                        Ok(WorkerResponse {
+                        WorkerResponse {
                             seq: Seq::default(),
                             result: Some(Err(Exception::Failure(failure))),
                         }
-                        .into_py(py))
+                        .into_py_any(py)
                     } else {
                         Err(PyRuntimeError::new_err(err.to_string()))
                     }
@@ -718,12 +714,14 @@ impl ClientActor {
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
             .into_iter()
             .map(|message| match message {
-                ClientMessage::Result { seq, result } => WorkerResponse { seq, result }.into_py(py),
+                ClientMessage::Result { seq, result } => {
+                    WorkerResponse { seq, result }.into_py_any(py)
+                }
                 ClientMessage::Log { level, message } => LogMessage {
                     level: PyLogLevel::from(level),
                     message,
                 }
-                .into_py(py),
+                .into_py_any(py),
                 ClientMessage::DebuggerMessage {
                     debugger_actor_id,
                     action,
@@ -731,9 +729,9 @@ impl ClientActor {
                     debugger_actor_id: debugger_actor_id.into(),
                     action,
                 }
-                .into_py(py),
+                .into_py_any(py),
             })
-            .collect::<Vec<PyObject>>();
+            .collect::<PyResult<Vec<_>>>()?;
         PyList::new(py, messages)
     }
 
@@ -794,7 +792,7 @@ impl ClientActor {
             for (world, status) in snapshot.worlds {
                 worlds_dict.set_item(
                     world.to_string(),
-                    Py::new(py, PyWorldState { inner: status })?.to_object(py),
+                    Py::new(py, PyWorldState { inner: status })?.into_pyobject(py)?,
                 )?;
             }
             Ok(worlds_dict.into())

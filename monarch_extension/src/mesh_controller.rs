@@ -40,6 +40,7 @@ use monarch_messages::worker::WorkerParams;
 use monarch_tensor_worker::AssignRankMessage;
 use monarch_tensor_worker::WorkerActor;
 use ndslice::Slice;
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use tokio::sync::Mutex;
@@ -68,7 +69,7 @@ impl _Controller {
     ) -> PyResult<()> {
         for (seq, response) in responses {
             let message = crate::client::WorkerResponse::new(seq, response);
-            self.pending_messages.push_back(message.into_py(py));
+            self.pending_messages.push_back(message.into_py_any(py)?);
         }
         Ok(())
     }
@@ -89,7 +90,7 @@ impl _Controller {
                     action,
                 } => {
                     let dm = crate::client::DebuggerMessage::new(debugger_actor_id.into(), action)?
-                        .into_py(py);
+                        .into_py_any(py)?;
                     self.pending_messages.push_back(dm);
                 }
                 ControllerMessage::Status {
@@ -379,12 +380,12 @@ impl Invocation {
                 );
             }
         }
-        return vec![];
+        vec![]
     }
 
     fn msg_result(&self) -> Option<Result<Serialized, Exception>> {
         match &self.status {
-            Status::Complete() => self.result.clone().map(|x| Ok(x)),
+            Status::Complete() => self.result.clone().map(Ok),
             Status::Errored(err) => Some(Err(err.clone())),
             Status::Incomplete(_) => {
                 panic!("Incomplete invocation doesn't have a result yet")

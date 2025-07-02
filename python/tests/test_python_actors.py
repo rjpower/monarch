@@ -6,9 +6,9 @@
 
 import asyncio
 import operator
-import os
 import re
 import threading
+import time
 from types import ModuleType
 from unittest.mock import AsyncMock, patch
 
@@ -30,10 +30,13 @@ from monarch.actor_mesh import (
 from monarch.debugger import init_debugging
 from monarch.future import ActorFuture
 
-from monarch.mesh_controller import spawn_tensor_engine
-
 from monarch.proc_mesh import local_proc_mesh, proc_mesh
 from monarch.rdma import RDMABuffer
+
+needs_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA not available",
+)
 
 
 class Counter(Actor):
@@ -115,6 +118,7 @@ class ParameterClient(Actor):
         return self.buffer
 
 
+@needs_cuda
 async def test_proc_mesh_rdma():
     proc = await proc_mesh(gpus=1)
     server = await proc.spawn("server", ParameterServer)
@@ -283,6 +287,7 @@ class GeneratorActor(Actor):
         ), f"{torch.sum(self.generator.weight.data)=}, {self.step=}"
 
 
+@needs_cuda
 async def test_gpu_trainer_generator():
     trainer_proc = await proc_mesh(gpus=1)
     gen_proc = await proc_mesh(gpus=1)
@@ -312,6 +317,7 @@ async def test_sync_actor():
     assert r == 5
 
 
+@needs_cuda
 def test_gpu_trainer_generator_sync() -> None:
     trainer_proc = proc_mesh(gpus=1).get()
     gen_proc = proc_mesh(gpus=1).get()
@@ -392,28 +398,14 @@ def test_rust_binding_modules_correct() -> None:
     check(bindings, "monarch._rust_bindings")
 
 
-two_gpu = pytest.mark.skipif(
-    torch.cuda.device_count() < 2,
-    reason="Not enough GPUs, this test requires at least 2 GPUs",
-)
-
-
-@two_gpu
-def test_tensor_engine() -> None:
-    pm = proc_mesh(gpus=2).get()
-
-    dm = spawn_tensor_engine(pm)
-    with dm.activate():
-        r = monarch.inspect(2 * torch.zeros(3, 4))
-
-    fm = dm.flatten("all")
-    with fm.activate():
-        f = monarch.inspect(2 * torch.zeros(3, 4), all=1)
-
-    assert torch.allclose(torch.zeros(3, 4), r)
-    assert torch.allclose(torch.zeros(3, 4), f)
-
-    dm.exit()
+def test_proc_mesh_liveness() -> None:
+    mesh = proc_mesh(gpus=2).get()
+    counter = mesh.spawn("counter", Counter, 1).get()
+    del mesh
+    # Give some time for the mesh to have been shut down.
+    # (It only would if there were a bug.)
+    time.sleep(0.5)
+    counter.value.call().get()
 
 
 def _debugee_actor_internal(rank):
@@ -619,23 +611,6 @@ async def test_actor_tls_full_sync() -> None:
     await am.increment.call_one()
 
     assert 4 == await am.get.call_one()
-
-
-@two_gpu
-def test_proc_mesh_tensor_engine() -> None:
-    pm = proc_mesh(gpus=2).get()
-    with pm.activate():
-        f = 10 * pm.rank_tensor("gpus").cuda()
-        a = monarch.inspect(f, hosts=0, gpus=0)
-        b = monarch.inspect(f, hosts=0, gpus=1)
-
-    one = pm.slice(gpus=1)
-    with one.activate():
-        sliced_b = monarch.slice_mesh(f, gpus=1).to_mesh(one)
-        c = monarch.inspect(sliced_b * 10)
-    assert a == 0
-    assert b == 10
-    assert c == 100
 
 
 class AsyncActor(Actor):
