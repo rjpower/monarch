@@ -340,7 +340,6 @@ impl Handler<ForwardMessage> for CommActor {
 
         // Resolve/dedup routing frames.
         let rank = self.mode.self_rank(this.self_id());
-        let slice = dests[0].slice.as_ref().clone();
         let (deliver_here, next_steps) =
             ndslice::selection::routing::resolve_routing(rank, dests, &mut |_| {
                 panic!("Choice encountered in CommActor routing")
