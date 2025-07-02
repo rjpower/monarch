@@ -175,8 +175,10 @@ impl WorkerServerResponse {
 }
 
 pub fn worker_server(inp: impl BufRead, mut outp: impl Write) -> Result<()> {
-    let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-    hyperactor::initialize(runtime.handle().clone());
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    hyperactor::initialize(rt.handle().clone());
 
     tracing::info!("running worker server on {}", std::process::id());
 
@@ -198,9 +200,6 @@ pub fn worker_server(inp: impl BufRead, mut outp: impl Write) -> Result<()> {
                     supervision_update_interval_in_sec: 5,
                     extra_proc_labels: Some(labels),
                 };
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()?;
                 let res = rt
                     .block_on(async move { anyhow::Ok(bootstrap_worker_proc(args).await?.await) });
                 WorkerServerResponse::Finished {

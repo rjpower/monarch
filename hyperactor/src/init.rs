@@ -39,13 +39,7 @@ pub fn initialize(handle: tokio::runtime::Handle) {
 }
 
 /// Initialize the Hyperactor runtime using the current tokio runtime handle.
-/// This should be used when already within an async context where a runtime is running.
-/// NEVER creates a duplicate runtime - uses the existing one.
-/// - Set up panic handling, so that we get consistent panic stack traces in Actors.
-/// - Initialize logging defaults.
-/// - Use the current tokio runtime handle for the hyperactor system.
-pub fn initialize_with_current() {
-    // Get the current runtime handle - this will panic if not in an async context
+pub fn initialize_with_current_runtime() {
     let handle = tokio::runtime::Handle::current();
     initialize(handle);
 }
