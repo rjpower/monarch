@@ -28,7 +28,7 @@ pub fn bootstrap_main(py: Python) -> PyResult<Bound<PyAny>> {
     hyperactor::tracing::debug!("entering async bootstrap");
     pyo3_async_runtimes::tokio::future_into_py::<_, ()>(py, async move {
         // SAFETY:
-        // - Only one of these is every created.
+        // - Only one of these is ever created.
         // - This is the entry point of this program, so this will be dropped when
         // no more FB C++ code is running.
         let _destroy_guard = unsafe { fbinit::DestroyGuard::new() };
