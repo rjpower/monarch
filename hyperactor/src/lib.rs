@@ -134,7 +134,7 @@ pub use hyperactor_telemetry::declare_static_timer;
 pub use hyperactor_telemetry::key_value;
 pub use hyperactor_telemetry::kv_pairs;
 #[doc(inline)]
-pub use init::initialize;
+pub use init::{initialize, initialize_with_current};
 // Re-exported to make this available to callers of the `register!` macro.
 #[doc(hidden)]
 pub use inventory::submit;

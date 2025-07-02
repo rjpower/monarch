@@ -175,7 +175,8 @@ impl WorkerServerResponse {
 }
 
 pub fn worker_server(inp: impl BufRead, mut outp: impl Write) -> Result<()> {
-    hyperactor::initialize();
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    hyperactor::initialize(runtime.handle().clone());
 
     tracing::info!("running worker server on {}", std::process::id());
 
