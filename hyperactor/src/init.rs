@@ -15,11 +15,14 @@ use crate::panic_handler;
 /// compute intensive tasks.
 static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 
-/// Get a handle to the global runtime. Panics if hyperactor::initialize has not been called.
+/// Get a handle to the global runtime.
+///
+/// Panics if the runtime has not been initialized *and* the caller is not in an
+/// async context.
 pub(crate) fn get_runtime() -> tokio::runtime::Handle {
     RUNTIME
         .get()
-        .expect("hyperactor::initialize must be called")
+        .unwrap_or(&tokio::runtime::Handle::current())
         .clone()
 }
 
