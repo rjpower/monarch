@@ -1397,7 +1397,7 @@ fn worker_main(py: Python<'_>) -> PyResult<()> {
                     .enable_all()
                     .build()?;
                 rt.block_on(async move {
-                    hyperactor::initialize();
+                    hyperactor::initialize_with_current();
                     let _ = bootstrap_worker_proc(args).await?.await;
                     Ok(())
                 })

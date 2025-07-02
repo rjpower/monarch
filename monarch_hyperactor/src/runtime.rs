@@ -107,7 +107,11 @@ where
 #[pyfunction]
 pub fn sleep_indefinitely_for_unit_tests(py: Python) -> PyResult<()> {
     // Safe to call multiple times, but ensures anything that could fail within hyperactor runtime like telemetry gets reported.
-    hyperactor::initialize();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create hyperactor runtime");
+    hyperactor::initialize(runtime.handle().clone());
     // Create a future that sleeps indefinitely
     let future = async {
         loop {
