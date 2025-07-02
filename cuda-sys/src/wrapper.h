@@ -6,7 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-pub mod rsync;
-mod workspace;
+#pragma once
 
-pub use workspace::WorkspaceLocation;
+#include <cuda.h>
+#include <cuda_runtime.h>
