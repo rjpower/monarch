@@ -20,10 +20,10 @@ static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 /// Panics if the runtime has not been initialized *and* the caller is not in an
 /// async context.
 pub(crate) fn get_runtime() -> tokio::runtime::Handle {
-    RUNTIME
-        .get()
-        .unwrap_or(&tokio::runtime::Handle::current())
-        .clone()
+    match RUNTIME.get() {
+        Some(handle) => handle.clone(),
+        None => tokio::runtime::Handle::current(),
+    }
 }
 
 /// Initialize the Hyperactor runtime. Specifically:
