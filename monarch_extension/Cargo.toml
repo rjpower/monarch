@@ -21,6 +21,7 @@ hyperactor = { version = "0.0.0", path = "../hyperactor" }
 hyperactor_extension = { version = "0.0.0", path = "../hyperactor_extension" }
 hyperactor_mesh = { version = "0.0.0", path = "../hyperactor_mesh" }
 hyperactor_multiprocess = { version = "0.0.0", path = "../hyperactor_multiprocess" }
+libc = "0.2.139"
 monarch_hyperactor = { version = "0.0.0", path = "../monarch_hyperactor" }
 monarch_messages = { version = "0.0.0", path = "../monarch_messages", optional = true }
 monarch_simulator_lib = { version = "0.0.0", path = "../monarch_simulator", optional = true }
@@ -28,7 +29,7 @@ monarch_tensor_worker = { version = "0.0.0", path = "../monarch_tensor_worker", 
 monarch_types = { version = "0.0.0", path = "../monarch_types" }
 nccl-sys = { path = "../nccl-sys", optional = true }
 ndslice = { version = "0.0.0", path = "../ndslice" }
-pyo3 = { version = "0.24", features = ["anyhow"] }
+pyo3 = { version = "0.24", features = ["anyhow", "multiple-pymethods"] }
 pyo3-async-runtimes = { git = "https://github.com/PyO3/pyo3-async-runtimes", rev = "c5a3746f110b4d246556b0f6c29f5f555919eee3", features = ["attributes", "tokio-runtime"] }
 tokio = { version = "1.45.0", features = ["full", "test-util", "tracing"] }
 torch-sys = { version = "0.0.0", path = "../torch-sys", optional = true }

@@ -248,6 +248,11 @@ impl MessageEnvelope {
         &self.dest
     }
 
+    /// The message headers.
+    pub fn headers(&self) -> &Attrs {
+        &self.headers
+    }
+
     /// Tells whether this is a signal message.
     pub fn is_signal(&self) -> bool {
         self.dest.index() == Signal::port()
@@ -678,7 +683,7 @@ impl<T: Message> Buffer<T> {
     {
         let (queue, mut next) = mpsc::unbounded_channel();
         let (last_processed, processed) = watch::channel(0);
-        crate::init::RUNTIME.spawn(async move {
+        crate::init::get_runtime().spawn(async move {
             let mut seq = 0;
             while let Some((msg, return_handle)) = next.recv().await {
                 process(msg, return_handle).await;
@@ -925,7 +930,7 @@ impl MailboxClient {
         cancel_token: CancellationToken,
         addr: ChannelAddr,
     ) {
-        crate::init::RUNTIME.spawn(async move {
+        crate::init::get_runtime().spawn(async move {
             loop {
                 tokio::select! {
                     changed = rx.changed() => {
@@ -2124,8 +2129,15 @@ impl MailboxSender for WeakMailboxRouter {
     }
 }
 
-/// A serializable [`MailboxRouter`]. It keeps a serializable address book so that
-/// the mailbox sender can be recovered.
+/// A dynamic mailbox router that supports remote delivery.
+///
+/// `DialMailboxRouter` maintains a runtime address book mapping
+/// references to `ChannelAddr`s. It holds a cache of active
+/// connections and forwards messages to the appropriate
+/// `MailboxClient`.
+///
+/// Messages sent to unknown destinations are routed to the `default`
+/// sender, if present.
 #[derive(Debug, Clone)]
 pub struct DialMailboxRouter {
     address_book: Arc<RwLock<BTreeMap<Reference, ChannelAddr>>>,
@@ -2763,7 +2775,8 @@ mod tests {
         return_handle.send(Undeliverable(envelope.clone())).unwrap();
         // Check we receive the undelivered message.
         assert!(
-            tokio::time::timeout(tokio::time::Duration::from_secs(1), return_receiver.recv())
+            RealClock
+                .timeout(tokio::time::Duration::from_secs(1), return_receiver.recv())
                 .await
                 .is_ok()
         );
@@ -2780,7 +2793,8 @@ mod tests {
         });
         drop(return_handle);
         assert!(
-            tokio::time::timeout(tokio::time::Duration::from_secs(1), monitor_handle)
+            RealClock
+                .timeout(tokio::time::Duration::from_secs(1), monitor_handle)
                 .await
                 .is_ok()
         );
@@ -2873,7 +2887,8 @@ mod tests {
         {
             let (sender, mut receiver) = create_receiver::<u64>(coalesce);
             assert!(
-                tokio::time::timeout(tokio::time::Duration::from_secs(1), receiver.recv())
+                RealClock
+                    .timeout(tokio::time::Duration::from_secs(1), receiver.recv())
                     .await
                     .is_err()
             );
@@ -2905,7 +2920,8 @@ mod tests {
                 );
             } else {
                 assert!(
-                    tokio::time::timeout(tokio::time::Duration::from_secs(1), receiver.recv())
+                    RealClock
+                        .timeout(tokio::time::Duration::from_secs(1), receiver.recv())
                         .await
                         .is_err()
                 );
@@ -3013,16 +3029,17 @@ mod tests {
     ) -> anyhow::Result<Vec<u64>> {
         let mut messeges = vec![];
 
-        tokio::time::timeout(timeout_duration, async {
-            loop {
-                let msg = receiver.recv().await.unwrap();
-                messeges.push(msg);
-                if messeges.len() == expected_size {
-                    break;
+        RealClock
+            .timeout(timeout_duration, async {
+                loop {
+                    let msg = receiver.recv().await.unwrap();
+                    messeges.push(msg);
+                    if messeges.len() == expected_size {
+                        break;
+                    }
                 }
-            }
-        })
-        .await?;
+            })
+            .await?;
         Ok(messeges)
     }
 

@@ -24,6 +24,7 @@ mod simulator_client;
 #[cfg(feature = "tensor_engine")]
 mod tensor_worker;
 
+mod blocking;
 mod panic;
 use pyo3::prelude::*;
 
@@ -63,8 +64,9 @@ fn get_or_add_new_module<'py>(
 #[pymodule]
 #[pyo3(name = "_rust_bindings")]
 pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    ::hyperactor::initialize();
     monarch_hyperactor::runtime::initialize(module.py())?;
+    let runtime = monarch_hyperactor::runtime::get_tokio_runtime();
+    ::hyperactor::initialize(runtime.handle().clone());
 
     monarch_hyperactor::shape::register_python_bindings(&get_or_add_new_module(
         module,
@@ -180,6 +182,11 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::panic::register_python_bindings(&get_or_add_new_module(
         module,
         "monarch_extension.panic",
+    )?)?;
+
+    crate::blocking::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_extension.blocking",
     )?)?;
 
     // Add feature detection function
