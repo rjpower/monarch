@@ -174,12 +174,11 @@ impl WorkerServerResponse {
     }
 }
 
-pub fn worker_server(inp: impl BufRead, mut outp: impl Write) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    hyperactor::initialize(rt.handle().clone());
-
+pub fn worker_server(
+    rt: &tokio::runtime::Runtime,
+    inp: impl BufRead,
+    mut outp: impl Write,
+) -> Result<()> {
     tracing::info!("running worker server on {}", std::process::id());
 
     for line in inp.lines() {
