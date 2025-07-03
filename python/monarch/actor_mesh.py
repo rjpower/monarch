@@ -427,9 +427,9 @@ class PortTuple(NamedTuple, Generic[R]):
     @staticmethod
     def create(mailbox: Mailbox, once: bool = False) -> "PortTuple[Any]":
         handle, receiver = mailbox.open_once_port() if once else mailbox.open_port()
-        port_id: PortId = handle.bind()
+        port_ref = handle.bind()
         return PortTuple(
-            Port(port_id, mailbox, rank=None), PortReceiver(mailbox, receiver)
+            Port(port_ref, mailbox, rank=None), PortReceiver(mailbox, receiver)
         )
 
 

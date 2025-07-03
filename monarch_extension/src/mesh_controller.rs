@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::ActorHandle;
 use hyperactor::ActorRef;
+use hyperactor::Context;
 use hyperactor::HandleClient;
 use hyperactor::Handler;
 use hyperactor::Instance;
@@ -45,7 +46,6 @@ use monarch_messages::worker::WorkerParams;
 use monarch_tensor_worker::AssignRankMessage;
 use monarch_tensor_worker::WorkerActor;
 use ndslice::Slice;
-use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use tokio::sync::Mutex;
@@ -622,7 +622,7 @@ impl Actor for MeshControllerActor {
 impl Handler<ControllerMessage> for MeshControllerActor {
     async fn handle(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         message: ControllerMessage,
     ) -> anyhow::Result<()> {
         match message {
@@ -663,7 +663,7 @@ impl Handler<ControllerMessage> for MeshControllerActor {
 impl Handler<ClientToControllerMessage> for MeshControllerActor {
     async fn handle(
         &mut self,
-        this: &Instance<Self>,
+        this: &Context<Self>,
         message: ClientToControllerMessage,
     ) -> anyhow::Result<()> {
         match message {

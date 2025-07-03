@@ -316,7 +316,7 @@ class MeshClient(Client):
             # method annotation is a lie to make Client happy
             port = cast("Port[Any]", future)
             slice = NDSlice.new_row_major([])
-            response_port = (port._port, slice)
+            response_port = (port._port_ref.port_id, slice)
         self._mesh_controller.node(seq, defs, uses, response_port, tracebacks)
         return seq
 
