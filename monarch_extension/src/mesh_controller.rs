@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::Debug;
 use std::fmt::Formatter;
+use std::ops::DerefMut;
 use std::sync;
 use std::sync::Arc;
 use std::sync::atomic;
@@ -27,7 +28,6 @@ use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::PortRef;
 use hyperactor::cap::CanSend;
-use hyperactor::channel::Port;
 use hyperactor::mailbox::MailboxSenderError;
 use hyperactor_mesh::Mesh;
 use hyperactor_mesh::ProcMesh;
@@ -310,32 +310,45 @@ impl Invocation {
         sender: &impl CanSend,
         unreported_exception: &mut Option<Arc<PythonMessage>>,
         exception: Arc<PythonMessage>,
-    ) -> Result<Vec<Arc<sync::Mutex<Invocation>>>, MailboxSenderError> {
-        let err = Status::Errored {
-            exception: exception.clone(),
-        };
-        let old_status = std::mem::replace(&mut self.status, err);
-        match old_status {
-            Status::Incomplete { users, .. } => {
-                match &self.response_port {
-                    Some(PortInfo { port, ranks }) => {
-                        eprintln!("CLEARING EXCEPTION");
-                        *unreported_exception = None;
-                        for rank in ranks.iter() {
-                            let msg = exception.as_ref().clone().with_rank(rank);
-                            port.send(sender, msg)?;
-                        }
-                    }
-                    None => {}
+    ) -> Result<(), MailboxSenderError> {
+        let mut process =
+            |invocation: &mut Invocation, queue: &mut Vec<Arc<sync::Mutex<Invocation>>>| {
+                let err = Status::Errored {
+                    exception: exception.clone(),
                 };
-                return Ok(users.into_values().collect());
-            }
-            Status::Complete {} => {
-                panic!("Complete invocation getting an exception set")
-            }
-            Status::Errored { .. } => self.status = old_status,
+                let old_status = std::mem::replace(&mut invocation.status, err);
+                match old_status {
+                    Status::Incomplete { users, .. } => {
+                        match &invocation.response_port {
+                            Some(PortInfo { port, ranks }) => {
+                                *unreported_exception = None;
+                                for rank in ranks.iter() {
+                                    let msg = exception.as_ref().clone().with_rank(rank);
+                                    port.send(sender, msg)?;
+                                }
+                            }
+                            None => {}
+                        };
+                        queue.extend(users.into_values());
+                    }
+                    Status::Complete {} => {
+                        panic!("Complete invocation getting an exception set")
+                    }
+                    Status::Errored { .. } => invocation.status = old_status,
+                }
+                Ok(())
+            };
+        let mut queue = vec![];
+        let mut visited = HashSet::new();
+        process(self, &mut queue)?;
+        while let Some(invocation) = queue.pop() {
+            let mut invocation = invocation.lock().unwrap();
+            if !visited.insert(invocation.seq) {
+                continue;
+            };
+            process(invocation.deref_mut(), &mut queue)?;
         }
-        Ok(vec![])
+        Ok(())
     }
 }
 
@@ -506,20 +519,12 @@ impl History {
 
         self.unreported_exception = Some(python_message.clone());
 
-        let mut queue: Vec<Arc<sync::Mutex<Invocation>>> = vec![invocation];
-        let mut visited = HashSet::new();
+        invocation.lock().unwrap().set_exception(
+            sender,
+            &mut self.unreported_exception,
+            python_message.clone(),
+        )?;
 
-        while let Some(invocation) = queue.pop() {
-            let mut invocation = invocation.lock().unwrap();
-            if !visited.insert(invocation.seq) {
-                continue;
-            };
-            queue.extend(invocation.set_exception(
-                sender,
-                &mut self.unreported_exception,
-                python_message.clone(),
-            )?);
-        }
         Ok(())
     }
 
