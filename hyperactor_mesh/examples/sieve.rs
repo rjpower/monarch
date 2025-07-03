@@ -72,15 +72,15 @@ pub struct SieveActor {
 
 #[async_trait]
 impl Handler<NextNumber> for SieveActor {
-    async fn handle(&mut self, this: &Context<Self>, msg: NextNumber) -> Result<()> {
+    async fn handle(&mut self, cx: &Context<Self>, msg: NextNumber) -> Result<()> {
         if msg.number % self.prime != 0 {
             match &self.next {
                 Some(next) => {
-                    next.send(this, msg)?;
+                    next.send(cx, msg)?;
                 }
                 None => {
-                    msg.prime_collector.send(this, msg.number)?;
-                    let child = SieveActor::spawn(this, SieveParams { prime: msg.number }).await?;
+                    msg.prime_collector.send(cx, msg.number)?;
+                    let child = SieveActor::spawn(cx, SieveParams { prime: msg.number }).await?;
                     let child_ref = child.bind();
                     self.next = Some(child_ref);
                 }

@@ -470,19 +470,19 @@ impl Actor for StreamActor {
         })
     }
 
-    async fn init(&mut self, this: &Instance<Self>) -> Result<()> {
+    async fn init(&mut self, cx: &Instance<Self>) -> Result<()> {
         // These thread locals are exposed via python functions, so we need to set them in the
         // same thread that python will run in. That means we need to initialize them here in
         // StreamActor::init instead of in StreamActor::new.
         CONTROLLER_ACTOR_REF.with(|controller_actor_ref| {
             controller_actor_ref.set(self.controller_actor.clone()).ok()
         });
-        PROC.with(|proc| proc.set(this.proc().clone()).ok());
+        PROC.with(|proc| proc.set(cx.proc().clone()).ok());
         ROOT_ACTOR_ID.with(|root_actor_id| {
             root_actor_id
                 .set(ActorId::root(
-                    this.self_id().proc_id().clone(),
-                    this.self_id().name().to_string(),
+                    cx.self_id().proc_id().clone(),
+                    cx.self_id().name().to_string(),
                 ))
                 .ok()
         });
@@ -712,7 +712,7 @@ impl StreamActor {
 
     fn call_python_fn(
         &mut self,
-        this: &Instance<Self>,
+        cx: &Context<Self>,
         function: ResolvableFunction,
         args: Vec<WireValue>,
         kwargs: HashMap<String, WireValue>,
@@ -752,7 +752,7 @@ impl StreamActor {
                             let group_size = ranks.len();
                             let backend = CommBackend::new(
                                 comm,
-                                Mailbox::new_detached(this.self_id().clone()),
+                                Mailbox::new_detached(cx.self_id().clone()),
                                 self.rank,
                                 group_size,
                                 self.world_size,
@@ -926,7 +926,7 @@ impl StreamActor {
 impl StreamMessageHandler for StreamActor {
     async fn call_function(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         params: CallFunctionParams,
         device_meshes: HashMap<Ref, DeviceMesh>,
         remote_process_groups: HashMap<
@@ -956,7 +956,7 @@ impl StreamMessageHandler for StreamActor {
                 // runtime to run async code.
                 tokio::task::block_in_place(|| {
                     self.call_python_fn(
-                        this,
+                        cx,
                         params.function,
                         params.args,
                         params.kwargs,
@@ -986,13 +986,13 @@ impl StreamMessageHandler for StreamActor {
                     _ => {
                         let worker_error = WorkerError {
                             backtrace: format!("{err}"),
-                            worker_actor_id: this.self_id().clone(),
+                            worker_actor_id: cx.self_id().clone(),
                         };
                         tracing::info!(
                             "Propagating remote function error to client: {worker_error}"
                         );
                         self.controller_actor
-                            .remote_function_failed(this, params.seq, worker_error)
+                            .remote_function_failed(cx, params.seq, worker_error)
                             .await?;
                     }
                 };
@@ -1006,7 +1006,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn borrow_create(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         borrow: u64,
         tensor: Ref,
         first_use_sender: PortHandle<(Option<Event>, TensorCellResult)>,
@@ -1046,7 +1046,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn borrow_first_use(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         borrow: u64,
         result: Ref,
         first_use_receiver: Arc<Mutex<PortReceiver<(Option<Event>, TensorCellResult)>>>,
@@ -1097,7 +1097,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn borrow_last_use(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         borrow: u64,
         result: Ref,
         last_use_sender: PortHandle<(Option<Event>, TensorCellResult)>,
@@ -1132,7 +1132,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn borrow_drop(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         borrow: u64,
         last_use_receiver: Arc<Mutex<PortReceiver<(Option<Event>, TensorCellResult)>>>,
     ) -> Result<()> {
@@ -1169,7 +1169,7 @@ impl StreamMessageHandler for StreamActor {
         Ok(())
     }
 
-    async fn delete_refs(&mut self, _this: &Context<Self>, refs: Vec<Ref>) -> Result<()> {
+    async fn delete_refs(&mut self, _cx: &Context<Self>, refs: Vec<Ref>) -> Result<()> {
         if let Some((recording, _)) = self.get_defining_recording() {
             recording.messages.push(StreamMessage::DeleteRefs(refs));
             return Ok(());
@@ -1181,7 +1181,7 @@ impl StreamMessageHandler for StreamActor {
         Ok(())
     }
 
-    async fn request_status(&mut self, _this: &Context<Self>) -> Result<()> {
+    async fn request_status(&mut self, _cx: &Context<Self>) -> Result<()> {
         if self.get_defining_recording().is_some() {
             bail!("request_status not allowed in recording");
         }
@@ -1191,7 +1191,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn init_comm(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         comm: ActorHandle<NcclCommActor>,
     ) -> Result<()> {
         if self.get_defining_recording().is_some() {
@@ -1204,7 +1204,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn reduce(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         comm: Arc<ActorHandle<NcclCommActor>>,
         dim_size: i64,
         result: Ref,
@@ -1250,7 +1250,7 @@ impl StreamMessageHandler for StreamActor {
                             TensorCell::new(cloned)
                         })
                     };
-                    comm.all_to_all_single(this, output_cell.clone(), input_cell, stream)
+                    comm.all_to_all_single(cx, output_cell.clone(), input_cell, stream)
                         .await?;
                     output_cell
                 } else {
@@ -1267,7 +1267,7 @@ impl StreamMessageHandler for StreamActor {
                         TensorCell::new(output)
                     });
 
-                    comm.all_gather_into_tensor(this, output_cell.clone(), input_cell, stream)
+                    comm.all_gather_into_tensor(cx, output_cell.clone(), input_cell, stream)
                         .await?;
                     output_cell
                 }
@@ -1285,7 +1285,7 @@ impl StreamMessageHandler for StreamActor {
                         );
                         TensorCell::new(output)
                     });
-                    comm.reduce_scatter_tensor(this, output_cell.clone(), input_cell, op, stream)
+                    comm.reduce_scatter_tensor(cx, output_cell.clone(), input_cell, op, stream)
                         .await?;
                     output_cell
                 } else {
@@ -1311,8 +1311,7 @@ impl StreamMessageHandler for StreamActor {
                         )?
                     };
 
-                    comm.all_reduce(this, output_cell.clone(), op, stream)
-                        .await?;
+                    comm.all_reduce(cx, output_cell.clone(), op, stream).await?;
                     output_cell
                 }
             }
@@ -1324,7 +1323,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn send_tensor(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         result: Ref,
         from_rank: Option<usize>,
         to_rank: Option<usize>,
@@ -1383,7 +1382,7 @@ impl StreamMessageHandler for StreamActor {
                 self.cuda_stream()
                     .expect("tried to send_tensor on non-cuda stream")
                     .clone(),
-                this.open_once_port().0,
+                cx.open_once_port().0,
             ));
         }
 
@@ -1400,13 +1399,13 @@ impl StreamMessageHandler for StreamActor {
                 self.cuda_stream()
                     .expect("tried to send_tensor on non-cuda stream")
                     .clone(),
-                this.open_once_port().0,
+                cx.open_once_port().0,
             ));
             self.env.insert(result, Ok(output_cell.into()));
         }
 
         comm.group(
-            this,
+            cx,
             messages,
             self.cuda_stream()
                 .expect("tried to send_tensor on non-cuda stream")
@@ -1418,7 +1417,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn send_value(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         seq: Seq,
         worker_actor_id: ActorId,
         mutates: Vec<Ref>,
@@ -1458,7 +1457,7 @@ impl StreamMessageHandler for StreamActor {
                 // runtime to run async code.
                 _ => tokio::task::block_in_place(|| {
                     self.call_python_fn(
-                        this,
+                        cx,
                         function,
                         args,
                         kwargs,
@@ -1544,9 +1543,7 @@ impl StreamMessageHandler for StreamActor {
                 Ok(value) => Ok(Serialized::serialize_anon(&value).map_err(anyhow::Error::from)?),
                 Err(e) => Err(e),
             };
-            self.controller_actor
-                .fetch_result(this, seq, result)
-                .await?;
+            self.controller_actor.fetch_result(cx, seq, result).await?;
         }
 
         Ok(())
@@ -1554,7 +1551,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn set_value(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         results: Vec<Option<Ref>>,
         pipe: Result<PortHandle<PipeMessage>, Arc<CallFunctionError>>,
     ) -> Result<()> {
@@ -1576,7 +1573,7 @@ impl StreamMessageHandler for StreamActor {
             },
         };
 
-        let (tx, rx) = this.open_once_port();
+        let (tx, rx) = cx.open_once_port();
         let value = async {
             pipe?
                 .send(PipeMessage::RecvValue(tx))
@@ -1596,7 +1593,7 @@ impl StreamMessageHandler for StreamActor {
         Ok(())
     }
 
-    async fn define_recording(&mut self, _this: &Context<Self>, recording: Ref) -> Result<()> {
+    async fn define_recording(&mut self, _cx: &Context<Self>, recording: Ref) -> Result<()> {
         if self.active_recording.is_some() {
             bail!("different recording already active");
         }
@@ -1611,7 +1608,7 @@ impl StreamMessageHandler for StreamActor {
         Ok(())
     }
 
-    async fn finalize_recording(&mut self, _this: &Context<Self>, recording: Ref) -> Result<()> {
+    async fn finalize_recording(&mut self, _cx: &Context<Self>, recording: Ref) -> Result<()> {
         match self.active_recording {
             Some(RecordingState::Defining {
                 recording: active_recording,
@@ -1630,7 +1627,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn recording_formal(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         result: Ref,
         argument_index: usize,
     ) -> Result<()> {
@@ -1648,7 +1645,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn recording_result(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         result: Ref,
         output_index: usize,
     ) -> Result<()> {
@@ -1666,7 +1663,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn call_recording(
         &mut self,
-        this: &Context<Self>,
+        cx: &Context<Self>,
         seq: Seq,
         recording: Ref,
         results: Vec<Ref>,
@@ -1750,7 +1747,7 @@ impl StreamMessageHandler for StreamActor {
                     for ref_ in refs {
                         all_defined_refs.remove(ref_);
                     }
-                    StreamMessageHandler::handle(self, this, message).await?;
+                    StreamMessageHandler::handle(self, cx, message).await?;
                 }
                 StreamMessage::CallFunction { .. } if error.is_some() => {
                     // CallFunction is expensive. If the recording already failed, then
@@ -1770,7 +1767,7 @@ impl StreamMessageHandler for StreamActor {
                 }
                 StreamMessage::BorrowLastUse { ref result, .. } => {
                     all_defined_refs.remove(result);
-                    StreamMessageHandler::handle(self, this, message).await?;
+                    StreamMessageHandler::handle(self, cx, message).await?;
                 }
                 StreamMessage::Reduce {
                     local_tensor,
@@ -1787,7 +1784,7 @@ impl StreamMessageHandler for StreamActor {
                             .collect::<Vec<_>>();
                         error = self.get_dependent_error(inputs_to_check.as_slice())?;
                     }
-                    StreamMessageHandler::handle(self, this, message).await?;
+                    StreamMessageHandler::handle(self, cx, message).await?;
                 }
                 StreamMessage::SendTensor {
                     ref tensor,
@@ -1801,10 +1798,10 @@ impl StreamMessageHandler for StreamActor {
                     if to_rank.is_some() && error.is_none() {
                         error = self.get_dependent_error(&[*tensor])?;
                     }
-                    StreamMessageHandler::handle(self, this, message).await?;
+                    StreamMessageHandler::handle(self, cx, message).await?;
                 }
                 _ => {
-                    StreamMessageHandler::handle(self, this, message).await?;
+                    StreamMessageHandler::handle(self, cx, message).await?;
                 }
             };
 
@@ -1844,11 +1841,11 @@ impl StreamMessageHandler for StreamActor {
                                 // Report failure to the controller.
                                 self.controller_actor
                                     .remote_function_failed(
-                                        this,
+                                        cx,
                                         seq,
                                         WorkerError {
                                             backtrace: format!("{}", error.clone().unwrap()),
-                                            worker_actor_id: this.self_id().clone(),
+                                            worker_actor_id: cx.self_id().clone(),
                                         },
                                     )
                                     .await?
@@ -1870,7 +1867,7 @@ impl StreamMessageHandler for StreamActor {
         // defined by the recording.
         StreamMessageHandler::handle(
             self,
-            this,
+            cx,
             StreamMessage::DeleteRefs(all_defined_refs.into_iter().collect()),
         )
         .await?;
@@ -1889,7 +1886,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn set_ref_unit_tests_only(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         reference: Ref,
         value: WireValue,
     ) -> Result<()> {
@@ -1900,7 +1897,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn set_tensor_ref_unit_tests_only(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         reference: Ref,
         tensor_result: TensorCellResult,
     ) -> Result<()> {
@@ -1917,7 +1914,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn get_ref_unit_tests_only(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         reference: Ref,
     ) -> Result<Option<Result<WireValue, Arc<CallFunctionError>>>> {
         /// For testing only, doesn't support Tensor or TensorList.
@@ -1946,7 +1943,7 @@ impl StreamMessageHandler for StreamActor {
 
     async fn get_tensor_ref_unit_tests_only(
         &mut self,
-        _this: &Context<Self>,
+        _cx: &Context<Self>,
         reference: Ref,
     ) -> Result<Option<TensorCellResult>> {
         match self.env.get(&reference) {
