@@ -27,7 +27,9 @@ use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::PortRef;
 use hyperactor::cap::CanSend;
+use hyperactor::channel::Port;
 use hyperactor::mailbox::MailboxSenderError;
+use hyperactor_mesh::Mesh;
 use hyperactor_mesh::ProcMesh;
 use hyperactor_mesh::actor_mesh::RootActorMesh;
 use hyperactor_mesh::proc_mesh::SharedSpawnable;
@@ -154,10 +156,12 @@ impl _Controller {
             .map_err(to_py_error)
     }
 
-    fn exit(&mut self, seq: Seq) -> PyResult<()> {
+    fn sync_at_exit(&mut self, port: PyPortId) -> PyResult<()> {
         self.controller_handle
             .blocking_lock()
-            .send(ClientToControllerMessage::Exit { seq })
+            .send(ClientToControllerMessage::SyncAtExit {
+                port: PortRef::attest(port.into()),
+            })
             .map_err(to_py_error)
     }
 
@@ -244,6 +248,7 @@ impl Invocation {
     fn add_user(
         &mut self,
         sender: &impl CanSend,
+        unreported_exception: &mut Option<Arc<PythonMessage>>,
         user: Arc<sync::Mutex<Invocation>>,
     ) -> Result<(), MailboxSenderError> {
         match &mut self.status {
@@ -253,9 +258,11 @@ impl Invocation {
                 users.insert(seq, user);
             }
             Status::Errored { exception } => {
-                user.lock()
-                    .unwrap()
-                    .set_exception(sender, exception.clone())?;
+                user.lock().unwrap().set_exception(
+                    sender,
+                    unreported_exception,
+                    exception.clone(),
+                )?;
             }
         }
         Ok(())
@@ -301,6 +308,7 @@ impl Invocation {
     fn set_exception(
         &mut self,
         sender: &impl CanSend,
+        unreported_exception: &mut Option<Arc<PythonMessage>>,
         exception: Arc<PythonMessage>,
     ) -> Result<Vec<Arc<sync::Mutex<Invocation>>>, MailboxSenderError> {
         let err = Status::Errored {
@@ -311,6 +319,8 @@ impl Invocation {
             Status::Incomplete { users, .. } => {
                 match &self.response_port {
                     Some(PortInfo { port, ranks }) => {
+                        eprintln!("CLEARING EXCEPTION");
+                        *unreported_exception = None;
                         for rank in ranks.iter() {
                             let msg = exception.as_ref().clone().with_rank(rank);
                             port.send(sender, msg)?;
@@ -350,6 +360,8 @@ struct History {
     // no new sequence numbers should be below this bound. use for
     // sanity checking.
     seq_lower_bound: Seq,
+    unreported_exception: Option<Arc<PythonMessage>>,
+    exit_port: Option<PortRef<PythonMessage>>,
 }
 
 /// A vector that keeps track of the minimum value.
@@ -400,6 +412,8 @@ impl History {
             invocation_for_ref: HashMap::new(),
             inflight_invocations: HashMap::new(),
             seq_lower_bound: 0.into(),
+            unreported_exception: None,
+            exit_port: None,
         }
     }
 
@@ -439,10 +453,11 @@ impl History {
         self.inflight_invocations.insert(seq, invocation.clone());
         for ref use_ in uses {
             let producer = self.invocation_for_ref.get(use_).unwrap();
-            producer
-                .lock()
-                .unwrap()
-                .add_user(sender, invocation.clone())?;
+            producer.lock().unwrap().add_user(
+                sender,
+                &mut self.unreported_exception,
+                invocation.clone(),
+            )?;
         }
 
         for def in defs {
@@ -489,6 +504,8 @@ impl History {
             PythonMessage::new("exception".to_string(), data, None, Some(rank))
         }));
 
+        self.unreported_exception = Some(python_message.clone());
+
         let mut queue: Vec<Arc<sync::Mutex<Invocation>>> = vec![invocation];
         let mut visited = HashSet::new();
 
@@ -497,7 +514,11 @@ impl History {
             if !visited.insert(invocation.seq) {
                 continue;
             };
-            queue.extend(invocation.set_exception(sender, python_message.clone())?);
+            queue.extend(invocation.set_exception(
+                sender,
+                &mut self.unreported_exception,
+                python_message.clone(),
+            )?);
         }
         Ok(())
     }
@@ -515,10 +536,23 @@ impl History {
         self.min_incomplete_seq = self.first_incomplete_seqs.min();
 
         for i in Seq::iter_between(prev, self.min_incomplete_seq) {
-            let invocation = self.inflight_invocations.remove(&i).unwrap();
-            let mut invocation = invocation.lock().unwrap();
-
-            invocation.complete(sender)?;
+            if let Some(invocation) = self.inflight_invocations.remove(&i) {
+                let mut invocation = invocation.lock().unwrap();
+                invocation.complete(sender)?;
+            }
+        }
+        if let Some(port) = &self.exit_port {
+            if self.min_incomplete_seq >= self.seq_lower_bound {
+                let result = match &self.unreported_exception {
+                    Some(exception) => exception.as_ref().clone(),
+                    None => {
+                        // the byte string is just a Python None
+                        PythonMessage::new("result".to_string(), b"\x80\x04N.".to_vec(), None, None)
+                    }
+                };
+                port.send(sender, result)?;
+                self.exit_port = None;
+            }
         }
         Ok(())
     }
@@ -526,6 +560,10 @@ impl History {
     pub fn set_result(&mut self, seq: Seq, result: PythonMessage) {
         let invocation = self.inflight_invocations.get(&seq).unwrap();
         invocation.lock().unwrap().set_result(result);
+    }
+
+    fn report_exit(&mut self, port: PortRef<PythonMessage>) {
+        self.exit_port = Some(port);
     }
 }
 
@@ -553,8 +591,8 @@ enum ClientToControllerMessage {
     DropRefs {
         refs: Vec<Ref>,
     },
-    Exit {
-        seq: Seq,
+    SyncAtExit {
+        port: PortRef<PythonMessage>,
     },
 }
 
@@ -683,12 +721,16 @@ impl Handler<ClientToControllerMessage> for MeshControllerActor {
             ClientToControllerMessage::DropRefs { refs } => {
                 self.history.drop_refs(refs);
             }
-            ClientToControllerMessage::Exit { seq } => {
-                // the byte string is just a Python None
-                let result =
-                    PythonMessage::new("result".to_string(), b"\x80\x04N.".to_vec(), None, None);
-
-                self.history.set_result(seq, result);
+            ClientToControllerMessage::SyncAtExit { port } => {
+                let all_ranks = vec![self.workers().shape().slice().clone()];
+                self.workers().cast_slices(
+                    all_ranks,
+                    WorkerMessage::RequestStatus {
+                        seq: self.history.seq_lower_bound,
+                        controller: false,
+                    },
+                )?;
+                self.history.report_exit(port);
             }
         }
         Ok(())

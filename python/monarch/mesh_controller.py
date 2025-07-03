@@ -286,13 +286,10 @@ class MeshClient(Client):
         self._shutdown = True
 
         sender, receiver = PortTuple.create(self._mesh_controller._mailbox, once=True)
-
-        # ensure all pending work is finished.
-        # all errors must be messaged back at this point
-        seq = self.new_node_nocoalesce([], [], cast("OldFuture", sender), [])
-        self._mesh_controller.exit(seq)
-        self._request_status()
-        receiver.recv().get(timeout=60)
+        print("SHUTDOWN PORT: ", sender._port_ref.port_id)
+        self._mesh_controller.sync_at_exit(sender._port_ref.port_id)
+        result = receiver.recv().get(timeout=60)
+        print("SHUTDOWN RESULT: ", result)
         # we are not expecting anything more now, because we already
         # waited for the responses
         self.inner.drain_and_stop()

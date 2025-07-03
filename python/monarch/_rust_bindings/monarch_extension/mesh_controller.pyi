@@ -38,9 +38,10 @@ class _Controller:
     def _drain_and_stop(
         self,
     ) -> List[client.LogMessage | client.WorkerResponse | client.DebuggerMessage]: ...
-    def exit(self, seq: Seq) -> None:
+    def sync_at_exit(self, port: PortId) -> None:
         """
-        Treat seq as a barrier for exit. It will recieve None on succesfully reaching
-        seq, and throw an exception if there remote failures that were never reported to a future.
+        Controller waits until all nodes that were added are complete, then replies on the
+        given port. The port will get an exception if there was a known error that was not reported
+        to any future.
         """
         ...
