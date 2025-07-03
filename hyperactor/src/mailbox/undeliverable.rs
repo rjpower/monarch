@@ -16,6 +16,7 @@ use crate::ActorId;
 use crate::Message;
 use crate::PortId;
 use crate::RemoteMessage;
+use crate::actor::ActorStatus;
 use crate::id;
 use crate::mailbox::DeliveryError;
 use crate::mailbox::MailboxSender;
@@ -23,6 +24,7 @@ use crate::mailbox::MessageEnvelope;
 use crate::mailbox::PortHandle;
 use crate::mailbox::PortReceiver;
 use crate::mailbox::UndeliverableMailboxSender;
+use crate::supervision::ActorSupervisionEvent;
 
 /// An undeliverable `M`-typed message (in practice `M` is
 /// [MessageEnvelope]).
@@ -61,7 +63,7 @@ pub fn monitored_return_handle() -> PortHandle<Undeliverable<MessageEnvelope>> {
         // Don't reuse `return_handle` for `h`: else it will never get
         // dropped and the task will never return.
         let (h, _) = new_undeliverable_port();
-        crate::init::RUNTIME.spawn(async move {
+        crate::init::get_runtime().spawn(async move {
             while let Ok(Undeliverable(mut envelope)) = rx.recv().await {
                 envelope.try_set_error(DeliveryError::BrokenLink(
                     "message returned to undeliverable port".to_string(),
@@ -129,4 +131,34 @@ impl UndeliverableMessageError {
             error: envelope.error().map(|e| format!("{:?}", e)),
         }
     }
+}
+
+/// Spawns a task that listens for undeliverable messages and posts a
+/// corresponding `ActorSupervisionEvent` to the given supervision
+/// port.
+///
+/// The `mailbox_id` identifies the source mailbox for context in
+/// supervision events.
+pub fn supervise_undeliverable_messages(
+    mailbox_id: ActorId,
+    supervision_port: PortHandle<ActorSupervisionEvent>,
+    mut rx: PortReceiver<Undeliverable<MessageEnvelope>>,
+) {
+    tokio::spawn(async move {
+        while let Ok(Undeliverable(mut envelope)) = rx.recv().await {
+            envelope.try_set_error(DeliveryError::BrokenLink(
+                "message returned to undeliverable port".to_string(),
+            ));
+            if supervision_port
+                .send(ActorSupervisionEvent::new(
+                    mailbox_id.clone(),
+                    ActorStatus::Failed(format!("message not delivered: {}", envelope)),
+                ))
+                .is_err()
+            {
+                UndeliverableMailboxSender
+                    .post(envelope.clone(), /*unused*/ monitored_return_handle())
+            }
+        }
+    });
 }

@@ -9,14 +9,13 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use hyperactor_mesh::RootActorMesh;
 use hyperactor_mesh::SlicedActorMesh;
 use hyperactor_mesh::code_sync::WorkspaceLocation;
 use hyperactor_mesh::code_sync::rsync;
-use hyperactor_mesh::proc_mesh::SharedSpawnable;
 use hyperactor_mesh::shape::Shape;
+use hyperactor_mesh::shared_cell::SharedCell;
 use monarch_hyperactor::proc_mesh::PyProcMesh;
 use monarch_hyperactor::runtime::signal_safe_block_on;
 use monarch_hyperactor::shape::PyShape;
@@ -79,7 +78,7 @@ impl PyWorkspaceLocation {
     module = "monarch._rust_bindings.monarch_extension.code_sync"
 )]
 pub struct RsyncMeshClient {
-    actor_mesh: Arc<RootActorMesh<'static, rsync::RsyncActor>>,
+    actor_mesh: SharedCell<RootActorMesh<'static, rsync::RsyncActor>>,
     shape: Shape,
     workspace: PathBuf,
 }
@@ -95,7 +94,7 @@ impl RsyncMeshClient {
         local_workspace: PathBuf,
         remote_workspace: PyWorkspaceLocation,
     ) -> PyResult<Self> {
-        let proc_mesh = Arc::clone(&proc_mesh.inner);
+        let proc_mesh = proc_mesh.try_inner()?;
         let shape = shape.get_inner().clone();
         signal_safe_block_on(py, async move {
             let actor_mesh = proc_mesh
@@ -107,7 +106,7 @@ impl RsyncMeshClient {
                 )
                 .await?;
             Ok(Self {
-                actor_mesh: Arc::new(actor_mesh),
+                actor_mesh,
                 shape,
                 workspace: local_workspace,
             })
@@ -116,7 +115,7 @@ impl RsyncMeshClient {
 
     fn sync_workspace<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let workspace = self.workspace.clone();
-        let inner_mesh = self.actor_mesh.clone();
+        let inner_mesh = self.actor_mesh.borrow().map_err(anyhow::Error::msg)?;
         let shape = self.shape.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mesh = SlicedActorMesh::new(&inner_mesh, shape);

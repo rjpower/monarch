@@ -20,7 +20,7 @@ use hyperactor::ActorRef;
 use hyperactor::data::Serialized;
 use hyperactor_mesh::actor_mesh::ActorMesh;
 use hyperactor_mesh::actor_mesh::RootActorMesh;
-use hyperactor_mesh::proc_mesh::SharedSpawnable;
+use hyperactor_mesh::shared_cell::SharedCell;
 use monarch_hyperactor::ndslice::PySlice;
 use monarch_hyperactor::proc::InstanceWrapper;
 use monarch_hyperactor::proc::PyActorId;
@@ -53,7 +53,7 @@ use crate::convert::convert;
 )]
 struct _Controller {
     controller_instance: Arc<Mutex<InstanceWrapper<ControllerMessage>>>,
-    workers: RootActorMesh<'static, WorkerActor>,
+    workers: SharedCell<RootActorMesh<'static, WorkerActor>>,
     pending_messages: VecDeque<PyObject>,
     history: History,
 }
@@ -132,6 +132,8 @@ impl _Controller {
     }
     fn send_slice(&mut self, slice: Slice, message: WorkerMessage) -> PyResult<()> {
         self.workers
+            .borrow()
+            .map_err(anyhow::Error::msg)?
             .cast_slices(vec![slice], message)
             .map_err(|err| PyErr::new::<PyValueError, _>(err.to_string()))
         // let shape = Shape::new(
@@ -153,7 +155,7 @@ static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 impl _Controller {
     #[new]
     fn new(py: Python, py_proc_mesh: &PyProcMesh) -> PyResult<Self> {
-        let proc_mesh = py_proc_mesh.inner.as_ref();
+        let proc_mesh = py_proc_mesh.try_inner()?;
         let id = NEXT_ID.fetch_add(1, atomic::Ordering::Relaxed);
         let controller_instance: InstanceWrapper<ControllerMessage> = InstanceWrapper::new(
             &PyProc::new_from_proc(proc_mesh.client_proc().clone()),
@@ -178,17 +180,17 @@ impl _Controller {
             controller_actor: controller_actor_ref,
         };
 
-        let py_proc_mesh = Arc::clone(&py_proc_mesh.inner);
-        let workers: anyhow::Result<RootActorMesh<'_, WorkerActor>> =
+        let py_proc_mesh = py_proc_mesh.try_inner()?;
+        let shape = py_proc_mesh.shape().clone();
+        let workers: anyhow::Result<SharedCell<RootActorMesh<'_, WorkerActor>>> =
             signal_safe_block_on(py, async move {
                 let workers = py_proc_mesh
                     .spawn(&format!("tensor_engine_workers_{}", id), &param)
                     .await?;
                 //workers.cast(ndslice::Selection::True, )?;
-                workers.cast_slices(
-                    vec![py_proc_mesh.shape().slice().clone()],
-                    AssignRankMessage::AssignRank(),
-                )?;
+                workers
+                    .borrow()?
+                    .cast_slices(vec![shape.slice().clone()], AssignRankMessage::AssignRank())?;
                 Ok(workers)
             })?;
         Ok(Self {
@@ -274,7 +276,13 @@ impl _Controller {
     }
     fn _drain_and_stop(&mut self, py: Python<'_>) -> PyResult<()> {
         self.send_slice(
-            self.workers.proc_mesh().shape().slice().clone(),
+            self.workers
+                .borrow()
+                .map_err(anyhow::Error::msg)?
+                .proc_mesh()
+                .shape()
+                .slice()
+                .clone(),
             WorkerMessage::Exit { error: None },
         )?;
         let instance = self.controller_instance.clone();
