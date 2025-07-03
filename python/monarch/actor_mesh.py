@@ -418,18 +418,33 @@ R = TypeVar("R")
 
 T = TypeVar("T")
 
+if TYPE_CHECKING:
+    # Python <= 3.10 cannot inherit from Generic[R] and NamedTuple at the same time.
+    # we only need it for type checking though, so copypasta it until 3.11.
+    class PortTuple(NamedTuple, Generic[R]):
+        sender: "Port[R]"
+        receiver: "PortReceiver[R]"
 
-class PortTuple(NamedTuple, Generic[R]):
-    sender: "Port[R]"
-    receiver: "PortReceiver[R]"
+        @staticmethod
+        def create(mailbox: Mailbox, once: bool = False) -> "PortTuple[Any]":
+            handle, receiver = mailbox.open_once_port() if once else mailbox.open_port()
+            port_ref = handle.bind()
+            return PortTuple(
+                Port(port_ref, mailbox, rank=None), PortReceiver(mailbox, receiver)
+            )
+else:
 
-    @staticmethod
-    def create(mailbox: Mailbox, once: bool = False) -> "PortTuple[Any]":
-        handle, receiver = mailbox.open_once_port() if once else mailbox.open_port()
-        port_ref = handle.bind()
-        return PortTuple(
-            Port(port_ref, mailbox, rank=None), PortReceiver(mailbox, receiver)
-        )
+    class PortTuple(NamedTuple):
+        sender: "Port[Any]"
+        receiver: "PortReceiver[Any]"
+
+        @staticmethod
+        def create(mailbox: Mailbox, once: bool = False) -> "PortTuple[Any]":
+            handle, receiver = mailbox.open_once_port() if once else mailbox.open_port()
+            port_ref = handle.bind()
+            return PortTuple(
+                Port(port_ref, mailbox, rank=None), PortReceiver(mailbox, receiver)
+            )
 
 
 # advance lower-level API for sending messages. This is intentially
