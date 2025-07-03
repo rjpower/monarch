@@ -9,7 +9,6 @@
 #![allow(dead_code)] // until used publically
 
 use std::ops::Deref;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use hyperactor::Actor;
@@ -164,8 +163,8 @@ pub trait ActorMesh: Mesh {
 /// Given a shared ProcMesh, we can obtain a [`ActorMesh<'static, _>`]
 /// for it, useful when lifetime must be managed dynamically.
 enum ProcMeshRef<'a> {
-    /// The reference is shared with an [`Arc`].
-    Shared(Arc<ProcMesh>),
+    /// The reference is shared without requiring a reference.
+    Shared(Box<dyn Deref<Target = ProcMesh> + Sync + Send>),
     /// The reference is borrowed with a parameterized
     /// lifetime.
     Borrowed(&'a ProcMesh),
@@ -206,14 +205,14 @@ impl<'a, A: RemoteActor> RootActorMesh<'a, A> {
         }
     }
 
-    pub(crate) fn new_shared(
-        proc_mesh: Arc<ProcMesh>,
+    pub(crate) fn new_shared<D: Deref<Target = ProcMesh> + Send + Sync + 'static>(
+        proc_mesh: D,
         name: String,
         actor_supervision_rx: mpsc::UnboundedReceiver<ActorSupervisionEvent>,
         ranks: Vec<ActorRef<A>>,
     ) -> Self {
         Self {
-            proc_mesh: ProcMeshRef::Shared(proc_mesh),
+            proc_mesh: ProcMeshRef::Shared(Box::new(proc_mesh)),
             name,
             ranks,
             actor_supervision_rx,
@@ -499,15 +498,16 @@ pub(crate) mod test_util {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
 
     use hyperactor::ActorId;
     use hyperactor::PortRef;
     use hyperactor::ProcId;
     use hyperactor::WorldId;
     use hyperactor::attrs::Attrs;
-    use hyperactor::mailbox::Undeliverable;
 
     use super::*;
+    use crate::proc_mesh::ProcEvent;
 
     // These tests are parametric over allocators.
     #[macro_export]
@@ -783,8 +783,7 @@ mod tests {
 
                 let name = alloc.name().to_string();
                 let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
-                let mut undeliverable_rx = mesh.client_undeliverable_receiver().take()
-                    .expect("client_undeliverable_receiver should be available");
+                let mut events = mesh.events().unwrap();
 
                 // Send a message to a non-existent actor (the proc however exists).
                 let unmonitored_reply_to = mesh.client().open_port::<usize>().0.bind();
@@ -792,9 +791,10 @@ mod tests {
                 bad_actor.send(mesh.client(), GetRank(true, unmonitored_reply_to)).unwrap();
 
                 // The message will be returned!
-                let Undeliverable(msg) = undeliverable_rx.recv().await.unwrap();
-                assert_eq!(mesh.client().actor_id(), msg.sender());
-                assert_eq!(&bad_actor.actor_id().port_id(GetRank::port()), msg.dest());
+                assert_matches!(
+                    events.next().await.unwrap(),
+                    ProcEvent::Crashed(0, reason) if reason.contains("failed: message not delivered")
+                );
 
                 // TODO: Stop the proc.
             }
@@ -870,7 +870,6 @@ mod tests {
             let monkey = alloc.chaos_monkey();
             let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
             let mut events = mesh.events().unwrap();
-            let mut undeliverable_msg_rx = mesh.client_undeliverable_receiver().take().unwrap();
 
             let ping_pong_actor_params = PingPongActorParams::new(
                 PortRef::attest_message_port(mesh.client().actor_id()),
@@ -901,8 +900,10 @@ mod tests {
             .unwrap();
 
             // The message will be returned!
-            let Undeliverable(msg) = undeliverable_msg_rx.recv().await.unwrap();
-            assert_eq!(msg.sender(), mesh.client().actor_id());
+            assert_matches!(
+                events.next().await.unwrap(),
+                ProcEvent::Crashed(0, reason) if reason.contains("failed: message not delivered")
+            );
 
             // Get 'pong' to send 'ping' a message. Since 'ping's
             // mailbox is stopped, the send will timeout and fail.
@@ -914,11 +915,9 @@ mod tests {
             .unwrap();
 
             // The message will be returned!
-            let Undeliverable(msg) = undeliverable_msg_rx.recv().await.unwrap();
-            assert_eq!(msg.sender(), pong.actor_id());
-            assert_eq!(
-                msg.dest(),
-                &ping.actor_id().port_id(PingPongMessage::port())
+            assert_matches!(
+                events.next().await.unwrap(),
+                ProcEvent::Crashed(0, reason) if reason.contains("failed: message not delivered")
             );
         }
 
@@ -938,10 +937,6 @@ mod tests {
 
             let stop = alloc.stopper();
             let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
-            let mut undeliverable_rx = mesh
-                .client_undeliverable_receiver()
-                .take()
-                .expect("client_undeliverable_receiver should be available");
             let mut events = mesh.events().unwrap();
 
             let actor_mesh = mesh
@@ -970,15 +965,10 @@ mod tests {
                 .cast(sel!(*), GetRank(false, reply_handle.bind()))
                 .unwrap();
 
-            // The message will be returned.
-            let Undeliverable(msg) = undeliverable_rx.recv().await.unwrap();
-            assert_eq!(
-                msg.sender(),
-                &ActorId(
-                    ProcId(actor_mesh.world_id().clone(), 0),
-                    "comm".to_owned(),
-                    0
-                )
+            // The message will be returned!
+            assert_matches!(
+                events.next().await.unwrap(),
+                ProcEvent::Crashed(0, reason) if reason.contains("failed: message not delivered")
             );
 
             // Stop the mesh.

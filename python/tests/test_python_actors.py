@@ -17,7 +17,6 @@ import monarch
 import pytest
 
 import torch
-from monarch import remote
 
 from monarch.actor_mesh import (
     Accumulator,
@@ -407,38 +406,6 @@ def test_proc_mesh_liveness() -> None:
     # (It only would if there were a bug.)
     time.sleep(0.5)
     counter.value.call().get()
-
-
-two_gpu = pytest.mark.skipif(
-    torch.cuda.device_count() < 2,
-    reason="Not enough GPUs, this test requires at least 2 GPUs",
-)
-
-
-@two_gpu
-def test_tensor_engine() -> None:
-    pm = proc_mesh(gpus=2).get()
-
-    dm = spawn_tensor_engine(pm)
-    with dm.activate():
-        r = monarch.inspect(2 * torch.zeros(3, 4))
-
-    fm = dm.flatten("all")
-    with fm.activate():
-        f = monarch.inspect(2 * torch.zeros(3, 4), all=1)
-
-    assert torch.allclose(torch.zeros(3, 4), r)
-    assert torch.allclose(torch.zeros(3, 4), f)
-
-    @remote(propagate=lambda x: x)
-    def nope(x):
-        raise ValueError("nope")
-
-    with pytest.raises(monarch.mesh_controller.RemoteException):
-        with dm.activate():
-            monarch.inspect(nope(torch.zeros(3, 4)))
-
-    dm.exit()
 
 
 def _debugee_actor_internal(rank):

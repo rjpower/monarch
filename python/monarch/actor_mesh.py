@@ -32,6 +32,7 @@ from typing import (
     Iterable,
     List,
     Literal,
+    NamedTuple,
     Optional,
     ParamSpec,
     Tuple,
@@ -412,8 +413,6 @@ class Port(Generic[R]):
             PythonMessage(method, _pickle(obj), None, self._rank),
         )
 
-
-from typing import NamedTuple
 
 R = TypeVar("R")
 

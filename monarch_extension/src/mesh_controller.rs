@@ -32,11 +32,13 @@ use hyperactor::mailbox::MailboxSenderError;
 use hyperactor_mesh::Mesh;
 use hyperactor_mesh::ProcMesh;
 use hyperactor_mesh::actor_mesh::RootActorMesh;
-use hyperactor_mesh::proc_mesh::SharedSpawnable;
+use hyperactor_mesh::shared_cell::SharedCell;
+use hyperactor_mesh::shared_cell::SharedCellRef;
 use monarch_hyperactor::actor::PythonMessage;
 use monarch_hyperactor::mailbox::PyPortId;
 use monarch_hyperactor::ndslice::PySlice;
 use monarch_hyperactor::proc_mesh::PyProcMesh;
+use monarch_hyperactor::proc_mesh::TrackedProcMesh;
 use monarch_hyperactor::runtime::signal_safe_block_on;
 use monarch_messages::controller::ControllerActor;
 use monarch_messages::controller::ControllerMessage;
@@ -83,27 +85,26 @@ where
 impl _Controller {
     #[new]
     fn new(py: Python, py_proc_mesh: &PyProcMesh) -> PyResult<Self> {
-        let proc_mesh = py_proc_mesh.inner.clone();
-
-        let slice = proc_mesh.shape().slice();
+        let proc_mesh: SharedCell<TrackedProcMesh> = py_proc_mesh.inner.clone();
+        let proc_mesh_ref = proc_mesh.borrow().unwrap();
+        let shape = proc_mesh_ref.shape();
+        let slice = shape.slice();
+        let all_ranks = shape.slice().clone();
         if !slice.is_contiguous() || slice.offset() != 0 {
             return Err(PyValueError::new_err(
                 "NYI: proc mesh for workers must be contiguous and start at offset 0",
             ));
         }
-        let all_ranks = proc_mesh.shape().slice().clone();
         let id = NEXT_ID.fetch_add(1, atomic::Ordering::Relaxed);
-
         let controller_handle: Arc<Mutex<ActorHandle<MeshControllerActor>>> =
             signal_safe_block_on(py, async move {
                 let controller_handle = proc_mesh
+                    .borrow()
+                    .unwrap()
                     .client_proc()
                     .spawn(
                         &format!("tensor_engine_controller_{}", id),
-                        MeshControllerActorParams {
-                            proc_mesh: proc_mesh.clone(),
-                            id,
-                        },
+                        MeshControllerActorParams { proc_mesh, id },
                     )
                     .await?;
                 let r: Result<Arc<Mutex<ActorHandle<MeshControllerActor>>>, anyhow::Error> =
@@ -514,12 +515,16 @@ impl History {
                 .call1((exception.backtrace, traceback, rank))
                 .unwrap();
             let data: Vec<u8> = pickle.call1((exe,)).unwrap().extract().unwrap();
-            PythonMessage::new("exception".to_string(), data, None, Some(rank))
+            PythonMessage::new_from_buf("exception".to_string(), data, None, Some(rank))
         }));
 
-        self.unreported_exception = Some(python_message.clone());
+        let mut invocation = invocation.lock().unwrap();
 
-        invocation.lock().unwrap().set_exception(
+        if let Status::Incomplete { .. } = &invocation.status {
+            self.unreported_exception = Some(python_message.clone());
+        }
+
+        invocation.set_exception(
             sender,
             &mut self.unreported_exception,
             python_message.clone(),
@@ -552,7 +557,7 @@ impl History {
                     Some(exception) => exception.as_ref().clone(),
                     None => {
                         // the byte string is just a Python None
-                        PythonMessage::new("result".to_string(), b"\x80\x04N.".to_vec(), None, None)
+                        PythonMessage::new("result".to_string(), b"\x80\x04N.", None, None)
                     }
                 };
                 port.send(sender, result)?;
@@ -602,15 +607,15 @@ enum ClientToControllerMessage {
 }
 
 struct MeshControllerActor {
-    proc_mesh: Arc<ProcMesh>,
-    workers: Option<RootActorMesh<'static, WorkerActor>>,
+    proc_mesh: SharedCell<TrackedProcMesh>,
+    workers: Option<SharedCell<RootActorMesh<'static, WorkerActor>>>,
     history: History,
     id: usize,
 }
 
 impl MeshControllerActor {
-    fn workers(&self) -> &RootActorMesh<'static, WorkerActor> {
-        self.workers.as_ref().unwrap()
+    fn workers(&self) -> SharedCellRef<RootActorMesh<'static, WorkerActor>> {
+        self.workers.as_ref().unwrap().borrow().unwrap()
     }
 }
 
@@ -621,7 +626,7 @@ impl Debug for MeshControllerActor {
 }
 
 struct MeshControllerActorParams {
-    proc_mesh: Arc<ProcMesh>,
+    proc_mesh: SharedCell<TrackedProcMesh>,
     id: usize,
 }
 
@@ -631,9 +636,9 @@ impl Actor for MeshControllerActor {
     async fn new(
         MeshControllerActorParams { proc_mesh, id }: Self::Params,
     ) -> Result<Self, anyhow::Error> {
-        let world_size = proc_mesh.shape().slice().len();
+        let world_size = proc_mesh.borrow().unwrap().shape().slice().len();
         Ok(MeshControllerActor {
-            proc_mesh,
+            proc_mesh: proc_mesh.clone(),
             workers: None,
             history: History::new(world_size),
             id,
@@ -641,7 +646,8 @@ impl Actor for MeshControllerActor {
     }
     async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
         let controller_actor_ref: ActorRef<ControllerActor> = this.bind();
-        let slice = self.proc_mesh.shape().slice();
+        let proc_mesh = self.proc_mesh.borrow().unwrap();
+        let slice = proc_mesh.shape().slice();
         let world_size = slice.len();
         let param = WorkerParams {
             world_size,
@@ -651,11 +657,13 @@ impl Actor for MeshControllerActor {
             controller_actor: controller_actor_ref,
         };
 
-        let workers = self
-            .proc_mesh
+        let workers = proc_mesh
             .spawn(&format!("tensor_engine_workers_{}", self.id), &param)
             .await?;
-        workers.cast_slices(vec![slice.clone()], AssignRankMessage::AssignRank())?;
+        workers
+            .borrow()
+            .unwrap()
+            .cast_slices(vec![slice.clone()], AssignRankMessage::AssignRank())?;
         self.workers = Some(workers);
         Ok(())
     }

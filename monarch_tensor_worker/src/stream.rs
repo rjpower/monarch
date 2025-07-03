@@ -1002,7 +1002,7 @@ impl StreamActor {
                         })?
                         .extract()
                         .unwrap();
-                    Ok(PythonMessage::new(
+                    Ok(PythonMessage::new_from_buf(
                         "result".to_string(),
                         data,
                         None,

@@ -6,20 +6,33 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fmt::Debug;
+use std::fmt::Display;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use hyperactor::Actor;
+use hyperactor::Mailbox;
+use hyperactor::RemoteMessage;
 use hyperactor::WorldId;
+use hyperactor::actor::RemoteActor;
+use hyperactor::proc::Proc;
 use hyperactor_extension::alloc::PyAlloc;
+use hyperactor_mesh::RootActorMesh;
 use hyperactor_mesh::alloc::Alloc;
 use hyperactor_mesh::alloc::ProcStopReason;
 use hyperactor_mesh::proc_mesh::ProcEvent;
 use hyperactor_mesh::proc_mesh::ProcEvents;
 use hyperactor_mesh::proc_mesh::ProcMesh;
 use hyperactor_mesh::proc_mesh::SharedSpawnable;
+use hyperactor_mesh::shared_cell::SharedCell;
+use hyperactor_mesh::shared_cell::SharedCellPool;
+use hyperactor_mesh::shared_cell::SharedCellRef;
 use monarch_types::PickledPyObject;
+use ndslice::Shape;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyException;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::pycell::PyRef;
 use pyo3::types::PyType;
@@ -31,14 +44,76 @@ use crate::mailbox::PyMailbox;
 use crate::runtime::signal_safe_block_on;
 use crate::shape::PyShape;
 
+// A wrapper around `ProcMesh` which keeps track of all `RootActorMesh`s that it spawns.
+pub struct TrackedProcMesh {
+    inner: SharedCellRef<ProcMesh>,
+    cell: SharedCell<ProcMesh>,
+    children: SharedCellPool,
+}
+
+impl Debug for TrackedProcMesh {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(&*self.inner, f)
+    }
+}
+
+impl Display for TrackedProcMesh {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&*self.inner, f)
+    }
+}
+
+impl From<ProcMesh> for TrackedProcMesh {
+    fn from(mesh: ProcMesh) -> Self {
+        let cell = SharedCell::from(mesh);
+        let inner = cell.borrow().unwrap();
+        Self {
+            inner,
+            cell,
+            children: SharedCellPool::new(),
+        }
+    }
+}
+
+impl TrackedProcMesh {
+    pub async fn spawn<A: Actor + RemoteActor>(
+        &self,
+        actor_name: &str,
+        params: &A::Params,
+    ) -> Result<SharedCell<RootActorMesh<'static, A>>, anyhow::Error>
+    where
+        A::Params: RemoteMessage,
+    {
+        let mesh = self.cell.borrow()?;
+        let actor = mesh.spawn(actor_name, params).await?;
+        Ok(self.children.insert(actor))
+    }
+
+    pub fn client(&self) -> &Mailbox {
+        self.inner.client()
+    }
+
+    pub fn shape(&self) -> &Shape {
+        self.inner.shape()
+    }
+
+    pub fn client_proc(&self) -> &Proc {
+        self.inner.client_proc()
+    }
+
+    pub fn into_inner(self) -> (SharedCell<ProcMesh>, SharedCellPool) {
+        (self.cell, self.children)
+    }
+}
+
 #[pyclass(
     name = "ProcMesh",
     module = "monarch._rust_bindings.monarch_hyperactor.proc_mesh"
 )]
 pub struct PyProcMesh {
-    pub inner: Arc<ProcMesh>,
+    pub inner: SharedCell<TrackedProcMesh>,
     keepalive: Keepalive,
-    proc_events: Arc<Mutex<ProcEvents>>,
+    proc_events: SharedCell<Mutex<ProcEvents>>,
     stop_monitor_sender: mpsc::Sender<bool>,
     user_monitor_registered: AtomicBool,
 }
@@ -84,14 +159,16 @@ impl PyProcMesh {
     /// process on any proc failure.
     fn monitored(mut proc_mesh: ProcMesh, world_id: WorldId) -> Self {
         let (sender, abort_receiver) = mpsc::channel::<bool>(1);
-        let proc_events = Arc::new(Mutex::new(proc_mesh.events().unwrap()));
+        let proc_events = SharedCell::from(Mutex::new(proc_mesh.events().unwrap()));
         let monitor = tokio::spawn(Self::default_proc_mesh_monitor(
-            proc_events.clone(),
+            proc_events
+                .borrow()
+                .expect("borrowing immediately after creation"),
             world_id,
             abort_receiver,
         ));
         Self {
-            inner: Arc::new(proc_mesh),
+            inner: SharedCell::from(TrackedProcMesh::from(proc_mesh)),
             keepalive: Keepalive::new(monitor),
             proc_events,
             stop_monitor_sender: sender,
@@ -102,7 +179,7 @@ impl PyProcMesh {
     /// The default monitor of the proc mesh for crashes. If a proc crashes, we print the reason
     /// to stderr and exit with code 1.
     async fn default_proc_mesh_monitor(
-        events: Arc<Mutex<ProcEvents>>,
+        events: SharedCellRef<Mutex<ProcEvents>>,
         world_id: WorldId,
         mut abort_receiver: mpsc::Receiver<bool>,
     ) {
@@ -122,7 +199,12 @@ impl PyProcMesh {
                         }
                     }
                 }
-                _ = abort_receiver.recv() => {
+                _ = async {
+                    tokio::select! {
+                        _ = events.preempted() => (),
+                        _ = abort_receiver.recv() => (),
+                    }
+                 } => {
                     // The default monitor is aborted, this happens when user takes over
                     // the monitoring responsibility.
                     eprintln!("stop default supervision monitor for ProcMesh {}", world_id);
@@ -130,6 +212,12 @@ impl PyProcMesh {
                 }
             }
         }
+    }
+
+    pub fn try_inner(&self) -> PyResult<SharedCellRef<TrackedProcMesh>> {
+        self.inner
+            .borrow()
+            .map_err(|_| PyRuntimeError::new_err("`ProcMesh` has already been stopped"))
     }
 }
 
@@ -160,15 +248,14 @@ impl PyProcMesh {
         actor: &Bound<'py, PyType>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let pickled_type = PickledPyObject::pickle(actor.as_any())?;
-        let proc_mesh = Arc::clone(&self.inner);
+        let proc_mesh = self.try_inner()?;
         let keepalive = self.keepalive.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mailbox = proc_mesh.client().clone();
             let actor_mesh = proc_mesh.spawn(&name, &pickled_type).await?;
             let python_actor_mesh = PythonActorMesh {
-                inner: Arc::new(actor_mesh),
-                client: PyMailbox {
-                    inner: proc_mesh.client().clone(),
-                },
+                inner: actor_mesh,
+                client: PyMailbox { inner: mailbox },
                 _keepalive: keepalive,
             };
             Python::with_gil(|py| python_actor_mesh.into_py_any(py))
@@ -182,15 +269,14 @@ impl PyProcMesh {
         actor: &Bound<'py, PyType>,
     ) -> PyResult<PyObject> {
         let pickled_type = PickledPyObject::pickle(actor.as_any())?;
-        let proc_mesh = Arc::clone(&self.inner);
+        let proc_mesh = self.try_inner()?;
         let keepalive = self.keepalive.clone();
         signal_safe_block_on(py, async move {
+            let mailbox = proc_mesh.client().clone();
             let actor_mesh = proc_mesh.spawn(&name, &pickled_type).await?;
             let python_actor_mesh = PythonActorMesh {
-                inner: Arc::new(actor_mesh),
-                client: PyMailbox {
-                    inner: proc_mesh.client().clone(),
-                },
+                inner: actor_mesh,
+                client: PyMailbox { inner: mailbox },
                 _keepalive: keepalive,
             };
             Python::with_gil(|py| python_actor_mesh.into_py_any(py))
@@ -224,19 +310,45 @@ impl PyProcMesh {
     }
 
     #[getter]
-    fn client(&self) -> PyMailbox {
-        PyMailbox {
-            inner: self.inner.client().clone(),
-        }
+    fn client(&self) -> PyResult<PyMailbox> {
+        Ok(PyMailbox {
+            inner: self.try_inner()?.client().clone(),
+        })
     }
 
     fn __repr__(&self) -> PyResult<String> {
-        Ok(format!("<ProcMesh {}>", self.inner))
+        Ok(format!("<ProcMesh {}>", *self.try_inner()?))
     }
 
     #[getter]
-    fn shape(&self) -> PyShape {
-        self.inner.shape().clone().into()
+    fn shape(&self) -> PyResult<PyShape> {
+        Ok(self.try_inner()?.shape().clone().into())
+    }
+
+    fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let tracked_proc_mesh = self.inner.clone();
+        let proc_events = self.proc_events.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            async {
+                // "Take" the proc mesh wrapper.  Once we do, it should be impossible for new
+                // actor meshes to be spawned.
+                let (proc_mesh, children) = tracked_proc_mesh
+                    .take()
+                    .await
+                    .map_err(|_| PyRuntimeError::new_err("`ProcMesh` has already been stopped"))?
+                    .into_inner();
+                // Now we discard all in-flight actor meshes.  After this, the `ProcMesh` should be "unused".
+                children.discard_all().await?;
+                // Finally, take ownership of the inner proc mesh, which will allowing dropping it.
+                let _proc_mesh = proc_mesh.take().await?;
+                // Grab the alloc back from `ProcEvents` and use that to stop the mesh.
+                let mut alloc = proc_events.take().await?.into_inner().into_alloc();
+                alloc.stop_and_wait().await?;
+                anyhow::Ok(())
+            }
+            .await?;
+            PyResult::Ok(())
+        })
     }
 }
 
@@ -271,7 +383,7 @@ impl Drop for KeepaliveState {
     module = "monarch._rust_bindings.monarch_hyperactor.proc_mesh"
 )]
 pub struct PyProcMeshMonitor {
-    proc_events: Arc<Mutex<ProcEvents>>,
+    proc_events: SharedCell<Mutex<ProcEvents>>,
 }
 
 #[pymethods]
@@ -283,13 +395,22 @@ impl PyProcMeshMonitor {
     fn __anext__(&self, py: Python<'_>) -> PyResult<PyObject> {
         let events = self.proc_events.clone();
         Ok(pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let events = events
+                .borrow()
+                .map_err(|_| PyRuntimeError::new_err("`ProcEvents` is shutdown"))?;
             let mut proc_events = events.lock().await;
-            let event: Option<_> = proc_events.next().await;
-            match event {
-                Some(event) => Ok(PyProcEvent::from(event)),
-                None => Err(::pyo3::exceptions::PyStopAsyncIteration::new_err(
-                    "stop iteration",
-                )),
+            tokio::select! {
+                () = events.preempted() => {
+                    Err(PyRuntimeError::new_err("shutting down `ProcEvents`"))
+                },
+                event = proc_events.next() => {
+                    match event {
+                        Some(event) => Ok(PyProcEvent::from(event)),
+                        None => Err(::pyo3::exceptions::PyStopAsyncIteration::new_err(
+                            "stop iteration",
+                        )),
+                    }
+                }
             }
         })?
         .into())
