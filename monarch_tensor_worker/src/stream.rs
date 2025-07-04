@@ -761,7 +761,7 @@ impl StreamActor {
                         let group_size = ranks.len();
                         let backend = CommBackend::new(
                             comm,
-                            Mailbox::new_detached(this.self_id().clone()),
+                            Mailbox::new_detached(cx.self_id().clone()),
                             self.rank,
                             group_size,
                             self.world_size,
@@ -873,7 +873,7 @@ impl StreamActor {
 
     fn call_python_fn_pytree(
         &mut self,
-        this: &Instance<Self>,
+        cx: &hyperactor::Context<Self>,
         function: ResolvableFunction,
         args: Vec<WireValue>,
         kwargs: HashMap<String, WireValue>,
@@ -887,7 +887,7 @@ impl StreamActor {
         Python::with_gil(|py| {
             let result = self.call_python_fn(
                 py,
-                this,
+                cx,
                 Some(function),
                 args,
                 kwargs,
@@ -954,7 +954,7 @@ impl StreamActor {
     }
     async fn send_value_python_message(
         &mut self,
-        this: &Instance<Self>,
+        cx: &hyperactor::Context<'_, Self>,
         seq: Seq,
         worker_actor_id: ActorId,
         mutates: Vec<Ref>,
@@ -967,7 +967,7 @@ impl StreamActor {
             let result = tokio::task::block_in_place(|| {
                 self.call_python_fn(
                     py,
-                    this,
+                    cx,
                     function,
                     args,
                     kwargs,
@@ -1013,13 +1013,11 @@ impl StreamActor {
         match result {
             Ok(value) => {
                 let ser = Serialized::serialize(&value).unwrap();
-                self.controller_actor
-                    .fetch_result(this, seq, Ok(ser))
-                    .await?;
+                self.controller_actor.fetch_result(cx, seq, Ok(ser)).await?;
             }
             Err(e) => {
                 self.controller_actor
-                    .remote_function_failed(this, seq, e)
+                    .remote_function_failed(cx, seq, e)
                     .await?;
             }
         }
@@ -1536,7 +1534,7 @@ impl StreamMessageHandler for StreamActor {
         if self.respond_with_python_message && pipe.is_none() {
             return self
                 .send_value_python_message(
-                    this,
+                    cx,
                     seq,
                     worker_actor_id,
                     mutates,
