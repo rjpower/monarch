@@ -16,8 +16,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Dict, List, Optional, Tuple
 
-from monarch.actor_mesh import Actor, endpoint
-from monarch.code_sync import WorkspaceLocation
+from monarch.actor._actor_mesh import Actor, endpoint
+from monarch.actor._code_sync import WorkspaceLocation
 
 
 class SysAuditHookGuard(contextlib.AbstractContextManager):

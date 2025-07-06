@@ -17,7 +17,7 @@ from typing import Any, Generator
 
 import pytest
 
-from monarch.code_sync.auto_reload import AutoReloader, SysAuditImportHook
+from monarch.actor._code_sync.auto_reload import AutoReloader, SysAuditImportHook
 
 
 def write_text(path: Path, content: str):
