@@ -30,7 +30,6 @@ use hyperactor::PortRef;
 use hyperactor::cap::CanSend;
 use hyperactor::mailbox::MailboxSenderError;
 use hyperactor_mesh::Mesh;
-use hyperactor_mesh::ProcMesh;
 use hyperactor_mesh::actor_mesh::RootActorMesh;
 use hyperactor_mesh::shared_cell::SharedCell;
 use hyperactor_mesh::shared_cell::SharedCellRef;

@@ -34,7 +34,7 @@ from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarc
     ActorId,
 )
 from monarch.actor._shape import NDSlice
-from monarch.actor_mesh import Port, PortTuple
+from monarch.actor._actor_mesh import Port, PortTuple
 from monarch.common import messages
 from monarch.common.controller_api import TController
 from monarch.common.invocation import Seq

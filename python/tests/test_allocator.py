@@ -32,14 +32,20 @@ from monarch._rust_bindings.monarch_hyperactor.channel import (
     ChannelAddr,
     ChannelTransport,
 )
+from monarch.actor import (
+    Actor,
+    current_rank,
+    current_size,
+    endpoint,
+    ProcMesh,
+    ValueMesh,
+)
 from monarch.actor._allocator import (
     ALLOC_LABEL_PROC_MESH_NAME,
     RemoteAllocator,
     StaticRemoteAllocInitializer,
     TorchXRemoteAllocInitializer,
 )
-from monarch.actor_mesh import Actor, current_rank, current_size, endpoint, ValueMesh
-from monarch.proc_mesh import ProcMesh
 from monarch.tools.mesh_spec import MeshSpec, ServerSpec
 from monarch.tools.network import get_sockaddr
 
