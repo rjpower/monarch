@@ -22,8 +22,6 @@ from typing import (
     TypeVar,
 )
 
-from monarch._rust_bindings import has_tensor_engine
-
 from monarch._rust_bindings.hyperactor_extension.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension  # @manual=//monarch/monarch_extension:monarch_extension
     Alloc,
     AllocConstraints,
@@ -44,11 +42,21 @@ from monarch.actor._device_utils import _local_device_count
 from monarch.actor._future import Future
 from monarch.actor._shape import MeshTrait
 
+HAS_TENSOR_ENGINE = False
+try:
+    # TODO: while the tensor_engine submodule doesn't exist yet, use the
+    # available of monarch.rdma as a proxy.
+    # type: ignore
+    from monarch.rdma import RDMAManager  # @manual
+
+    HAS_TENSOR_ENGINE = True
+except ImportError:
+    pass
+
 
 if TYPE_CHECKING:
     Tensor = Any
     DeviceMesh = Any
-    RDMAManager = Any
 
 
 T = TypeVar("T")
@@ -83,10 +91,7 @@ class ProcMesh(MeshTrait):
         self._rsync_mesh_client: Optional[RsyncMeshClient] = None
         self._auto_reload_actor: Optional[AutoReloadActor] = None
         self._maybe_device_mesh: Optional["DeviceMesh"] = _device_mesh
-        if _mock_shape is None and has_tensor_engine():
-            # type: ignore[21]
-            from monarch.rdma import RDMAManager  # @manual
-
+        if _mock_shape is None and HAS_TENSOR_ENGINE:
             # type: ignore[21]
             self._rdma_manager = self._spawn_blocking("rdma_manager", RDMAManager)
 
@@ -191,7 +196,7 @@ class ProcMesh(MeshTrait):
 
     @property
     def _device_mesh(self) -> "DeviceMesh":
-        if not has_tensor_engine():
+        if not HAS_TENSOR_ENGINE:
             raise RuntimeError(
                 "DeviceMesh is not available because tensor_engine was not compiled (USE_TENSOR_ENGINE=0)"
             )
@@ -280,7 +285,7 @@ def local_proc_mesh(*, gpus: Optional[int] = None, hosts: int = 1) -> Future[Pro
     )
 
 
-_BOOTSTRAP_MAIN = "monarch.bootstrap_main"
+_BOOTSTRAP_MAIN = "monarch.actor._bootstrap_main"
 
 
 def _get_bootstrap_args() -> tuple[str, Optional[list[str]], dict[str, str]]:

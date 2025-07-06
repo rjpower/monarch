@@ -13,8 +13,8 @@ from contextlib import contextmanager, ExitStack
 from typing import Any, Callable, Dict, Generator, Literal, Optional
 
 import monarch_supervisor
-from monarch.actor._shape import NDSlice
 from monarch.actor import proc_mesh, ProcMesh
+from monarch.actor._shape import NDSlice
 from monarch.common.client import Client
 from monarch.common.device_mesh import DeviceMesh
 from monarch.common.invocation import DeviceException, RemoteException
