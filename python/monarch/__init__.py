@@ -29,7 +29,8 @@ import torch  # noqa: F401
 
 if TYPE_CHECKING:
     from monarch import timer
-    from monarch.allocator import LocalAllocator, ProcessAllocator
+    from monarch.actor._allocator import LocalAllocator, ProcessAllocator
+    from monarch.actor._shape import NDSlice, Shape
     from monarch.common._coalescing import coalescing
 
     from monarch.common.device_mesh import (
@@ -50,11 +51,9 @@ if TYPE_CHECKING:
     from monarch.common.pipe import create_pipe, Pipe, remote_generator
     from monarch.common.remote import remote
     from monarch.common.selection import Selection
-    from monarch.common.shape import NDSlice, Shape
     from monarch.common.stream import get_active_stream, Stream
     from monarch.common.tensor import reduce, reduce_, Tensor
     from monarch.fetch import fetch_shard, inspect, show
-    from monarch.future import ActorFuture
     from monarch.gradient_generator import grad_function, grad_generator
     from monarch.notebook import mast_mesh, reserve_torchx as mast_reserve
     from monarch.python_local_mesh import python_local_mesh
@@ -79,8 +78,8 @@ _public_api = {
     "function_resolvers": ("monarch.common.function", "resolvers"),
     "Future": ("monarch.common.future", "Future"),
     "RemoteException": ("monarch.common.invocation", "RemoteException"),
-    "Shape": ("monarch.common.shape", "Shape"),
-    "NDSlice": ("monarch.common.shape", "NDSlice"),
+    "Shape": ("monarch.actor._shape", "Shape"),
+    "NDSlice": ("monarch.actor._shape", "NDSlice"),
     "Selection": ("monarch.common.selection", "Selection"),
     "OpaqueRef": ("monarch.common.opaque_ref", "OpaqueRef"),
     "create_pipe": ("monarch.common.pipe", "create_pipe"),
@@ -112,9 +111,8 @@ _public_api = {
     "Simulator": ("monarch.simulator.interface", "Simulator"),
     "world_mesh": ("monarch.world_mesh", "world_mesh"),
     "timer": ("monarch.timer", "timer"),
-    "ProcessAllocator": ("monarch.allocator", "ProcessAllocator"),
-    "LocalAllocator": ("monarch.allocator", "LocalAllocator"),
-    "ActorFuture": ("monarch.future", "ActorFuture"),
+    "ProcessAllocator": ("monarch.actor._allocator", "ProcessAllocator"),
+    "LocalAllocator": ("monarch.actor._allocator", "LocalAllocator"),
     "builtins": ("monarch.builtins", "builtins"),
 }
 
@@ -183,7 +181,6 @@ __all__ = [
     "timer",
     "ProcessAllocator",
     "LocalAllocator",
-    "ActorFuture",
     "builtins",
 ]
 assert sorted(__all__) == sorted(_public_api)
