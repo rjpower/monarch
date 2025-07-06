@@ -507,7 +507,7 @@ impl History {
                 .getattr("RemoteException")
                 .unwrap();
             let pickle = py
-                .import("monarch.actor_mesh")
+                .import("monarch.actor._actor_mesh")
                 .unwrap()
                 .getattr("_pickle")
                 .unwrap();
