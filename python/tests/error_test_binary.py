@@ -9,11 +9,11 @@ import ctypes
 import sys
 
 import click
-from monarch._rust_bindings.monarch_extension.blocking import blocking_function
-
-from monarch._rust_bindings.monarch_extension.panic import panicking_function
 
 from monarch.actor import Actor, endpoint, proc_mesh, send
+
+from monarch.actor._extension.blocking import blocking_function
+from monarch.actor._extension.panic import panicking_function
 
 
 class ErrorActor(Actor):

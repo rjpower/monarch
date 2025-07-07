@@ -40,7 +40,7 @@ from typing import (
 import numpy as np
 
 import torch
-from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
+from monarch.actor._extension.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
 from monarch.actor._shape import iter_ranks, NDSlice

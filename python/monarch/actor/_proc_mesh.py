@@ -22,23 +22,23 @@ from typing import (
     TypeVar,
 )
 
-from monarch._rust_bindings.hyperactor_extension.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension  # @manual=//monarch/monarch_extension:monarch_extension
-    Alloc,
-    AllocConstraints,
-    AllocSpec,
-)
-from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
-from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
-    ProcMesh as HyProcMesh,
-    ProcMeshMonitor,
-)
-from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
 from monarch.actor._actor_mesh import _Actor, _ActorMeshRefImpl, Actor, ActorMeshRef
 from monarch.actor._allocator import LocalAllocator, ProcessAllocator
 from monarch.actor._code_sync import RsyncMeshClient, WorkspaceLocation
 from monarch.actor._code_sync.auto_reload import AutoReloadActor
-
 from monarch.actor._device_utils import _local_device_count
+
+from monarch.actor._extension.hyperactor_extension.alloc import (  # @manual=//monarch/actor_extension:actor_extension
+    Alloc,
+    AllocConstraints,
+    AllocSpec,
+)
+from monarch.actor._extension.monarch_hyperactor.mailbox import Mailbox
+from monarch.actor._extension.monarch_hyperactor.proc_mesh import (
+    ProcMesh as HyProcMesh,
+    ProcMeshMonitor,
+)
+from monarch.actor._extension.monarch_hyperactor.shape import Shape, Slice
 from monarch.actor._future import Future
 from monarch.actor._shape import MeshTrait
 

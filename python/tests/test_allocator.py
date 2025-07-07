@@ -23,15 +23,6 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-
-from monarch._rust_bindings.hyperactor_extension.alloc import (
-    AllocConstraints,
-    AllocSpec,
-)
-from monarch._rust_bindings.monarch_hyperactor.channel import (
-    ChannelAddr,
-    ChannelTransport,
-)
 from monarch.actor import (
     Actor,
     current_rank,
@@ -45,6 +36,15 @@ from monarch.actor._allocator import (
     RemoteAllocator,
     StaticRemoteAllocInitializer,
     TorchXRemoteAllocInitializer,
+)
+
+from monarch.actor._extension.hyperactor_extension.alloc import (
+    AllocConstraints,
+    AllocSpec,
+)
+from monarch.actor._extension.monarch_hyperactor.channel import (
+    ChannelAddr,
+    ChannelTransport,
 )
 from monarch.tools.mesh_spec import MeshSpec, ServerSpec
 from monarch.tools.network import get_sockaddr

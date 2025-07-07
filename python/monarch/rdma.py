@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from typing import cast, Dict, Optional, Tuple
 
 import torch
-
-from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch.actor._actor_mesh import (
     _ActorMeshRefImpl,
     Actor,
@@ -19,6 +17,8 @@ from monarch.actor._actor_mesh import (
     endpoint,
     MonarchContext,
 )
+
+from monarch.actor._extension.monarch_hyperactor.proc import ActorId
 
 
 @dataclass

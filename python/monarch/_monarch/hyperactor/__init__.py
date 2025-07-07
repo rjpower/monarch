@@ -6,15 +6,15 @@
 
 # pyre-strict
 
-from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
+from monarch.actor._extension.monarch_hyperactor.actor import PythonMessage
 
-from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
+from monarch.actor._extension.monarch_hyperactor.alloc import (  # @manual=//monarch/actor_extension:actor_extension
     LocalAllocatorBase,
 )
 
-from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox, PortId
+from monarch.actor._extension.monarch_hyperactor.mailbox import Mailbox, PortId
 
-from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
+from monarch.actor._extension.monarch_hyperactor.proc import (  # @manual=//monarch/actor_extension:actor_extension
     ActorId,
     Alloc,
     AllocConstraints,
@@ -24,7 +24,7 @@ from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarc
     Serialized,
 )
 
-from monarch._rust_bindings.monarch_hyperactor.shape import (  # @manual=//monarch/monarch_extension:monarch_extension
+from monarch.actor._extension.monarch_hyperactor.shape import (  # @manual=//monarch/actor_extension:actor_extension
     Shape,
 )
 

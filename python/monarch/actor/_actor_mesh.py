@@ -38,20 +38,24 @@ from typing import (
     TypeVar,
 )
 
-from monarch._rust_bindings.hyperactor_extension.telemetry import enter_span, exit_span
+from monarch.actor._allocator import LocalAllocator, ProcessAllocator
 
-from monarch._rust_bindings.monarch_hyperactor.actor import PanicFlag, PythonMessage
-from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
-from monarch._rust_bindings.monarch_hyperactor.mailbox import (
+from monarch.actor._extension.hyperactor_extension.telemetry import (
+    enter_span,
+    exit_span,
+)
+
+from monarch.actor._extension.monarch_hyperactor.actor import PanicFlag, PythonMessage
+from monarch.actor._extension.monarch_hyperactor.actor_mesh import PythonActorMesh
+from monarch.actor._extension.monarch_hyperactor.mailbox import (
     Mailbox,
     OncePortReceiver,
     OncePortRef,
     PortReceiver as HyPortReceiver,
     PortRef,
 )
-from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
-from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
-from monarch.actor._allocator import LocalAllocator, ProcessAllocator
+from monarch.actor._extension.monarch_hyperactor.proc import ActorId
+from monarch.actor._extension.monarch_hyperactor.shape import Point as HyPoint, Shape
 from monarch.actor._future import Future
 from monarch.actor._pdb_wrapper import remote_breakpointhook
 
