@@ -1338,17 +1338,15 @@ impl InstanceState {
     /// Unlink this instance from its parent, if it has one. If it was unlinked,
     /// the parent is returned.
     fn maybe_unlink_parent(&self) -> Option<InstanceCell> {
-        let result = self.parent.upgrade();
-        if let Some(parent) = &result {
-            parent.inner.unlink(self);
-        }
-        result
+        self.parent
+            .upgrade()
+            .filter(|parent| parent.inner.unlink(self))
     }
 
     /// Unlink this instance from a child.
-    fn unlink(&self, child: &InstanceState) {
+    fn unlink(&self, child: &InstanceState) -> bool {
         assert_eq!(self.actor_id.proc_id(), child.actor_id.proc_id());
-        self.children.remove(&child.actor_id.pid());
+        self.children.remove(&child.actor_id.pid()).is_some()
     }
 }
 
@@ -1751,7 +1749,7 @@ mod tests {
     impl TestActorMessageHandler for TestActor {
         async fn reply(
             &mut self,
-            _this: &crate::Context<Self>,
+            _cx: &crate::Context<Self>,
             sender: oneshot::Sender<()>,
         ) -> Result<(), anyhow::Error> {
             sender.send(()).unwrap();
@@ -1760,7 +1758,7 @@ mod tests {
 
         async fn wait(
             &mut self,
-            _this: &crate::Context<Self>,
+            _cx: &crate::Context<Self>,
             sender: oneshot::Sender<()>,
             receiver: oneshot::Receiver<()>,
         ) -> Result<(), anyhow::Error> {
@@ -1771,7 +1769,7 @@ mod tests {
 
         async fn forward(
             &mut self,
-            _this: &crate::Context<Self>,
+            _cx: &crate::Context<Self>,
             destination: ActorHandle<TestActor>,
             message: Box<TestActorMessage>,
         ) -> Result<(), anyhow::Error> {
@@ -1780,13 +1778,13 @@ mod tests {
             Ok(())
         }
 
-        async fn noop(&mut self, _this: &crate::Context<Self>) -> Result<(), anyhow::Error> {
+        async fn noop(&mut self, _cx: &crate::Context<Self>) -> Result<(), anyhow::Error> {
             Ok(())
         }
 
         async fn fail(
             &mut self,
-            _this: &crate::Context<Self>,
+            _cx: &crate::Context<Self>,
             err: anyhow::Error,
         ) -> Result<(), anyhow::Error> {
             Err(err)
@@ -1794,7 +1792,7 @@ mod tests {
 
         async fn panic(
             &mut self,
-            _this: &crate::Context<Self>,
+            _cx: &crate::Context<Self>,
             err_msg: String,
         ) -> Result<(), anyhow::Error> {
             panic!("{}", err_msg);
@@ -1802,10 +1800,10 @@ mod tests {
 
         async fn spawn(
             &mut self,
-            this: &crate::Context<Self>,
+            cx: &crate::Context<Self>,
             reply: oneshot::Sender<ActorHandle<TestActor>>,
         ) -> Result<(), anyhow::Error> {
-            let handle = <Self as Actor>::spawn(this, ()).await?;
+            let handle = <Self as Actor>::spawn(cx, ()).await?;
             reply.send(handle).unwrap();
             Ok(())
         }
@@ -1896,10 +1894,10 @@ mod tests {
     impl LookupTestMessageHandler for LookupTestActor {
         async fn actor_exists(
             &mut self,
-            this: &crate::Context<Self>,
+            cx: &crate::Context<Self>,
             actor_ref: ActorRef<TestActor>,
         ) -> Result<bool, anyhow::Error> {
-            Ok(actor_ref.downcast_handle(this).is_some())
+            Ok(actor_ref.downcast_handle(cx).is_some())
         }
     }
 
@@ -2315,10 +2313,10 @@ mod tests {
         impl Handler<OncePortHandle<PortHandle<usize>>> for TestActor {
             async fn handle(
                 &mut self,
-                this: &crate::Context<Self>,
+                cx: &crate::Context<Self>,
                 message: OncePortHandle<PortHandle<usize>>,
             ) -> anyhow::Result<()> {
-                message.send(this.port())?;
+                message.send(cx.port())?;
                 Ok(())
             }
         }
@@ -2327,7 +2325,7 @@ mod tests {
         impl Handler<usize> for TestActor {
             async fn handle(
                 &mut self,
-                _this: &crate::Context<Self>,
+                _cx: &crate::Context<Self>,
                 message: usize,
             ) -> anyhow::Result<()> {
                 self.0.fetch_add(message, Ordering::SeqCst);
@@ -2422,10 +2420,10 @@ mod tests {
         impl Handler<String> for TestActor {
             async fn handle(
                 &mut self,
-                this: &crate::Context<Self>,
+                cx: &crate::Context<Self>,
                 message: String,
             ) -> anyhow::Result<()> {
-                tracing::info!("{} received message: {}", this.self_id(), message);
+                tracing::info!("{} received message: {}", cx.self_id(), message);
                 Err(anyhow::anyhow!(message))
             }
         }
@@ -2563,7 +2561,7 @@ mod tests {
         impl Handler<String> for LoggingActor {
             async fn handle(
                 &mut self,
-                _this: &crate::Context<Self>,
+                _cx: &crate::Context<Self>,
                 message: String,
             ) -> anyhow::Result<()> {
                 tracing::info!("{}", message);
@@ -2575,7 +2573,7 @@ mod tests {
         impl Handler<u64> for LoggingActor {
             async fn handle(
                 &mut self,
-                _this: &crate::Context<Self>,
+                _cx: &crate::Context<Self>,
                 message: u64,
             ) -> anyhow::Result<()> {
                 tracing::event!(Level::INFO, number = message);
@@ -2587,7 +2585,7 @@ mod tests {
         impl Handler<Arc<Barrier>> for LoggingActor {
             async fn handle(
                 &mut self,
-                _this: &crate::Context<Self>,
+                _cx: &crate::Context<Self>,
                 message: Arc<Barrier>,
             ) -> anyhow::Result<()> {
                 message.wait().await;
@@ -2599,7 +2597,7 @@ mod tests {
         impl Handler<Arc<(Barrier, Barrier)>> for LoggingActor {
             async fn handle(
                 &mut self,
-                _this: &crate::Context<Self>,
+                _cx: &crate::Context<Self>,
                 barriers: Arc<(Barrier, Barrier)>,
             ) -> anyhow::Result<()> {
                 let inner = tracing::span!(Level::INFO, "child_span");

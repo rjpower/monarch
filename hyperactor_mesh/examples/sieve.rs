@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use async_trait::async_trait;
 use hyperactor::Actor;
-use hyperactor::ActorRef;
+use hyperactor::ActorHandle;
 use hyperactor::Context;
 use hyperactor::Handler;
 use hyperactor::Named;
@@ -67,22 +67,21 @@ pub struct SieveActor {
     /// Prime used for filtering.
     prime: u64,
     /// Next actor in the sieve chain.
-    next: Option<ActorRef<SieveActor>>,
+    next: Option<ActorHandle<SieveActor>>,
 }
 
 #[async_trait]
 impl Handler<NextNumber> for SieveActor {
-    async fn handle(&mut self, this: &Context<Self>, msg: NextNumber) -> Result<()> {
+    async fn handle(&mut self, cx: &Context<Self>, msg: NextNumber) -> Result<()> {
         if msg.number % self.prime != 0 {
             match &self.next {
                 Some(next) => {
-                    next.send(this, msg)?;
+                    next.send(msg)?;
                 }
                 None => {
-                    msg.prime_collector.send(this, msg.number)?;
-                    let child = SieveActor::spawn(this, SieveParams { prime: msg.number }).await?;
-                    let child_ref = child.bind();
-                    self.next = Some(child_ref);
+                    msg.prime_collector.send(cx, msg.number)?;
+                    self.next =
+                        Some(SieveActor::spawn(cx, SieveParams { prime: msg.number }).await?);
                 }
             }
         }
