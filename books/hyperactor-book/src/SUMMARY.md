@@ -9,9 +9,7 @@
   - [PortId](references/port_id.md)
   - [GangId](references/gang_id.md)
   - [Reference](references/reference.md)
-  <!-- - [Typed References](references/typed_refs.md) -->
-  <!-- - [Gangs](references/gangs.md) -->
-  <!-- - [Bindings](references/bindings.md) -->
+  - [Typed References](references/typed_refs.md)
 - [Mailboxes and Routers](mailboxes/index.md)
   - [Ports](mailboxes/ports.md)
   - [MailboxSender](mailboxes/mailbox_sender.md)
@@ -30,6 +28,8 @@
   - [RemoteActor](actors/remote_actor.md)
   - [Binds](actors/binds.md)
   - [RemoteHandles](actors/remote_handles.md)
+  - [ActorHandle](actors/actor_handle.md)
+  - [Actor Lifecycle](actors/actor_lifecycle.md)
 - [Macros](macros/index.md)
   - [`#[derive(Handler)]`](macros/handler.md)
   - [`#[derive(HandleClient)]`](macros/handle_client.md)
