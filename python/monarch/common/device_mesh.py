@@ -28,7 +28,7 @@ from typing import (
 
 import monarch.common.messages as messages
 import torch
-from monarch.actor._shape import MeshTrait, NDSlice, Shape
+from monarch._src.actor.shape import MeshTrait, NDSlice, Shape
 
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_map

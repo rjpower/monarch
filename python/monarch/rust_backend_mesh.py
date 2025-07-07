@@ -21,7 +21,7 @@ from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarc
     Proc,
 )
 
-from monarch.actor._shape import NDSlice
+from monarch._src.actor.shape import NDSlice
 from monarch.common.client import Client
 from monarch.common.device_mesh import DeviceMesh, DeviceMeshStatus
 from monarch.common.invocation import DeviceException, RemoteException

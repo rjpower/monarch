@@ -5,10 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Monarch Actor API
+Monarch Actor API - Public interface for actor functionality.
 """
 
-from monarch.actor._actor_mesh import (
+from monarch._src.actor.actor_mesh import (
     Accumulator,
     Actor,
     ActorError,
@@ -19,8 +19,8 @@ from monarch.actor._actor_mesh import (
     MonarchContext,
     ValueMesh,
 )
-from monarch.actor._future import Future
-from monarch.actor._proc_mesh import proc_mesh, ProcMesh
+from monarch._src.actor.future import Future
+from monarch._src.actor.proc_mesh import proc_mesh, ProcMesh
 
 __all__ = [
     "Accumulator",

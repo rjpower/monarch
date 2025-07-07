@@ -6,7 +6,7 @@
 
 from typing import Union
 
-from monarch.actor._shape import NDSlice
+from monarch._src.actor.shape import NDSlice
 
 from monarch.common.client import Client as _Client
 from monarch.common.device_mesh import DeviceMesh
