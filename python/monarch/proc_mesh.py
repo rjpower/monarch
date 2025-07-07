@@ -12,4 +12,4 @@ warnings.warn(
     stacklevel=2,
 )
 
-from monarch.actor._proc_mesh import *  # noqa
+from monarch._src.actor.proc_mesh import *  # noqa

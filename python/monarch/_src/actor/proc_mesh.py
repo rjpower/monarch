@@ -35,14 +35,14 @@ from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
     ProcMeshMonitor,
 )
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
-from monarch.actor._actor_mesh import _Actor, _ActorMeshRefImpl, Actor, ActorMeshRef
-from monarch.actor._allocator import LocalAllocator, ProcessAllocator
-from monarch.actor._code_sync import RsyncMeshClient, WorkspaceLocation
-from monarch.actor._code_sync.auto_reload import AutoReloadActor
+from monarch._src.actor.actor_mesh import _Actor, _ActorMeshRefImpl, Actor, ActorMeshRef
+from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
+from monarch._src.actor.code_sync import RsyncMeshClient, WorkspaceLocation
+from monarch._src.actor.code_sync.auto_reload import AutoReloadActor
 
-from monarch.actor._device_utils import _local_device_count
-from monarch.actor._future import Future
-from monarch.actor._shape import MeshTrait
+from monarch._src.actor.device_utils import _local_device_count
+from monarch._src.actor.future import Future
+from monarch._src.actor.shape import MeshTrait
 
 
 if TYPE_CHECKING:

@@ -25,7 +25,7 @@ from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monar
 from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
-from monarch.actor._shape import iter_ranks, NDSlice, Slices as Ranks
+from monarch._src.actor.shape import iter_ranks, NDSlice, Slices as Ranks
 
 from monarch.common import messages
 

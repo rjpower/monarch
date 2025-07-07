@@ -88,6 +88,8 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use dashmap::DashSet;
 use dashmap::mapref::entry::Entry;
+use futures::Sink;
+use futures::Stream;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -108,6 +110,7 @@ use crate::actor::Signal;
 use crate::actor::remote::USER_PORT_OFFSET;
 use crate::attrs::Attrs;
 use crate::cap;
+use crate::cap::CanSend;
 use crate::channel;
 use crate::channel::ChannelAddr;
 use crate::channel::ChannelError;
@@ -970,6 +973,39 @@ impl MailboxSender for MailboxClient {
     }
 }
 
+/// Wrapper to turn `PortRef` into a `Sink`.
+pub struct PortSink<'a, C: CanSend, M: RemoteMessage> {
+    caps: &'a C,
+    port: PortRef<M>,
+}
+
+impl<'a, C: CanSend, M: RemoteMessage> PortSink<'a, C, M> {
+    /// Create new PortSink
+    pub fn new(caps: &'a C, port: PortRef<M>) -> Self {
+        Self { caps, port }
+    }
+}
+
+impl<'a, C: CanSend, M: RemoteMessage> Sink<M> for PortSink<'a, C, M> {
+    type Error = MailboxSenderError;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: M) -> Result<(), Self::Error> {
+        self.port.send(self.caps, item)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 /// A mailbox coordinates message delivery to actors through typed
 /// [`Port`]s associated with the mailbox.
 #[derive(Clone, Debug)]
@@ -1612,6 +1648,14 @@ impl<M> Drop for PortReceiver<M> {
         // error out if we have removed the receiver before serializing the port ref?
         // ("no longer live")?
         self.mailbox.inner.ports.remove(&self.port());
+    }
+}
+
+impl<M> Stream for PortReceiver<M> {
+    type Item = Result<M, MailboxError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        std::pin::pin!(self.recv()).poll(cx).map(Some)
     }
 }
 

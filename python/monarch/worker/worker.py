@@ -37,7 +37,7 @@ import torch.distributed
 import torch.fx
 import zmq
 import zmq.asyncio
-from monarch.actor._shape import NDSlice
+from monarch._src.actor.shape import NDSlice
 
 from monarch.common import messages
 from monarch.common.function import ResolvableFunction

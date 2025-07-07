@@ -30,7 +30,7 @@ from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarc
 
 from monarch._rust_bindings.monarch_messages.debugger import DebuggerAction
 
-from monarch.actor._shape import NDSlice
+from monarch._src.actor.shape import NDSlice
 from monarch.common.controller_api import LogMessage, MessageResult
 from monarch.common.device_mesh import no_mesh
 from monarch.common.invocation import DeviceException, RemoteException
