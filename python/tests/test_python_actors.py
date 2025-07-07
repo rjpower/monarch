@@ -12,14 +12,13 @@ import time
 from types import ModuleType
 from unittest.mock import AsyncMock, patch
 
-import monarch
-
 import pytest
 
 import torch
 from monarch.actor import (
     Accumulator,
     Actor,
+    ActorError,
     current_actor_name,
     current_rank,
     current_size,
@@ -545,7 +544,7 @@ async def test_debug() -> None:
         breakpoints = await debug_client.list.call_one()
         assert len(breakpoints) == 0
 
-        with pytest.raises(monarch.actor.ActorError, match="ValueError: bad rank"):
+        with pytest.raises(ActorError, match="ValueError: bad rank"):
             await fut
 
 
