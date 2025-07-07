@@ -40,7 +40,7 @@ from .borrows import StorageAliases
 if TYPE_CHECKING:
     from monarch.common.device_mesh import DeviceMesh
 
-from monarch.actor._shape import NDSlice
+from monarch._src.actor.shape import NDSlice
 
 from .fake import fake_call
 from .function import Propagator, ResolvableFunction

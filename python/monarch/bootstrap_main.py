@@ -7,12 +7,12 @@
 import warnings
 
 warnings.warn(
-    "monarch.bootstrap_main is deprecated, please use from monarch.actor._bootstrap_main instead.",
+    "monarch.bootstrap_main is deprecated, please use from monarch._src.actor.bootstrap_main instead.",
     DeprecationWarning,
     stacklevel=2,
 )
 
-from monarch.actor._bootstrap_main import *  # noqa
+from monarch._src.actor.bootstrap_main import *  # noqa
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monar
     RemoteAllocatorBase,
 )
 
-from monarch.actor._future import Future
+from monarch._src.actor.future import Future
 
 ALLOC_LABEL_PROC_MESH_NAME = "procmesh.monarch.meta.com/name"
 
