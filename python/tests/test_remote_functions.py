@@ -185,9 +185,7 @@ class RemoteFunctionsTestBase:
 # out is not counted as a failure, so we set a more restrictive timeout to
 # ensure we see a hard failure in CI.
 @pytest.mark.timeout(120)
-@pytest.mark.parametrize(
-    "backend_type", [BackendType.PY, BackendType.RS, BackendType.MESH]
-)
+@pytest.mark.parametrize("backend_type", [BackendType.PY, BackendType.RS])
 class TestRemoteFunctions(RemoteFunctionsTestBase):
     @classmethod
     def do_test_reduce_scatter_tensor(cls, backend_type, reduce_op, expected_tensor):

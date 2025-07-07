@@ -8,7 +8,7 @@ import atexit
 import logging
 import os
 
-import pdb
+import pdb  # noqa
 import traceback
 from collections import deque
 from logging import Logger
