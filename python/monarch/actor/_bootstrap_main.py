@@ -16,7 +16,7 @@ import sys
 
 # Import torch to avoid import-time races if a spawned actor tries to import torch.
 try:
-    import torch  # noqa[F401]
+    import torch  # @manual
 except ImportError:
     pass
 
