@@ -83,6 +83,7 @@ class ProcMesh(MeshTrait):
         self._rsync_mesh_client: Optional[RsyncMeshClient] = None
         self._auto_reload_actor: Optional[AutoReloadActor] = None
         self._maybe_device_mesh: Optional["DeviceMesh"] = _device_mesh
+        self._stopped = False
         if _mock_shape is None and has_tensor_engine():
             # type: ignore[21]
             from monarch.rdma import RDMAManager  # @manual
@@ -251,6 +252,33 @@ class ProcMesh(MeshTrait):
 
     async def stop(self) -> None:
         await self._proc_mesh.stop()
+        self._stopped = True
+
+    async def __aenter__(self) -> "ProcMesh":
+        if self._stopped:
+            raise RuntimeError("`ProcMesh` has already been stopped")
+        return self
+
+    async def __aexit__(
+        self, exc_type: object, exc_val: object, exc_tb: object
+    ) -> None:
+        # In case there are multiple nested "async with" statements, we only
+        # want it to close once.
+        if not self._stopped:
+            await self.stop()
+
+    # Finalizer to check if the proc mesh was closed properly.
+    def __del__(self) -> None:
+        if not self._stopped:
+            import warnings
+
+            warnings.warn(
+                f"unstopped ProcMesh {self!r}",
+                ResourceWarning,
+                stacklevel=2,
+                source=self,
+            )
+            # Cannot call stop here because it is async.
 
 
 async def local_proc_mesh_nonblocking(
