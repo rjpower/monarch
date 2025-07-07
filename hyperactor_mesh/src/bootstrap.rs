@@ -66,7 +66,7 @@ pub(crate) enum Allocator2Process {
     Exit(i32),
 }
 
-async fn heartbeat_task(bootstrap_index: usize, bootstrap_addr: ChannelAddr) {
+async fn exit_if_missed_heartbeat(bootstrap_index: usize, bootstrap_addr: ChannelAddr) {
     let tx = match channel::dial(bootstrap_addr.clone()) {
         Ok(tx) => tx,
 
@@ -135,7 +135,7 @@ pub async fn bootstrap() -> anyhow::Error {
         ))
         .await?;
 
-        tokio::spawn(heartbeat_task(bootstrap_index, bootstrap_addr));
+        tokio::spawn(exit_if_missed_heartbeat(bootstrap_index, bootstrap_addr));
 
         let mut procs = Vec::new();
 

@@ -140,7 +140,7 @@ def test_actor_supervision(num_procs, sync_endpoint, sync_test_impl, endpoint_na
         raise
 
     # Assert that the subprocess exited with a non-zero code
-    assert "I actually ran" in process.stdout.decode()
+    assert "Started function error_test" in process.stdout.decode()
     assert (
         process.returncode != 0
     ), f"Expected non-zero exit code, got {process.returncode}"
@@ -170,7 +170,7 @@ def test_proc_mesh_bootstrap_error():
         raise
 
     # Assert that the subprocess exited with a non-zero code
-    assert "I actually ran" in process.stdout.decode()
+    assert "Started function error_bootstrap" in process.stdout.decode()
     assert (
         process.returncode != 0
     ), f"Expected non-zero exit code, got {process.returncode}"
@@ -234,7 +234,7 @@ async def test_exception_after_wait_unmonitored():
         raise
 
     # Assert that the subprocess exited with a non-zero code
-    assert "I actually ran" in process.stdout.decode()
+    assert "Started function _error_unmonitored" in process.stdout.decode()
     assert (
         process.returncode != 0
     ), f"Expected non-zero exit code, got {process.returncode}"
@@ -260,73 +260,38 @@ def test_python_actor_process_cleanup():
         "error-cleanup",
     ]
 
-    print("running cmd", " ".join(cmd))
-
-    # Start the subprocess
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        preexec_fn=os.setsid,  # Create a new process group
-    )
-
-    parent_pid = process.pid
-    print(f"Parent process started with PID: {parent_pid}")
+    try:
+        print("running cmd", " ".join(cmd))
+        process = subprocess.run(cmd, capture_output=True, timeout=180, text=True)
+    except subprocess.TimeoutExpired as e:
+        print("timeout expired")
+        if e.stdout is not None:
+            print(e.stdout.decode())
+        if e.stderr is not None:
+            print(e.stderr.decode())
+        raise
 
     # Read stdout line by line to get child PIDs
-    child_pids = []
-    test_actually_ran = False
+    assert "Started function _error_cleanup() for parent process" in process.stdout
 
-    try:
-        # Read stdout until we get the child PIDs or the process exits
-        while process.poll() is None:
-            line = process.stdout.readline()
-            if not line:
-                break
+    child_pids = set()
+    for line in process.stdout.splitlines():
+        if line.startswith("CHILD_PIDS: "):
+            pids_str = line[len("CHILD_PIDS: ") :]  # noqa
+            child_pids = {
+                int(pid.strip()) for pid in pids_str.split(",") if pid.strip()
+            }
+            print(f"Extracted child PIDs: {child_pids}")
+            break
 
-            line = line.strip()
-            print(f"Subprocess output: {line}")
+    if not child_pids:
+        raise AssertionError("No child PIDs found in output")
 
-            if "I actually ran" in line:
-                test_actually_ran = True
-            elif line.startswith("CHILD_PIDS: "):
-                # Parse child PIDs from the output
-                pids_str = line[len("CHILD_PIDS: ") :]  # noqa
-                if pids_str:
-                    child_pids = [
-                        int(pid.strip()) for pid in pids_str.split(",") if pid.strip()
-                    ]
-                    print(f"Extracted child PIDs: {child_pids}")
-                    break
-                else:
-                    raise AssertionError("No child PIDs found in output")
-    except Exception as e:
-        print(f"Error reading subprocess output: {e}")
-
-    # Wait for the parent to be killed
-    try:
-        process.wait(timeout=30)
-        print(f"Parent process exited with return code: {process.returncode}")
-    except subprocess.TimeoutExpired:
-        print("Parent process did not exit within timeout")
-        process.kill()
-        process.wait()
-
-    # Get remaining output
-    stdout, stderr = process.communicate()
-    stdout_str = stdout if stdout else ""
-    stderr_str = stderr if stderr else ""
-
-    print(f"Remaining stdout: {stdout_str}")
-    print(f"Stderr: {stderr_str}")
-
-    assert test_actually_ran, "Test binary did not run properly"
     assert child_pids, "No child PIDs were collected from subprocess output"
 
     # Wait for child processes to be cleaned up
     print("Waiting for child processes to be cleaned up...")
-    cleanup_timeout = 120  # 60 seconds timeout
+    cleanup_timeout = 120
     start_time = time.time()
 
     def is_process_running(pid):
@@ -337,28 +302,28 @@ def test_python_actor_process_cleanup():
         except OSError:
             return False
 
-    while time.time() - start_time < cleanup_timeout:
-        still_running = [pid for pid in child_pids if is_process_running(pid)]
+    still_running = set(child_pids)
 
+    while time.time() - start_time < cleanup_timeout:
         if not still_running:
             print("All child processes have been cleaned up!")
             return
+
+        still_running = {pid for pid in still_running if is_process_running(pid)}
 
         print(f"Still running child PIDs: {still_running}")
         time.sleep(2)
 
     # If we get here, some processes are still running
-    still_running = [pid for pid in child_pids if is_process_running(pid)]
-    if still_running:
-        # Try to clean up remaining processes
-        for pid in still_running:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-        raise AssertionError(
-            f"Child processes not cleaned up after {cleanup_timeout}s: {still_running}"
-        )
+    # Try to clean up remaining processes
+    for pid in still_running:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    raise AssertionError(
+        f"Child processes not cleaned up after {cleanup_timeout}s: {still_running}"
+    )
 
 
 class ErrorActor(Actor):
