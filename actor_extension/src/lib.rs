@@ -9,7 +9,7 @@
 //! This module is used to expose Rust bindings for code supporting the
 //! `monarch.actor` module.
 //!
-//! It is imported by `monarch` as `monarch.actor._extension`.
+//! It is imported by `monarch` as `monarch._src.actor._extension`.
 use pyo3::prelude::*;
 
 mod blocking;
@@ -35,7 +35,7 @@ fn get_or_add_new_module<'py>(
                 .import("sys")?
                 .getattr("modules")?
                 .set_item(
-                    format!("monarch.actor._extension.{}", parts.join(".")),
+                    format!("monarch._src.actor._extension.{}", parts.join(".")),
                     new_module.clone(),
                 )?;
             current_module = new_module;

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import List, NamedTuple, Optional, Sequence
 
 import torch
-from monarch.actor._shape import NDSlice
+from monarch._src.actor.shape import NDSlice
 
 from monarch.common import messages
 from monarch.simulator.ir import IRGraph

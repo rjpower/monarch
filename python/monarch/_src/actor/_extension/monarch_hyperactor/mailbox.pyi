@@ -8,14 +8,14 @@
 
 from typing import final, Generic, Protocol
 
-from monarch.actor._extension.monarch_hyperactor.actor import (
+from monarch._src.actor._extension.monarch_hyperactor.actor import (
     PythonMessage,
     UndeliverableMessageEnvelope,
 )
 
-from monarch.actor._extension.monarch_hyperactor.proc import ActorId
+from monarch._src.actor._extension.monarch_hyperactor.proc import ActorId
 
-from monarch.actor._extension.monarch_hyperactor.shape import Shape
+from monarch._src.actor._extension.monarch_hyperactor.shape import Shape
 
 @final
 class PortId:

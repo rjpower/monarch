@@ -40,10 +40,10 @@ from typing import (
 import numpy as np
 
 import torch
-from monarch.actor._extension.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
+from monarch._src.actor._extension.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
-from monarch.actor._shape import iter_ranks, NDSlice
+from monarch._src.actor.shape import iter_ranks, NDSlice
 from monarch.common import messages
 from monarch.common.controller_api import LogMessage, MessageResult
 from monarch.common.device_mesh import DeviceMesh

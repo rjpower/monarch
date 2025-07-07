@@ -10,7 +10,7 @@ from importlib import import_module as _import_module
 from typing import TYPE_CHECKING
 
 # Import this to initialize actor runtime before anything else.
-import monarch.actor._extension  # noqa: F401
+import monarch._src.actor._extension  # noqa: F401
 
 # Import before monarch to pre-load torch DSOs as, in exploded wheel flows,
 # our RPATHs won't correctly find them.
@@ -32,8 +32,8 @@ import torch  # noqa: F401
 
 if TYPE_CHECKING:
     from monarch import timer
-    from monarch.actor._allocator import LocalAllocator, ProcessAllocator
-    from monarch.actor._shape import NDSlice, Shape
+    from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
+    from monarch._src.actor.shape import NDSlice, Shape
     from monarch.common._coalescing import coalescing
 
     from monarch.common.device_mesh import (
@@ -81,8 +81,8 @@ _public_api = {
     "function_resolvers": ("monarch.common.function", "resolvers"),
     "Future": ("monarch.common.future", "Future"),
     "RemoteException": ("monarch.common.invocation", "RemoteException"),
-    "Shape": ("monarch.actor._shape", "Shape"),
-    "NDSlice": ("monarch.actor._shape", "NDSlice"),
+    "Shape": ("monarch._src.actor.shape", "Shape"),
+    "NDSlice": ("monarch._src.actor.shape", "NDSlice"),
     "Selection": ("monarch.common.selection", "Selection"),
     "OpaqueRef": ("monarch.common.opaque_ref", "OpaqueRef"),
     "create_pipe": ("monarch.common.pipe", "create_pipe"),
@@ -114,8 +114,8 @@ _public_api = {
     "Simulator": ("monarch.simulator.interface", "Simulator"),
     "world_mesh": ("monarch.world_mesh", "world_mesh"),
     "timer": ("monarch.timer", "timer"),
-    "ProcessAllocator": ("monarch.actor._allocator", "ProcessAllocator"),
-    "LocalAllocator": ("monarch.actor._allocator", "LocalAllocator"),
+    "ProcessAllocator": ("monarch._src.actor.allocator", "ProcessAllocator"),
+    "LocalAllocator": ("monarch._src.actor.allocator", "LocalAllocator"),
     "builtins": ("monarch.builtins", "builtins"),
 }
 

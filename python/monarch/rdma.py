@@ -10,15 +10,15 @@ from dataclasses import dataclass
 from typing import cast, Dict, Optional, Tuple
 
 import torch
-from monarch.actor._actor_mesh import (
+
+from monarch._src.actor._extension.monarch_hyperactor.proc import ActorId
+from monarch._src.actor.actor_mesh import (
     _ActorMeshRefImpl,
     Actor,
     ActorMeshRef,
     endpoint,
     MonarchContext,
 )
-
-from monarch.actor._extension.monarch_hyperactor.proc import ActorId
 
 
 @dataclass

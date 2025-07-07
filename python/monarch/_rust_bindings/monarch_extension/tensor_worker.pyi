@@ -7,8 +7,8 @@
 from typing import Callable, final, Optional, Sequence, Tuple
 
 import torch
-from monarch.actor._extension.monarch_hyperactor.proc import ActorId
-from monarch.actor._extension.monarch_hyperactor.shape import Slice
+from monarch._src.actor._extension.monarch_hyperactor.proc import ActorId
+from monarch._src.actor._extension.monarch_hyperactor.shape import Slice
 
 @final
 class Ref:

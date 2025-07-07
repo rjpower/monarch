@@ -22,25 +22,25 @@ from typing import (
     TypeVar,
 )
 
-from monarch.actor._actor_mesh import _Actor, _ActorMeshRefImpl, Actor, ActorMeshRef
-from monarch.actor._allocator import LocalAllocator, ProcessAllocator
-from monarch.actor._code_sync import RsyncMeshClient, WorkspaceLocation
-from monarch.actor._code_sync.auto_reload import AutoReloadActor
-from monarch.actor._device_utils import _local_device_count
-
-from monarch.actor._extension.hyperactor_extension.alloc import (  # @manual=//monarch/actor_extension:actor_extension
+from monarch._src.actor._extension.hyperactor_extension.alloc import (  # @manual=//monarch/actor_extension:actor_extension
     Alloc,
     AllocConstraints,
     AllocSpec,
 )
-from monarch.actor._extension.monarch_hyperactor.mailbox import Mailbox
-from monarch.actor._extension.monarch_hyperactor.proc_mesh import (
+from monarch._src.actor._extension.monarch_hyperactor.mailbox import Mailbox
+from monarch._src.actor._extension.monarch_hyperactor.proc_mesh import (
     ProcMesh as HyProcMesh,
     ProcMeshMonitor,
 )
-from monarch.actor._extension.monarch_hyperactor.shape import Shape, Slice
-from monarch.actor._future import Future
-from monarch.actor._shape import MeshTrait
+from monarch._src.actor._extension.monarch_hyperactor.shape import Shape, Slice
+from monarch._src.actor.actor_mesh import _Actor, _ActorMeshRefImpl, Actor, ActorMeshRef
+from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
+from monarch._src.actor.code_sync import RsyncMeshClient, WorkspaceLocation
+from monarch._src.actor.code_sync.auto_reload import AutoReloadActor
+
+from monarch._src.actor.device_utils import _local_device_count
+from monarch._src.actor.future import Future
+from monarch._src.actor.shape import MeshTrait
 
 HAS_TENSOR_ENGINE = False
 try:
@@ -91,6 +91,7 @@ class ProcMesh(MeshTrait):
         self._rsync_mesh_client: Optional[RsyncMeshClient] = None
         self._auto_reload_actor: Optional[AutoReloadActor] = None
         self._maybe_device_mesh: Optional["DeviceMesh"] = _device_mesh
+        self._stopped = False
         if _mock_shape is None and HAS_TENSOR_ENGINE:
             # type: ignore[21]
             self._rdma_manager = self._spawn_blocking("rdma_manager", RDMAManager)
@@ -256,6 +257,33 @@ class ProcMesh(MeshTrait):
 
     async def stop(self) -> None:
         await self._proc_mesh.stop()
+        self._stopped = True
+
+    async def __aenter__(self) -> "ProcMesh":
+        if self._stopped:
+            raise RuntimeError("`ProcMesh` has already been stopped")
+        return self
+
+    async def __aexit__(
+        self, exc_type: object, exc_val: object, exc_tb: object
+    ) -> None:
+        # In case there are multiple nested "async with" statements, we only
+        # want it to close once.
+        if not self._stopped:
+            await self.stop()
+
+    # Finalizer to check if the proc mesh was closed properly.
+    def __del__(self) -> None:
+        if not self._stopped:
+            import warnings
+
+            warnings.warn(
+                f"unstopped ProcMesh {self!r}",
+                ResourceWarning,
+                stacklevel=2,
+                source=self,
+            )
+            # Cannot call stop here because it is async.
 
 
 async def local_proc_mesh_nonblocking(
@@ -285,7 +313,7 @@ def local_proc_mesh(*, gpus: Optional[int] = None, hosts: int = 1) -> Future[Pro
     )
 
 
-_BOOTSTRAP_MAIN = "monarch.actor._bootstrap_main"
+_BOOTSTRAP_MAIN = "monarch._src.actor.bootstrap_main"
 
 
 def _get_bootstrap_args() -> tuple[str, Optional[list[str]], dict[str, str]]:

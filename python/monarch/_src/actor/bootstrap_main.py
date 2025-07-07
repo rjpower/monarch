@@ -22,7 +22,9 @@ except ImportError:
 
 
 async def main():
-    from monarch.actor._extension.monarch_hyperactor.bootstrap import bootstrap_main
+    from monarch._src.actor._extension.monarch_hyperactor.bootstrap import (
+        bootstrap_main,
+    )
 
     await bootstrap_main()
 
@@ -35,7 +37,7 @@ def invoke_main():
     global bootstrap_main
 
     # TODO: figure out what from worker_main.py we should reproduce here.
-    from monarch.actor._telemetry import TracingForwarder
+    from monarch._src.actor.telemetry import TracingForwarder
 
     if os.environ.get("MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING") == "1":
         raise RuntimeError("Error during bootstrap for testing")

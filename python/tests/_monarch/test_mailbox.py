@@ -12,21 +12,24 @@ from typing import Callable, cast, final, Generic, TypeVar
 
 import monarch
 
-from monarch.actor._extension.hyperactor_extension.alloc import (
+from monarch._src.actor._extension.hyperactor_extension.alloc import (
     AllocConstraints,
     AllocSpec,
 )
 
-from monarch.actor._extension.monarch_hyperactor.actor import PanicFlag, PythonMessage
+from monarch._src.actor._extension.monarch_hyperactor.actor import (
+    PanicFlag,
+    PythonMessage,
+)
 
-from monarch.actor._extension.monarch_hyperactor.mailbox import (
+from monarch._src.actor._extension.monarch_hyperactor.mailbox import (
     Mailbox,
     PortReceiver,
     PortRef,
 )
-from monarch.actor._extension.monarch_hyperactor.proc_mesh import ProcMesh
-from monarch.actor._extension.monarch_hyperactor.shape import Shape
-
+from monarch._src.actor._extension.monarch_hyperactor.proc_mesh import ProcMesh
+from monarch._src.actor._extension.monarch_hyperactor.selection import Selection
+from monarch._src.actor._extension.monarch_hyperactor.shape import Shape
 
 S = TypeVar("S")
 U = TypeVar("U")
@@ -157,7 +160,10 @@ async def test_reducer() -> None:
     handle, receiver = proc_mesh.client.open_accum_port(accumulator)
     port_ref = handle.bind()
 
-    actor_mesh.cast(PythonMessage("echo", pickle.dumps("start"), port_ref, None))
+    actor_mesh.cast(
+        Selection.from_string("*"),
+        PythonMessage("echo", pickle.dumps("start"), port_ref, None),
+    )
 
     messge = await asyncio.wait_for(receiver.recv(), timeout=5)
     value = cast(str, pickle.loads(messge.message))

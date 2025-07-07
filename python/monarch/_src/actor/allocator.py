@@ -10,15 +10,15 @@ import abc
 import logging
 from typing import final, Optional
 
-from monarch.actor._extension.hyperactor_extension.alloc import Alloc, AllocSpec
+from monarch._src.actor._extension.hyperactor_extension.alloc import Alloc, AllocSpec
 
-from monarch.actor._extension.monarch_hyperactor.alloc import (
+from monarch._src.actor._extension.monarch_hyperactor.alloc import (
     LocalAllocatorBase,
     ProcessAllocatorBase,
     RemoteAllocatorBase,
 )
 
-from monarch.actor._future import Future
+from monarch._src.actor.future import Future
 
 ALLOC_LABEL_PROC_MESH_NAME = "procmesh.monarch.meta.com/name"
 

@@ -25,12 +25,12 @@ from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monar
 )
 
 from monarch._rust_bindings.monarch_messages.debugger import DebuggerAction
-from monarch.actor._extension.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
+from monarch._src.actor._extension.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
     Proc,
 )
 
-from monarch.actor._shape import NDSlice
+from monarch._src.actor.shape import NDSlice
 from monarch.common.controller_api import LogMessage, MessageResult
 from monarch.common.device_mesh import no_mesh
 from monarch.common.invocation import DeviceException, RemoteException

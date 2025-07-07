@@ -21,11 +21,12 @@ use crate::actor::PythonMessage;
 use crate::mailbox::PyMailbox;
 use crate::proc::PyActorId;
 use crate::proc_mesh::Keepalive;
+use crate::selection::PySelection;
 use crate::shape::PyShape;
 
 #[pyclass(
     name = "PythonActorMesh",
-    module = "monarch.actor._extension.monarch_hyperactor.actor_mesh"
+    module = "monarch._src.actor._extension.monarch_hyperactor.actor_mesh"
 )]
 pub struct PythonActorMesh {
     pub(super) inner: SharedCell<RootActorMesh<'static, PythonActor>>,
@@ -43,10 +44,9 @@ impl PythonActorMesh {
 
 #[pymethods]
 impl PythonActorMesh {
-    fn cast(&self, message: &PythonMessage) -> PyResult<()> {
-        use ndslice::selection::dsl::*;
+    fn cast(&self, selection: &PySelection, message: &PythonMessage) -> PyResult<()> {
         self.try_inner()?
-            .cast(all(true_()), message.clone())
+            .cast(selection.inner().clone(), message.clone())
             .map_err(|err| PyException::new_err(err.to_string()))?;
         Ok(())
     }

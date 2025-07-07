@@ -13,11 +13,17 @@ use pyo3::types::PyType;
 
 #[pyclass(
     name = "Selection",
-    module = "monarch.actor._extension.monarch_hyperactor.selection",
+    module = "monarch._src.actor._extension.monarch_hyperactor.selection",
     frozen
 )]
 pub struct PySelection {
     inner: Selection,
+}
+
+impl PySelection {
+    pub(crate) fn inner(&self) -> &Selection {
+        &self.inner
+    }
 }
 
 impl From<Selection> for PySelection {

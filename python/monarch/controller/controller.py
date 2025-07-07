@@ -15,11 +15,11 @@ from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monar
     WorldState,
 )
 
-from monarch.actor._extension.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
+from monarch._src.actor._extension.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
 
-from monarch.actor._shape import NDSlice
+from monarch._src.actor.shape import NDSlice
 
 from monarch.common import messages
 from monarch.common.controller_api import LogMessage, MessageResult

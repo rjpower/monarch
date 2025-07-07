@@ -8,11 +8,11 @@ from traceback import FrameSummary
 from typing import List, NamedTuple, Sequence, Tuple, Union
 
 from monarch._rust_bindings.monarch_extension import client
-from monarch.actor._extension.monarch_hyperactor.mailbox import PortId
-from monarch.actor._extension.monarch_hyperactor.proc import ActorId
-from monarch.actor._extension.monarch_hyperactor.proc_mesh import ProcMesh
+from monarch._src.actor._extension.monarch_hyperactor.mailbox import PortId
+from monarch._src.actor._extension.monarch_hyperactor.proc import ActorId
+from monarch._src.actor._extension.monarch_hyperactor.proc_mesh import ProcMesh
 
-from monarch.actor._extension.monarch_hyperactor.shape import Slice as NDSlice
+from monarch._src.actor._extension.monarch_hyperactor.shape import Slice as NDSlice
 
 class _Controller:
     def __init__(self) -> None: ...
@@ -30,8 +30,6 @@ class _Controller:
         ranks: Union[NDSlice, List[NDSlice]],
         msg: NamedTuple,
     ) -> None: ...
-    def _debugger_attach(self, debugger_actor_id: ActorId) -> None: ...
-    def _debugger_write(self, debugger_actor_id: ActorId, data: bytes) -> None: ...
     def _drain_and_stop(
         self,
     ) -> List[client.LogMessage | client.WorkerResponse | client.DebuggerMessage]: ...

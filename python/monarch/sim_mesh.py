@@ -35,13 +35,13 @@ from monarch._rust_bindings.monarch_extension.simulator_client import (  # @manu
     SimulatorClient,
 )
 
-from monarch.actor._extension.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
+from monarch._src.actor._extension.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
     init_proc,
     Proc,
 )
 
-from monarch.actor._shape import NDSlice
+from monarch._src.actor.shape import NDSlice
 from monarch.common.client import Client
 from monarch.common.constants import (
     SIM_MESH_CLIENT_SUPERVISION_UPDATE_INTERVAL,

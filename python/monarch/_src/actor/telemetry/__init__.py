@@ -9,7 +9,9 @@
 
 import logging
 
-from monarch.actor._extension.hyperactor_extension.telemetry import forward_to_tracing
+from monarch._src.actor._extension.hyperactor_extension.telemetry import (
+    forward_to_tracing,
+)
 
 
 class TracingForwarder(logging.Handler):

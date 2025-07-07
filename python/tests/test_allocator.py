@@ -23,6 +23,21 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+
+from monarch._rust_bindings.hyperactor_extension.alloc import (
+    AllocConstraints,
+    AllocSpec,
+)
+from monarch._src.actor._extension.monarch_hyperactor.channel import (
+    ChannelAddr,
+    ChannelTransport,
+)
+from monarch._src.actor.allocator import (
+    ALLOC_LABEL_PROC_MESH_NAME,
+    RemoteAllocator,
+    StaticRemoteAllocInitializer,
+    TorchXRemoteAllocInitializer,
+)
 from monarch.actor import (
     Actor,
     current_rank,
@@ -30,21 +45,6 @@ from monarch.actor import (
     endpoint,
     ProcMesh,
     ValueMesh,
-)
-from monarch.actor._allocator import (
-    ALLOC_LABEL_PROC_MESH_NAME,
-    RemoteAllocator,
-    StaticRemoteAllocInitializer,
-    TorchXRemoteAllocInitializer,
-)
-
-from monarch.actor._extension.hyperactor_extension.alloc import (
-    AllocConstraints,
-    AllocSpec,
-)
-from monarch.actor._extension.monarch_hyperactor.channel import (
-    ChannelAddr,
-    ChannelTransport,
 )
 from monarch.tools.mesh_spec import MeshSpec, ServerSpec
 from monarch.tools.network import get_sockaddr
@@ -218,6 +218,63 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 RuntimeError, msg="`ProcMesh` has already been stopped"
             ):
                 await proc_mesh.spawn("test_actor", TestActor)
+
+            # TODO(agallagher): It'd be nice to test that this just fails
+            # immediately, trying to access the wrapped actor mesh, but right
+            # now we doing casting without accessing the wrapped type.
+            del actor
+
+    async def test_stop_proc_mesh_context_manager(self) -> None:
+        spec = AllocSpec(AllocConstraints(), host=2, gpu=4)
+
+        # create 2x process-allocators (on their own bind addresses) to simulate 2 hosts
+        with remote_process_allocator() as host1, remote_process_allocator() as host2:
+            allocator = RemoteAllocator(
+                world_id="test_remote_allocator",
+                initializer=StaticRemoteAllocInitializer(host1, host2),
+                heartbeat_interval=_100_MILLISECONDS,
+            )
+            alloc = await allocator.allocate(spec)
+            proc_mesh = await ProcMesh.from_alloc(alloc)
+            with self.assertRaises(ValueError, msg="foo"):
+                async with proc_mesh:
+                    actor = await proc_mesh.spawn("test_actor", TestActor)
+                    # Ensure that proc mesh is stopped when context manager exits.
+                    raise ValueError("foo")
+
+            with self.assertRaises(
+                RuntimeError, msg="`ProcMesh` has already been stopped"
+            ):
+                await proc_mesh.spawn("test_actor", TestActor)
+
+            # TODO(agallagher): It'd be nice to test that this just fails
+            # immediately, trying to access the wrapped actor mesh, but right
+            # now we doing casting without accessing the wrapped type.
+            del actor
+
+    async def test_stop_proc_mesh_context_manager_multiple_times(self) -> None:
+        spec = AllocSpec(AllocConstraints(), host=2, gpu=4)
+
+        # create 2x process-allocators (on their own bind addresses) to simulate 2 hosts
+        with remote_process_allocator() as host1, remote_process_allocator() as host2:
+            allocator = RemoteAllocator(
+                world_id="test_remote_allocator",
+                initializer=StaticRemoteAllocInitializer(host1, host2),
+                heartbeat_interval=_100_MILLISECONDS,
+            )
+            alloc = await allocator.allocate(spec)
+            proc_mesh = await ProcMesh.from_alloc(alloc)
+            # We can nest multiple context managers on the same mesh, the innermost
+            # one closes the mesh and it cannot be used after that.
+            async with proc_mesh:
+                async with proc_mesh:
+                    actor = await proc_mesh.spawn("test_actor", TestActor)
+
+                with self.assertRaises(
+                    RuntimeError, msg="`ProcMesh` has already been stopped"
+                ):
+                    await proc_mesh.spawn("test_actor", TestActor)
+                # Exiting a second time should not raise an error.
 
             # TODO(agallagher): It'd be nice to test that this just fails
             # immediately, trying to access the wrapped actor mesh, but right
