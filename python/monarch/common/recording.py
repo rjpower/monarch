@@ -10,7 +10,7 @@ import traceback
 from collections import defaultdict
 from typing import cast, Dict, Generator, List, NamedTuple, Tuple, TYPE_CHECKING, Union
 
-from monarch.actor._shape import iter_ranks
+from monarch._src.actor.shape import iter_ranks
 
 from monarch.common.reference import Ref
 
@@ -21,7 +21,7 @@ from . import messages
 if TYPE_CHECKING:
     from monarch.common.client import Client
 
-from monarch.actor._shape import NDSlice
+from monarch._src.actor.shape import NDSlice
 
 from .reference import Referenceable
 from .tensor import Tensor

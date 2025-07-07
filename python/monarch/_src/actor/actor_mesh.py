@@ -51,16 +51,16 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
 )
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
-from monarch.actor._allocator import LocalAllocator, ProcessAllocator
-from monarch.actor._future import Future
-from monarch.actor._pdb_wrapper import remote_breakpointhook
+from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
+from monarch._src.actor.future import Future
+from monarch._src.actor.pdb_wrapper import remote_breakpointhook
 
-from monarch.actor._pickle import flatten, unpickle
+from monarch._src.actor.pickle import flatten, unpickle
 
-from monarch.actor._shape import MeshTrait, NDSlice
+from monarch._src.actor.shape import MeshTrait, NDSlice
 
 if TYPE_CHECKING:
-    from monarch.actor._debugger import DebugClient
+    from monarch._src.actor.debugger import DebugClient
 
 logger: logging.Logger = logging.getLogger(__name__)
 

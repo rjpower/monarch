@@ -33,14 +33,14 @@ from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
     ProcMeshMonitor,
 )
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
-from monarch.actor._actor_mesh import _Actor, _ActorMeshRefImpl, Actor, ActorMeshRef
-from monarch.actor._allocator import LocalAllocator, ProcessAllocator
-from monarch.actor._code_sync import RsyncMeshClient, WorkspaceLocation
-from monarch.actor._code_sync.auto_reload import AutoReloadActor
+from monarch._src.actor.actor_mesh import _Actor, _ActorMeshRefImpl, Actor, ActorMeshRef
+from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
+from monarch._src.actor.code_sync import RsyncMeshClient, WorkspaceLocation
+from monarch._src.actor.code_sync.auto_reload import AutoReloadActor
 
-from monarch.actor._device_utils import _local_device_count
-from monarch.actor._future import Future
-from monarch.actor._shape import MeshTrait
+from monarch._src.actor.device_utils import _local_device_count
+from monarch._src.actor.future import Future
+from monarch._src.actor.shape import MeshTrait
 
 HAS_TENSOR_ENGINE = False
 try:
@@ -285,7 +285,7 @@ def local_proc_mesh(*, gpus: Optional[int] = None, hosts: int = 1) -> Future[Pro
     )
 
 
-_BOOTSTRAP_MAIN = "monarch.actor._bootstrap_main"
+_BOOTSTRAP_MAIN = "monarch._src.actor.bootstrap_main"
 
 
 def _get_bootstrap_args() -> tuple[str, Optional[list[str]], dict[str, str]]:

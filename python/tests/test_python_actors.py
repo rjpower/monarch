@@ -15,6 +15,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import torch
+from monarch._src.actor.debugger import init_debugging
+
+from monarch._src.actor.proc_mesh import local_proc_mesh
 from monarch.actor import (
     Accumulator,
     Actor,
@@ -27,9 +30,6 @@ from monarch.actor import (
     MonarchContext,
     proc_mesh,
 )
-from monarch.actor._debugger import init_debugging
-
-from monarch.actor._proc_mesh import local_proc_mesh
 from monarch.rdma import RDMABuffer
 
 needs_cuda = pytest.mark.skipif(
@@ -469,8 +469,8 @@ async def test_debug() -> None:
         outputs.append(msg)
 
     with patch(
-        "monarch.actor._debugger._debugger_input", side_effect=input_mock
-    ), patch("monarch.actor._debugger._debugger_output", new=_patch_output):
+        "monarch._src.actor.debugger._debugger_input", side_effect=input_mock
+    ), patch("monarch._src.actor.debugger._debugger_output", new=_patch_output):
         proc = await proc_mesh(hosts=2, gpus=2)
         debugee = await proc.spawn("debugee", DebugeeActor)
         debug_client = await init_debugging(debugee)

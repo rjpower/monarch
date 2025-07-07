@@ -43,7 +43,7 @@ import torch
 from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
-from monarch.actor._shape import iter_ranks, NDSlice
+from monarch._src.actor.shape import iter_ranks, NDSlice
 from monarch.common import messages
 from monarch.common.controller_api import LogMessage, MessageResult
 from monarch.common.device_mesh import DeviceMesh
