@@ -124,8 +124,9 @@ def _initialize_env(worker_point: Point, proc_id: str) -> None:
         }
         os.environ.update(process_env)
         pdb.set_trace = _set_trace
-        # workaround for set_manual_seed somehow not working if cuda is not initialized
-        torch.cuda.init()
+        # workaround for set_manual_seed somehow not working if cuda is not initialized\
+        if torch.cuda.is_available():
+            torch.cuda.init()
     except Exception:
         traceback.print_exc()
         raise
