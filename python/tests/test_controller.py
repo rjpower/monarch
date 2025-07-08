@@ -29,10 +29,6 @@ from monarch import (
 )
 
 from monarch._testing import BackendType, TestingContext
-from monarch.common.controller_api import LogMessage
-from monarch.common.invocation import DeviceException
-from monarch.common.remote import remote
-from monarch.common.tree import flattener
 from monarch.rust_local_mesh import (
     ControllerParams,
     local_mesh,
@@ -41,6 +37,10 @@ from monarch.rust_local_mesh import (
     SocketType,
     SupervisionParams,
 )
+from monarch._src.tensor_engine.common.controller_api import LogMessage
+from monarch._src.tensor_engine.common.invocation import DeviceException
+from monarch._src.tensor_engine.common.remote import remote
+from monarch._src.tensor_engine.common.tree import flattener
 from monarch_supervisor.logging import fix_exception_lines
 
 

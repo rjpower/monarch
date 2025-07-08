@@ -19,8 +19,8 @@ import torch.nn as nn
 
 import torch.optim as optim
 from monarch import fetch_shard, no_mesh, OpaqueRef, remote, Stream, Tensor
-from monarch.common.device_mesh import DeviceMesh
 from monarch.opaque_module import OpaqueModule
+from monarch._src.tensor_engine.common.device_mesh import DeviceMesh
 
 from .schedule_ir import (
     _Action,

@@ -10,9 +10,9 @@ import unittest
 import pytest
 
 import torch
-
-from monarch.common import messages
 from monarch.simulator.profiling import RuntimeEstimator, RuntimeProfiler, TimingType
+
+from monarch._src.tensor_engine.common import messages
 
 
 # pyre-ignore-all-errors[6]

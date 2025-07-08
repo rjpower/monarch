@@ -17,8 +17,6 @@ except ModuleNotFoundError:
     from unittest import TestCase
 
 from monarch import fetch_shard, no_mesh, remote
-from monarch.common.device_mesh import DeviceMesh, DeviceMeshStatus
-from monarch.common.invocation import DeviceException, RemoteException
 from monarch.rust_backend_mesh import MeshWorld, PoolDeviceMeshProvider
 from monarch.rust_local_mesh import (
     Bootstrap,
@@ -28,6 +26,8 @@ from monarch.rust_local_mesh import (
     SocketType,
     SupervisionParams,
 )
+from monarch._src.tensor_engine.common.device_mesh import DeviceMesh, DeviceMeshStatus
+from monarch._src.tensor_engine.common.invocation import DeviceException, RemoteException
 
 
 def _do_bogus_tensor_work(

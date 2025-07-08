@@ -53,10 +53,6 @@ from monarch._rust_bindings.monarch_tensor_worker.bootstrap import (
 from monarch._src.actor._extension.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
-
-from monarch.common.device_mesh import DeviceMesh
-from monarch.common.fake import fake_call
-from monarch.common.invocation import DeviceException, RemoteException
 from monarch.rust_backend_mesh import (
     IBootstrap,
     MeshWorld,
@@ -64,6 +60,10 @@ from monarch.rust_backend_mesh import (
     rust_backend_mesh_provider,
     rust_backend_meshes,
 )
+
+from monarch._src.tensor_engine.common.device_mesh import DeviceMesh
+from monarch._src.tensor_engine.common.fake import fake_call
+from monarch._src.tensor_engine.common.invocation import DeviceException, RemoteException
 
 logger: logging.Logger = logging.getLogger(__name__)
 _MONARCH_TENSOR_WORKER_MAIN = "monarch.tensor_worker_main"

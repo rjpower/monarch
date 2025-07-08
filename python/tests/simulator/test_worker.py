@@ -9,12 +9,12 @@ import unittest
 from typing import Tuple
 
 import torch
-from monarch.common.fake import fake_call
 
 from monarch.simulator.profiling import RuntimeEstimator
 from monarch.simulator.task import Task
 from monarch.simulator.tensor import FakeTensorTracker
 from monarch.simulator.worker import Worker
+from monarch._src.tensor_engine.common.fake import fake_call
 
 
 # pyre-ignore-all-errors[6]

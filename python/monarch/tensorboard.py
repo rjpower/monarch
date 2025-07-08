@@ -8,8 +8,9 @@
 import logging
 from typing import Any
 
-from monarch.common.device_mesh import DeviceMesh
 from monarch.remote_class import ControllerRemoteClass, WorkerRemoteClass
+
+from monarch._src.tensor_engine.common.device_mesh import DeviceMesh
 from torch.utils.tensorboard import SummaryWriter
 
 logger = logging.getLogger(__name__)
