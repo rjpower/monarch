@@ -10,8 +10,7 @@ import subprocess
 
 import pytest
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcEvent
-from monarch.actor_mesh import Actor, ActorError, endpoint, send
-from monarch.proc_mesh import local_proc_mesh, proc_mesh
+from monarch.actor import Actor, ActorError, endpoint, local_proc_mesh, proc_mesh
 
 
 class ExceptionActor(Actor):
@@ -140,7 +139,7 @@ def test_actor_supervision(num_procs, sync_endpoint, sync_test_impl, endpoint_na
         raise
 
     # Assert that the subprocess exited with a non-zero code
-    assert "I actually ran" in process.stdout.decode()
+    assert "Started function error_test" in process.stdout.decode()
     assert (
         process.returncode != 0
     ), f"Expected non-zero exit code, got {process.returncode}"
@@ -170,7 +169,7 @@ def test_proc_mesh_bootstrap_error():
         raise
 
     # Assert that the subprocess exited with a non-zero code
-    assert "I actually ran" in process.stdout.decode()
+    assert "Started function error_bootstrap" in process.stdout.decode()
     assert (
         process.returncode != 0
     ), f"Expected non-zero exit code, got {process.returncode}"
@@ -234,10 +233,96 @@ async def test_exception_after_wait_unmonitored():
         raise
 
     # Assert that the subprocess exited with a non-zero code
-    assert "I actually ran" in process.stdout.decode()
+    assert "Started function _error_unmonitored" in process.stdout.decode()
     assert (
         process.returncode != 0
     ), f"Expected non-zero exit code, got {process.returncode}"
+
+
+# oss_skip: importlib not pulling resource correctly in git CI, needs to be revisited
+@pytest.mark.oss_skip
+def test_python_actor_process_cleanup():
+    """
+    Test that PythonActor processes are cleaned up when the parent process dies.
+
+    This test spawns an 8 process procmesh and calls an endpoint that returns a normal exception,
+    then verifies that all spawned processes have been cleaned up after the spawned binary dies.
+    """
+    import os
+    import signal
+    import time
+
+    # Run the error-cleanup test in a subprocess
+    test_bin = importlib.resources.files("monarch.python.tests").joinpath("test_bin")
+    cmd = [
+        str(test_bin),
+        "error-cleanup",
+    ]
+
+    try:
+        print("running cmd", " ".join(cmd))
+        process = subprocess.run(cmd, capture_output=True, timeout=180, text=True)
+    except subprocess.TimeoutExpired as e:
+        print("timeout expired")
+        if e.stdout is not None:
+            print(e.stdout.decode())
+        if e.stderr is not None:
+            print(e.stderr.decode())
+        raise
+
+    # Read stdout line by line to get child PIDs
+    assert "Started function _error_cleanup() for parent process" in process.stdout
+
+    child_pids = set()
+    for line in process.stdout.splitlines():
+        if line.startswith("CHILD_PIDS: "):
+            pids_str = line[len("CHILD_PIDS: ") :]  # noqa
+            child_pids = {
+                int(pid.strip()) for pid in pids_str.split(",") if pid.strip()
+            }
+            print(f"Extracted child PIDs: {child_pids}")
+            break
+
+    if not child_pids:
+        raise AssertionError("No child PIDs found in output")
+
+    assert child_pids, "No child PIDs were collected from subprocess output"
+
+    # Wait for child processes to be cleaned up
+    print("Waiting for child processes to be cleaned up...")
+    cleanup_timeout = 120
+    start_time = time.time()
+
+    def is_process_running(pid):
+        """Check if a process with the given PID is still running."""
+        try:
+            os.kill(pid, 0)  # Signal 0 doesn't kill, just checks if process exists
+            return True
+        except OSError:
+            return False
+
+    still_running = set(child_pids)
+
+    while time.time() - start_time < cleanup_timeout:
+        if not still_running:
+            print("All child processes have been cleaned up!")
+            return
+
+        still_running = {pid for pid in still_running if is_process_running(pid)}
+
+        print(f"Still running child PIDs: {still_running}")
+        time.sleep(2)
+
+    # If we get here, some processes are still running
+    # Try to clean up remaining processes
+    for pid in still_running:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    raise AssertionError(
+        f"Child processes not cleaned up after {cleanup_timeout}s: {still_running}"
+    )
 
 
 class ErrorActor(Actor):
@@ -271,3 +356,32 @@ async def test_proc_mesh_monitoring():
     assert isinstance(event, ProcEvent.Crashed)
     assert event[0] == 0  # check rank
     assert "fail on init" in event[1]  # check error message
+
+
+class Worker(Actor):
+    @endpoint
+    def work(self):
+        raise ValueError("value error")
+
+
+class Manager(Actor):
+    @endpoint
+    async def init(self):
+        mesh = await proc_mesh(gpus=1)
+        self.workers = await mesh.spawn("Worker", Worker)
+
+    @endpoint
+    async def route(self):
+        return await self.workers.work.call_one()
+
+
+@pytest.mark.asyncio
+async def test_errors_propagated():
+    p_mesh = await proc_mesh(gpus=1)
+    mesh = await p_mesh.spawn("manager", Manager)
+
+    await mesh.init.call_one()
+
+    with pytest.raises(ActorError) as err_info:
+        await mesh.route.call_one()
+    assert "value error" in str(err_info.value)
