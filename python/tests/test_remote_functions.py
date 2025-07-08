@@ -28,6 +28,9 @@ from monarch import (
     RemoteException as OldRemoteException,
     Stream,
 )
+from monarch._src.tensor_engine.common import remote as remote_module
+from monarch._src.tensor_engine.common.device_mesh import DeviceMesh
+from monarch._src.tensor_engine.common.remote import Remote
 
 from monarch._testing import BackendType, TestingContext
 from monarch.builtins.log import log_remote
@@ -37,9 +40,6 @@ from monarch.mesh_controller import RemoteException as NewRemoteException
 
 from monarch.opaque_module import OpaqueModule
 from monarch.opaque_object import opaque_method, OpaqueObject
-from monarch._src.tensor_engine.common import remote as remote_module
-from monarch._src.tensor_engine.common.device_mesh import DeviceMesh
-from monarch._src.tensor_engine.common.remote import Remote
 from monarch.worker._testing_function import (
     all_gather,
     all_gather_into_tensor,

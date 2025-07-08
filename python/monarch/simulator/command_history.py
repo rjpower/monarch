@@ -13,11 +13,11 @@ from typing import List, NamedTuple, Optional, Sequence
 
 import torch
 from monarch._src.actor.shape import NDSlice
+
+from monarch._src.tensor_engine.common import messages
 from monarch.simulator.ir import IRGraph
 from monarch.simulator.tensor import DTensorRef
 from monarch.simulator.utils import clean_name, file_path_with_iter
-
-from monarch._src.tensor_engine.common import messages
 
 from torch.utils._pytree import tree_map
 

@@ -14,8 +14,8 @@ import pytest
 
 import torch
 from monarch import fetch_shard
-from monarch.sim_mesh import sim_mesh
 from monarch._src.tensor_engine.common.device_mesh import DeviceMesh
+from monarch.sim_mesh import sim_mesh
 
 
 @contextmanager

@@ -34,6 +34,34 @@ if TYPE_CHECKING:
     from monarch import timer
     from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
     from monarch._src.actor.shape import NDSlice, Shape
+    from monarch._src.tensor_engine.common._coalescing import coalescing
+
+    from monarch._src.tensor_engine.common.device_mesh import (
+        DeviceMesh,
+        get_active_mesh,
+        no_mesh,
+        RemoteProcessGroup,
+        slice_mesh,
+        to_mesh,
+    )
+
+    from monarch._src.tensor_engine.common.function import (
+        resolvers as function_resolvers,
+    )
+
+    from monarch._src.tensor_engine.common.future import Future
+
+    from monarch._src.tensor_engine.common.invocation import RemoteException
+    from monarch._src.tensor_engine.common.opaque_ref import OpaqueRef
+    from monarch._src.tensor_engine.common.pipe import (
+        create_pipe,
+        Pipe,
+        remote_generator,
+    )
+    from monarch._src.tensor_engine.common.remote import remote
+    from monarch._src.tensor_engine.common.selection import Selection
+    from monarch._src.tensor_engine.common.stream import get_active_stream, Stream
+    from monarch._src.tensor_engine.common.tensor import reduce, reduce_, Tensor
     from monarch.fetch import fetch_shard, inspect, show
     from monarch.gradient_generator import grad_function, grad_generator
     from monarch.notebook import mast_mesh, reserve_torchx as mast_reserve
@@ -46,28 +74,6 @@ if TYPE_CHECKING:
     from monarch.rust_local_mesh import local_mesh, local_meshes, SocketType
     from monarch.simulator.config import set_meta  # noqa
     from monarch.simulator.interface import Simulator
-    from monarch._src.tensor_engine.common._coalescing import coalescing
-
-    from monarch._src.tensor_engine.common.device_mesh import (
-        DeviceMesh,
-        get_active_mesh,
-        no_mesh,
-        RemoteProcessGroup,
-        slice_mesh,
-        to_mesh,
-    )
-
-    from monarch._src.tensor_engine.common.function import resolvers as function_resolvers
-
-    from monarch._src.tensor_engine.common.future import Future
-
-    from monarch._src.tensor_engine.common.invocation import RemoteException
-    from monarch._src.tensor_engine.common.opaque_ref import OpaqueRef
-    from monarch._src.tensor_engine.common.pipe import create_pipe, Pipe, remote_generator
-    from monarch._src.tensor_engine.common.remote import remote
-    from monarch._src.tensor_engine.common.selection import Selection
-    from monarch._src.tensor_engine.common.stream import get_active_stream, Stream
-    from monarch._src.tensor_engine.common.tensor import reduce, reduce_, Tensor
     from monarch.world_mesh import world_mesh
 
 
@@ -75,7 +81,10 @@ _public_api = {
     "coalescing": ("monarch._src.tensor_engine.common._coalescing", "coalescing"),
     "remote": ("monarch._src.tensor_engine.common.remote", "remote"),
     "DeviceMesh": ("monarch._src.tensor_engine.common.device_mesh", "DeviceMesh"),
-    "get_active_mesh": ("monarch._src.tensor_engine.common.device_mesh", "get_active_mesh"),
+    "get_active_mesh": (
+        "monarch._src.tensor_engine.common.device_mesh",
+        "get_active_mesh",
+    ),
     "no_mesh": ("monarch._src.tensor_engine.common.device_mesh", "no_mesh"),
     "RemoteProcessGroup": (
         "monarch._src.tensor_engine.common.device_mesh",
@@ -83,7 +92,10 @@ _public_api = {
     ),
     "function_resolvers": ("monarch._src.tensor_engine.common.function", "resolvers"),
     "Future": ("monarch._src.tensor_engine.common.future", "Future"),
-    "RemoteException": ("monarch._src.tensor_engine.common.invocation", "RemoteException"),
+    "RemoteException": (
+        "monarch._src.tensor_engine.common.invocation",
+        "RemoteException",
+    ),
     "Shape": ("monarch._src.actor.shape", "Shape"),
     "NDSlice": ("monarch._src.actor.shape", "NDSlice"),
     "Selection": ("monarch._src.tensor_engine.common.selection", "Selection"),
@@ -91,7 +103,10 @@ _public_api = {
     "create_pipe": ("monarch._src.tensor_engine.common.pipe", "create_pipe"),
     "Pipe": ("monarch._src.tensor_engine.common.pipe", "Pipe"),
     "remote_generator": ("monarch._src.tensor_engine.common.pipe", "remote_generator"),
-    "get_active_stream": ("monarch._src.tensor_engine.common.stream", "get_active_stream"),
+    "get_active_stream": (
+        "monarch._src.tensor_engine.common.stream",
+        "get_active_stream",
+    ),
     "Stream": ("monarch._src.tensor_engine.common.stream", "Stream"),
     "Tensor": ("monarch._src.tensor_engine.common.tensor", "Tensor"),
     "reduce": ("monarch._src.tensor_engine.common.tensor", "reduce"),

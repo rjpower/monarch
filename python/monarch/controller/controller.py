@@ -20,13 +20,13 @@ from monarch._src.actor._extension.monarch_hyperactor.proc import (  # @manual=/
 )
 
 from monarch._src.actor.shape import NDSlice
-from monarch.controller import debugger
 
 from monarch._src.tensor_engine.common import messages
 from monarch._src.tensor_engine.common.controller_api import LogMessage, MessageResult
 from monarch._src.tensor_engine.common.invocation import DeviceException, Seq
 from monarch._src.tensor_engine.common.reference import Ref
 from monarch._src.tensor_engine.common.tensor import Tensor
+from monarch.controller import debugger
 
 from .backend import Backend
 from .history import History

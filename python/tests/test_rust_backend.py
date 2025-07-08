@@ -16,8 +16,8 @@ import pytest
 import torch
 import torch.utils._python_dispatch
 from monarch import fetch_shard, no_mesh, remote, Stream
-from monarch.rust_local_mesh import local_meshes, LoggingLocation, SocketType
 from monarch._src.tensor_engine.common.device_mesh import DeviceMesh
+from monarch.rust_local_mesh import local_meshes, LoggingLocation, SocketType
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.functional import scaled_dot_product_attention
 

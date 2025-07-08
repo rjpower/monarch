@@ -51,13 +51,16 @@ if TYPE_CHECKING:
     from monarch.actor import ProcMesh
 
 from monarch._src.actor._extension.monarch_hyperactor.shape import Point
-from monarch.rust_local_mesh import _get_worker_exec_info
 
 from monarch._src.tensor_engine.common.client import Client
 from monarch._src.tensor_engine.common.controller_api import LogMessage, MessageResult
 from monarch._src.tensor_engine.common.device_mesh import DeviceMesh
 from monarch._src.tensor_engine.common.future import Future as OldFuture
-from monarch._src.tensor_engine.common.invocation import DeviceException, RemoteException
+from monarch._src.tensor_engine.common.invocation import (
+    DeviceException,
+    RemoteException,
+)
+from monarch.rust_local_mesh import _get_worker_exec_info
 
 logger: Logger = logging.getLogger(__name__)
 

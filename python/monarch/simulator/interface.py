@@ -8,6 +8,9 @@ from typing import Union
 
 from monarch._src.actor.shape import NDSlice
 
+from monarch._src.tensor_engine.common.client import Client as _Client
+from monarch._src.tensor_engine.common.device_mesh import DeviceMesh
+
 from monarch.simulator.ir import IRGraph
 from monarch.simulator.simulator import (
     SimulatorBackendMode,
@@ -15,9 +18,6 @@ from monarch.simulator.simulator import (
     SimulatorInterface,
     SimulatorTraceMode,
 )
-
-from monarch._src.tensor_engine.common.client import Client as _Client
-from monarch._src.tensor_engine.common.device_mesh import DeviceMesh
 
 
 def Simulator(

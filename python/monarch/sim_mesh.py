@@ -42,8 +42,6 @@ from monarch._src.actor._extension.monarch_hyperactor.proc import (  # @manual=/
 )
 
 from monarch._src.actor.shape import NDSlice
-from monarch.controller.rust_backend.controller import RustController
-from monarch.rust_backend_mesh import MeshWorld
 from monarch._src.tensor_engine.common.client import Client
 from monarch._src.tensor_engine.common.constants import (
     SIM_MESH_CLIENT_SUPERVISION_UPDATE_INTERVAL,
@@ -52,8 +50,13 @@ from monarch._src.tensor_engine.common.constants import (
 from monarch._src.tensor_engine.common.device_mesh import DeviceMesh
 from monarch._src.tensor_engine.common.fake import fake_call
 from monarch._src.tensor_engine.common.future import Future, T
-from monarch._src.tensor_engine.common.invocation import DeviceException, RemoteException
+from monarch._src.tensor_engine.common.invocation import (
+    DeviceException,
+    RemoteException,
+)
 from monarch._src.tensor_engine.common.messages import Dims
+from monarch.controller.rust_backend.controller import RustController
+from monarch.rust_backend_mesh import MeshWorld
 
 
 logger: logging.Logger = logging.getLogger(__name__)

@@ -31,7 +31,6 @@ from typing import (
 
 import torch
 import torch.distributed as dist
-from monarch.simulator.command_history import CommandHistory, DTensorRef
 from monarch._src.tensor_engine.common import messages
 from monarch._src.tensor_engine.common.function import resolvable_function
 from monarch._src.tensor_engine.common.function_caching import (
@@ -41,6 +40,7 @@ from monarch._src.tensor_engine.common.function_caching import (
     TensorGroup,
 )
 from monarch._src.tensor_engine.common.tensor_factory import TensorFactory
+from monarch.simulator.command_history import CommandHistory, DTensorRef
 from torch.utils import _pytree as pytree
 from torch.utils._mode_utils import no_dispatch
 
