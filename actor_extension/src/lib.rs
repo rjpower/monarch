@@ -113,7 +113,5 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::panic::register_python_bindings(&get_or_add_new_module(module, "panic")?)?;
 
     crate::blocking::register_python_bindings(&get_or_add_new_module(module, "blocking")?)?;
-
-    println!("hello I am imported :)");
     Ok(())
 }
