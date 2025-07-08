@@ -24,7 +24,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from monarch._rust_bindings.hyperactor_extension.alloc import (
+from monarch._src.actor._extension.hyperactor_extension.alloc import (
     AllocConstraints,
     AllocSpec,
 )
