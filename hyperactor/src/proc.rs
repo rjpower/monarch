@@ -1195,7 +1195,19 @@ impl<A: Actor> cap::sealed::CanSend for Instance<A> {
     }
 }
 
+impl<A: Actor> cap::sealed::CanSend for &Instance<A> {
+    fn post(&self, dest: PortId, headers: Attrs, data: Serialized) {
+        (*self).post(dest, headers, data)
+    }
+}
+
 impl<A: Actor> cap::sealed::CanOpenPort for Instance<A> {
+    fn mailbox(&self) -> &Mailbox {
+        &self.mailbox
+    }
+}
+
+impl<A: Actor> cap::sealed::CanOpenPort for &Instance<A> {
     fn mailbox(&self) -> &Mailbox {
         &self.mailbox
     }
@@ -1234,7 +1246,19 @@ impl<A: Actor> cap::sealed::CanSend for Context<'_, A> {
     }
 }
 
+impl<A: Actor> cap::sealed::CanSend for &Context<'_, A> {
+    fn post(&self, dest: PortId, headers: Attrs, data: Serialized) {
+        <Instance<A> as cap::sealed::CanSend>::post(self, dest, headers, data)
+    }
+}
+
 impl<A: Actor> cap::sealed::CanOpenPort for Context<'_, A> {
+    fn mailbox(&self) -> &Mailbox {
+        <Instance<A> as cap::sealed::CanOpenPort>::mailbox(self)
+    }
+}
+
+impl<A: Actor> cap::sealed::CanOpenPort for &Context<'_, A> {
     fn mailbox(&self) -> &Mailbox {
         <Instance<A> as cap::sealed::CanOpenPort>::mailbox(self)
     }
@@ -1515,10 +1539,11 @@ impl InstanceCell {
 
 impl Drop for InstanceState {
     fn drop(&mut self) {
-        if self.maybe_unlink_parent().is_some() {
-            tracing::error!(
-                "instance {} was dropped with parent still linked",
-                self.actor_id
+        if let Some(parent) = self.maybe_unlink_parent() {
+            tracing::debug!(
+                "instance {} was dropped with parent {} still linked",
+                self.actor_id,
+                parent.actor_id()
             );
         }
         if self.proc.inner.instances.remove(&self.actor_id).is_none() {
