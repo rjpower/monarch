@@ -7,7 +7,7 @@
 # pyre-strict
 
 from datetime import timedelta
-from typing import Optional
+from typing import final, Optional
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import Alloc, AllocSpec
 from typing_extensions import Self
