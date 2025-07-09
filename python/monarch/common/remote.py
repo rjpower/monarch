@@ -238,14 +238,12 @@ def call_on_shard_and_fetch(
         checker.check_mesh_stream_local(device_mesh._active, stream._active)
 
         if not hasattr(checker.mesh.client, "_mesh_controller"):
-            return
-                _old_call_on_shard_and_fetch(
-                    remote,
-                    *args,
-                    shard=shard,
-                    **kwargs,
-                )
-
+            return _old_call_on_shard_and_fetch(
+                remote,
+                *args,
+                shard=shard,
+                **kwargs,
+            )
 
         selected_slice = checker.mesh._process(shard)
         shard_mesh = checker.mesh._new_with_shape(Shape(["_"], selected_slice))
