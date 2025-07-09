@@ -1283,6 +1283,10 @@ def return_them(x: torch.Tensor, y: torch.Tensor) -> Tuple[torch.Tensor, torch.T
     return (x, y)
 
 
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2,
+    reason="Not enough GPUs, this test requires at least 2 GPUs",
+)
 class TestMeshSpecific(RemoteFunctionsTestBase):
     def test_value_mesh(self):
         with self.local_device_mesh(2, 2, "mesh") as device_mesh:
