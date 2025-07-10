@@ -94,7 +94,12 @@ class Remote(Generic[P, R], Endpoint[P, R]):
             propagator, rfunction, args, kwargs, ambient_mesh, stream._active
         )
 
-        if ambient_mesh is None or not ambient_mesh._is_subset_of(tensor_mesh):
+        if ambient_mesh is None:
+            raise ValueError(
+                "Calling a 'remote' monarch function requires an active proc_mesh (`with proc_mesh.activate():`)"
+            )
+
+        if not ambient_mesh._is_subset_of(tensor_mesh):
             raise ValueError(
                 f"The current mesh {ambient_mesh} is not a subset of the mesh on which the tensors being used are defined {tensor_mesh}"
             )

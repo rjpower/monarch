@@ -230,6 +230,15 @@ class Endpoint(ABC, Generic[P, R]):
         port: "Optional[Port]" = None,
         selection: Selection = "all",
     ) -> Extent:
+        """
+        Implements sending a message to the endpoint. The return value of the endpoint will
+        be sent to port if provided. If port is not provided, the return will be dropped,
+        and any exception will cause the actor to fail.
+
+        The return value is the (multi-dimension) size of the actors that were sent a message.
+        For ActorEndpoints this will be the actor_meshes size. For free-function endpoints,
+        this will be the size of the currently active proc_mesh.
+        """
         pass
 
     @abstractmethod
