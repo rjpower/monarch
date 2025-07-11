@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
 import asyncio
 import operator
 import threading
@@ -27,6 +26,8 @@ from monarch.actor import (
     proc_mesh,
 )
 from monarch.rdma import RDMABuffer
+from typing_extensions import assert_type
+
 
 needs_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(),
@@ -44,6 +45,10 @@ class Counter(Actor):
 
     @endpoint
     async def value(self) -> int:
+        return self.v
+
+    @endpoint
+    def value_sync_endpoint(self) -> int:
         return self.v
 
 
@@ -79,9 +84,16 @@ async def test_choose():
     i = await proc.spawn("indirect", Indirect)
     v.incr.broadcast()
     result = await v.value.choose()
+
+    # Test that Pyre derives the correct type for result (int, not Any)
+    assert_type(result, int)
     result2 = await i.call_value.choose(v)
 
     assert result == result2
+
+    result3 = await v.value_sync_endpoint.choose()
+    assert_type(result, int)
+    assert result2 == result3
 
 
 async def test_stream():
@@ -551,12 +563,12 @@ def test_actor_future():
 
     assert v == 5
 
-    def nope():
+    def nope2():
         nonlocal v
         v += 1
         raise ValueError("nope")
 
-    f = Future(incr, nope)
+    f = Future(incr, nope2)
 
     with pytest.raises(ValueError):
         f.get()
