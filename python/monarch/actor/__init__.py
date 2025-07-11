@@ -19,6 +19,7 @@ from monarch._src.actor.actor_mesh import (
     endpoint,
     MonarchContext,
     Point,
+    port,
     send,
     ValueMesh,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "Point",
     "proc_mesh",
     "ProcMesh",
+    "port",
     "send",
     "ValueMesh",
     "debug_client",
