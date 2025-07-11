@@ -37,8 +37,6 @@ use ndslice::Selection;
 use ndslice::Shape;
 use ndslice::ShapeError;
 use ndslice::Slice;
-use ndslice::dsl;
-use ndslice::selection::ReifyView;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -47,7 +45,6 @@ use crate::CommActor;
 use crate::Mesh;
 use crate::comm::multicast::CastMessage;
 use crate::comm::multicast::CastMessageEnvelope;
-use crate::comm::multicast::DestinationPort;
 use crate::comm::multicast::Uslice;
 use crate::comm::multicast::set_cast_info_on_headers;
 use crate::metrics;
@@ -56,57 +53,40 @@ use crate::reference::ActorMeshId;
 use crate::reference::ActorMeshRef;
 use crate::reference::ProcMeshId;
 
-/// Common implementation for ActorMeshes and ActorMeshRefs to cast an [`M`]-typed message
+/// Common implementation for `ActorMesh`s and `ActorMeshRef`s to cast
+/// an `M`-typed message
 #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
-pub(crate) fn actor_mesh_cast<M: Castable + Clone, A>(
+pub(crate) fn actor_mesh_cast<A, M>(
     caps: &impl cap::CanSend,
+    actor_mesh_id: ActorMeshId,
     actor_mesh_shape: &Shape,
-    proc_mesh_shape: &Shape,
-    actor_name: &str,
     sender: &ActorId,
     comm_actor_ref: &ActorRef<CommActor>,
     selection: Selection,
     message: M,
 ) -> Result<(), CastError>
 where
-    A: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
+    A: RemoteActor + RemoteHandles<IndexedErasedUnbound<M>>,
+    M: Castable + RemoteMessage,
 {
     let _ = metrics::ACTOR_MESH_CAST_DURATION.start(hyperactor::kv_pairs!(
         "message_type" => M::typename(),
         "message_variant" => message.arm().unwrap_or_default(),
     ));
 
-    let message = CastMessageEnvelope::new(
+    let slice = actor_mesh_shape.slice().clone();
+    let message = CastMessageEnvelope::new::<A, M>(
+        actor_mesh_id,
         sender.clone(),
-        DestinationPort::new::<A, M>(actor_name.to_string()),
         actor_mesh_shape.clone(),
         message,
         None, // TODO: reducer typehash
     )?;
 
-    // Sub-set the selection to the selection that represents the mesh's view
-    // of the root mesh. We need to do this because the comm actor uses the
-    // slice as the stream key; thus different sub-slices will result in potentially
-    // out of order delivery.
-    //
-    // TODO: We should repair this by introducing an explicit stream key, associated
-    // with the root mesh.
-    let selection_of_slice = proc_mesh_shape
-        .slice()
-        .reify_view(actor_mesh_shape.slice())
-        .expect("invalid slice");
-    let selection = dsl::intersection(selection, selection_of_slice);
-
     comm_actor_ref.send(
         caps,
         CastMessage {
-            dest: Uslice {
-                // TODO: currently this slice is being used as the stream key
-                // in comm actor. We should change it to an explicit id, maintained
-                // by the root proc mesh.
-                slice: proc_mesh_shape.slice().clone(),
-                selection,
-            },
+            dest: Uslice { slice, selection },
             message,
         },
     )?;
@@ -115,33 +95,33 @@ where
 }
 
 /// A mesh of actors, all of which reside on the same [`ProcMesh`].
-pub trait ActorMesh: Mesh {
+pub trait ActorMesh: Mesh<Id = ActorMeshId> {
     /// The type of actor in the mesh.
     type Actor: RemoteActor;
 
-    /// Cast an [`M`]-typed message to the ranks selected by `sel`
-    /// in this ActorMesh.
+    /// Cast an `M`-typed message to the ranks selected by `sel` in
+    /// this ActorMesh.
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
-    fn cast<M: Castable + Clone>(&self, selection: Selection, message: M) -> Result<(), CastError>
+    fn cast<M>(&self, selection: Selection, message: M) -> Result<(), CastError>
     where
-        Self::Actor: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
+        Self::Actor: RemoteHandles<IndexedErasedUnbound<M>>,
+        M: Castable + RemoteMessage,
     {
-        actor_mesh_cast::<M, Self::Actor>(
-            self.proc_mesh().client(),
-            self.shape(),
-            self.proc_mesh().shape(),
-            self.name(),
-            self.proc_mesh().client().actor_id(),
-            self.proc_mesh().comm_actor(),
-            selection,
-            message,
+        actor_mesh_cast::<Self::Actor, M>(
+            self.proc_mesh().client(),            // send capability
+            self.id(),                            // actor mesh id (destination mesh)
+            self.shape(),                         // actor mesh shape
+            self.proc_mesh().client().actor_id(), // sender
+            self.proc_mesh().comm_actor(),        // comm actor
+            selection,                            // the selected actors
+            message,                              // the message
         )
     }
 
     /// The ProcMesh on top of which this actor mesh is spawned.
     fn proc_mesh(&self) -> &ProcMesh;
 
-    /// The name global name of actors in this mesh.
+    /// The name given to the actors in this mesh.
     fn name(&self) -> &str;
 
     fn world_id(&self) -> &WorldId {
@@ -234,38 +214,6 @@ impl<'a, A: RemoteActor> RootActorMesh<'a, A> {
         self.proc_mesh.client().open_port()
     }
 
-    /// Until the selection logic is more powerful, we need a way to
-    /// replicate the send patterns that the worker actor mesh actually does.
-    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
-    pub fn cast_slices<M: RemoteMessage + Clone>(
-        &self,
-        sel: Vec<Slice>,
-        message: M,
-    ) -> Result<(), CastError>
-    where
-        A: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
-    {
-        let _ = metrics::ACTOR_MESH_CAST_DURATION.start(hyperactor::kv_pairs!(
-            "message_type" => M::typename(),
-            "message_variant" => message.arm().unwrap_or_default(),
-        ));
-        for ref slice in sel {
-            for rank in slice.iter() {
-                let mut headers = Attrs::new();
-                set_cast_info_on_headers(
-                    &mut headers,
-                    rank,
-                    self.shape().clone(),
-                    self.proc_mesh.client().actor_id().clone(),
-                );
-                self.ranks[rank]
-                    .send_with_headers(self.proc_mesh.client(), headers, message.clone())
-                    .map_err(|err| CastError::MailboxSenderError(rank, err))?;
-            }
-        }
-        Ok(())
-    }
-
     /// An event stream of proc events. Each ProcMesh can produce only one such
     /// stream, returning None after the first call.
     pub async fn next(&mut self) -> Option<ActorSupervisionEvent> {
@@ -288,6 +236,7 @@ impl<'a, A: RemoteActor> RootActorMesh<'a, A> {
 #[async_trait]
 impl<'a, A: RemoteActor> Mesh for RootActorMesh<'a, A> {
     type Node = ActorRef<A>;
+    type Id = ActorMeshId;
     type Sliced<'b>
         = SlicedActorMesh<'b, A>
     where
@@ -307,6 +256,10 @@ impl<'a, A: RemoteActor> Mesh for RootActorMesh<'a, A> {
 
     fn get(&self, rank: usize) -> Option<ActorRef<A>> {
         self.ranks.get(rank).cloned()
+    }
+
+    fn id(&self) -> Self::Id {
+        ActorMeshId(self.proc_mesh.id(), self.name.clone())
     }
 }
 
@@ -337,6 +290,7 @@ impl<'a, A: RemoteActor> SlicedActorMesh<'a, A> {
 #[async_trait]
 impl<A: RemoteActor> Mesh for SlicedActorMesh<'_, A> {
     type Node = ActorRef<A>;
+    type Id = ActorMeshId;
     type Sliced<'b>
         = SlicedActorMesh<'b, A>
     where
@@ -356,6 +310,10 @@ impl<A: RemoteActor> Mesh for SlicedActorMesh<'_, A> {
 
     fn get(&self, _index: usize) -> Option<ActorRef<A>> {
         unimplemented!()
+    }
+
+    fn id(&self) -> Self::Id {
+        self.0.id()
     }
 }
 

@@ -32,6 +32,7 @@ use hyperactor::PortRef;
 use hyperactor::cap::CanSend;
 use hyperactor::mailbox::MailboxSenderError;
 use hyperactor_mesh::Mesh;
+use hyperactor_mesh::actor_mesh::ActorMesh;
 use hyperactor_mesh::actor_mesh::RootActorMesh;
 use hyperactor_mesh::shared_cell::SharedCell;
 use hyperactor_mesh::shared_cell::SharedCellRef;
@@ -54,6 +55,8 @@ use monarch_messages::worker::WorkerParams;
 use monarch_tensor_worker::AssignRankMessage;
 use monarch_tensor_worker::WorkerActor;
 use ndslice::Slice;
+use ndslice::selection;
+use ndslice::selection::ReifyView;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use tokio::sync::Mutex;
@@ -250,6 +253,7 @@ impl Invocation {
         }
     }
 
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     fn add_user(
         &mut self,
         sender: &impl CanSend,
@@ -287,6 +291,7 @@ impl Invocation {
         }
     }
 
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     fn complete(&mut self, sender: &impl CanSend) -> Result<(), MailboxSenderError> {
         let old_status = std::mem::replace(&mut self.status, Status::Complete {});
         match old_status {
@@ -310,6 +315,7 @@ impl Invocation {
     /// Incomplete, it may have users that will also become errored. This function
     /// will return those users so the error can be propagated. It does not autmoatically
     /// propagate the error to avoid deep recursive invocations.
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     fn set_exception(
         &mut self,
         sender: &impl CanSend,
@@ -447,6 +453,7 @@ impl History {
     }
 
     /// Add an invocation to the history.
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     pub fn add_invocation(
         &mut self,
         sender: &impl CanSend,
@@ -486,6 +493,7 @@ impl History {
 
     /// Propagate worker error to the invocation with the given Seq. This will also propagate
     /// to all seqs that depend on this seq directly or indirectly.
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     pub fn propagate_exception(
         &mut self,
         sender: &impl CanSend,
@@ -539,6 +547,7 @@ impl History {
 
     /// Mark the given rank as completed up to but excluding the given Seq. This will also purge history for
     /// any Seqs that are no longer relevant (completed on all ranks).
+    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     pub fn rank_completed(
         &mut self,
         sender: &impl CanSend,
@@ -623,6 +632,7 @@ impl MeshControllerActor {
     fn workers(&self) -> SharedCellRef<RootActorMesh<'static, WorkerActor>> {
         self.workers.as_ref().unwrap().borrow().unwrap()
     }
+
     fn handle_debug(
         &mut self,
         this: &Context<Self>,
@@ -741,7 +751,8 @@ impl Actor for MeshControllerActor {
         workers
             .borrow()
             .unwrap()
-            .cast_slices(vec![slice.clone()], AssignRankMessage::AssignRank())?;
+            .cast(selection::dsl::true_(), AssignRankMessage::AssignRank())?;
+
         self.workers = Some(workers);
         Ok(())
     }
@@ -796,7 +807,8 @@ impl Handler<ClientToControllerMessage> for MeshControllerActor {
     ) -> anyhow::Result<()> {
         match message {
             ClientToControllerMessage::Send { slices, message } => {
-                self.workers().cast_slices(slices, message)?;
+                let sel = self.workers().shape().slice().reify_views(slices)?;
+                self.workers().cast(sel, message)?;
             }
             ClientToControllerMessage::Node {
                 seq,
@@ -812,9 +824,8 @@ impl Handler<ClientToControllerMessage> for MeshControllerActor {
                 self.history.drop_refs(refs);
             }
             ClientToControllerMessage::SyncAtExit { port } => {
-                let all_ranks = vec![self.workers().shape().slice().clone()];
-                self.workers().cast_slices(
-                    all_ranks,
+                self.workers().cast(
+                    selection::dsl::true_(),
                     WorkerMessage::RequestStatus {
                         seq: self.history.seq_lower_bound,
                         controller: false,
