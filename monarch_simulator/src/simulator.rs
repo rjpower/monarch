@@ -26,13 +26,13 @@ use crate::bootstrap::spawn_system;
 
 /// The simulator manages all of the meshes and the system handle.
 #[derive(Debug)]
-pub struct TensorEngineSimulator {
+pub struct Simulator {
     /// A map from world name to actor handles in that world.
     worlds: HashMap<String, Vec<ActorHandle<ProcActor>>>,
     system_handle: ServerHandle,
 }
 
-impl TensorEngineSimulator {
+impl Simulator {
     pub async fn new(system_addr: ChannelAddr) -> Result<Self> {
         Ok(Self {
             worlds: HashMap::new(),
@@ -92,7 +92,7 @@ impl TensorEngineSimulator {
 
 /// IntoFuture allows users to await the handle. The future resolves when
 /// the simulator itself has all of the actor handles stopped.
-impl IntoFuture for TensorEngineSimulator {
+impl IntoFuture for Simulator {
     type Output = ();
     type IntoFuture = BoxFuture<'static, Self::Output>;
 
@@ -145,9 +145,7 @@ mod tests {
         let system_addr = format!("sim!unix!@system,{}", &proxy)
             .parse::<ChannelAddr>()
             .unwrap();
-        let mut simulator = super::TensorEngineSimulator::new(system_addr.clone())
-            .await
-            .unwrap();
+        let mut simulator = super::Simulator::new(system_addr.clone()).await.unwrap();
         let mut controller_actor_ids = vec![];
         let mut worker_actor_ids = vec![];
         let n_meshes = 2;

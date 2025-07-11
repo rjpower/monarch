@@ -31,6 +31,7 @@ from monarch._rust_bindings.monarch_extension.client import (  # @manual=//monar
 )
 
 from monarch._rust_bindings.monarch_extension.simulator_client import (  # @manual=//monarch/monarch_extension:monarch_extension
+    bootstrap_simulator_backend,
     SimulatorClient,
 )
 
@@ -75,6 +76,7 @@ def sim_mesh(
     bootstrap: Bootstrap = Bootstrap(
         n_meshes,
         mesh_world_state,
+        proxy_addr=proxy_addr,
         world_size=hosts * gpus_per_host,
     )
 
@@ -179,6 +181,7 @@ class Bootstrap:
         self,
         num_meshes: int,
         mesh_world_state: Dict[MeshWorld, Optional[DeviceMesh]],
+        proxy_addr: Optional[str] = None,
         world_size: int = 1,
     ) -> None:
         """
@@ -196,15 +199,17 @@ class Bootstrap:
 
         self._mesh_world_state: Dict[MeshWorld, Optional[DeviceMesh]] = mesh_world_state
 
-        proxy_addr = f"unix!@{_random_id()}-proxy"
+        proxy_addr = proxy_addr or f"unix!@{_random_id()}-proxy"
         self.bootstrap_addr: str = f"sim!unix!@system,{proxy_addr}"
+
         client_proxy_addr = f"unix!@{_random_id()}-proxy"
-        self.client_listen_addr = f"sim!unix!@client,{client_proxy_addr}"
-        self.client_bootstrap_addr = (
+        self.client_listen_addr: str = f"sim!unix!@client,{client_proxy_addr}"
+        self.client_bootstrap_addr: str = (
             f"sim!unix!@client,{client_proxy_addr},unix!@system,{proxy_addr}"
         )
+        bootstrap_simulator_backend(self.bootstrap_addr, proxy_addr, world_size)
 
-        self._simulator_client = SimulatorClient(self.bootstrap_addr, world_size)
+        self._simulator_client = SimulatorClient(proxy_addr)
         for i in range(num_meshes):
             mesh_name: str = f"mesh_{i}"
             controller_world: str = f"{mesh_name}_controller"
@@ -230,9 +235,7 @@ class Bootstrap:
         worker_world, controller_id = mesh_world
         controller_world = controller_id.world_name
         self._simulator_client.spawn_mesh(
-            self.bootstrap_addr,
-            f"{controller_world}[0].root",
-            worker_world,
+            self.bootstrap_addr, f"{controller_world}[0].root", worker_world
         )
 
 
