@@ -14,6 +14,7 @@ use std::marker::PhantomData;
 use hyperactor::ActorRef;
 use hyperactor::Named;
 use hyperactor::RemoteHandles;
+use hyperactor::RemoteMessage;
 use hyperactor::actor::RemoteActor;
 use hyperactor::cap;
 use hyperactor::message::Castable;
@@ -54,7 +55,7 @@ macro_rules! mesh_id {
 )]
 pub struct ProcMeshId(pub String);
 
-/// Actor Mesh ID.  Tuple of the ProcMesh ID and Actor Mesh ID.
+/// Actor Mesh ID.  Tuple of the ProcMesh ID and actor name.
 #[derive(
     Debug,
     Serialize,
@@ -111,19 +112,10 @@ impl<A: RemoteActor> ActorMeshRef<A> {
         &self.shape
     }
 
-    /// Shape of the underlying Proc Mesh.
-    fn proc_mesh_shape(&self) -> &Shape {
-        &self.proc_mesh_shape
-    }
-
-    fn name(&self) -> &str {
-        &self.mesh_id.1
-    }
-
     /// Cast an [`M`]-typed message to the ranks selected by `sel`
     /// in this ActorMesh.
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
-    pub fn cast<M: Castable + Clone>(
+    pub fn cast<M>(
         &self,
         caps: &(impl cap::CanSend + cap::CanOpenPort),
         selection: Selection,
@@ -131,12 +123,12 @@ impl<A: RemoteActor> ActorMeshRef<A> {
     ) -> Result<(), CastError>
     where
         A: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
+        M: Castable + RemoteMessage,
     {
-        actor_mesh_cast::<M, A>(
+        actor_mesh_cast::<A, M>(
             caps,
+            self.mesh_id.clone(),
             self.shape(),
-            self.proc_mesh_shape(),
-            self.name(),
             caps.mailbox().actor_id(),
             &self.comm_actor_ref,
             selection,
