@@ -38,6 +38,10 @@ use hyperactor::proc::Proc;
 use hyperactor::reference::ProcId;
 use hyperactor::reference::Reference;
 use hyperactor::supervision::ActorSupervisionEvent;
+use hyperactor_state::client::ClientActor;
+use hyperactor_state::client::ClientActorParams;
+use hyperactor_state::state_actor::StateActor;
+use hyperactor_state::state_actor::StateMessageClient;
 use ndslice::Range;
 use ndslice::Shape;
 use ndslice::ShapeError;
@@ -52,8 +56,10 @@ use crate::alloc::ProcState;
 use crate::alloc::ProcStopReason;
 use crate::assign::Ranks;
 use crate::comm::CommActorMode;
+use crate::log_source::StateServerInfo;
 use crate::proc_mesh::mesh_agent::MeshAgent;
 use crate::proc_mesh::mesh_agent::MeshAgentMessageClient;
+use crate::reference::ProcMeshId;
 
 pub mod mesh_agent;
 
@@ -199,7 +205,7 @@ impl ProcMesh {
         client_proc
             .clone()
             .serve(client_rx, mailbox::monitored_return_handle());
-        router.bind(client_proc_id.clone().into(), client_proc_addr);
+        router.bind(client_proc_id.clone().into(), client_proc_addr.clone());
 
         // Bind this router to the global router, to enable cross-mesh routing.
         // TODO: unbind this when we incorporate mesh destruction too.
@@ -294,6 +300,42 @@ impl ProcMesh {
             comm_actor
                 .send(&client, CommActorMode::Mesh(rank, address_book.clone()))
                 .map_err(anyhow::Error::from)?;
+        }
+
+        // Get a reference to the state actor for streaming logs.
+        let StateServerInfo {
+            state_proc_addr,
+            state_actor_id,
+        } = alloc.log_source().await?.server_info();
+        router.bind(state_actor_id.clone().into(), state_proc_addr.clone());
+
+        let log_handler = Box::new(hyperactor_state::client::StdlogHandler {});
+        let params = ClientActorParams { log_handler };
+
+        let client_logging_actor: ActorRef<ClientActor> = client_proc
+            .spawn::<ClientActor>("logging_client", params)
+            .await
+            .unwrap()
+            .bind();
+
+        let state_actor_ref: ActorRef<StateActor> = ActorRef::attest(state_actor_id);
+        match state_actor_ref
+            .subscribe_logs(
+                &client,
+                client_proc_addr.clone(),
+                client_logging_actor.clone(),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(err) => {
+                // TODO: talking to the state actor is not on the critical path.
+                // However, if the state actor is not reachable, we will receive spams of mailbox warnings.
+                tracing::warn!(
+                    "failed to subscribe to state actor logs; remote logging will not be available on the client: {}",
+                    err
+                );
+            }
         }
 
         let shape = alloc.shape().clone();
@@ -574,6 +616,7 @@ impl<D: Deref<Target = ProcMesh> + Send + Sync + 'static> SharedSpawnable for D 
 #[async_trait]
 impl Mesh for ProcMesh {
     type Node = ProcId;
+    type Id = ProcMeshId;
     type Sliced<'a> = SlicedProcMesh<'a>;
 
     fn shape(&self) -> &Shape {
@@ -590,6 +633,10 @@ impl Mesh for ProcMesh {
 
     fn get(&self, rank: usize) -> Option<ProcId> {
         Some(self.ranks[rank].0.clone())
+    }
+
+    fn id(&self) -> Self::Id {
+        ProcMeshId(self.world_id().name().to_string())
     }
 }
 
@@ -616,6 +663,7 @@ pub struct SlicedProcMesh<'a>(&'a ProcMesh, Shape);
 #[async_trait]
 impl Mesh for SlicedProcMesh<'_> {
     type Node = ProcId;
+    type Id = ProcMeshId;
     type Sliced<'b>
         = SlicedProcMesh<'b>
     where
@@ -635,6 +683,10 @@ impl Mesh for SlicedProcMesh<'_> {
 
     fn get(&self, _index: usize) -> Option<ProcId> {
         unimplemented!()
+    }
+
+    fn id(&self) -> Self::Id {
+        self.0.id()
     }
 }
 
