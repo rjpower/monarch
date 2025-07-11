@@ -13,11 +13,10 @@ class SimulatorClient:
     It is a client to communicate with the simulator service.
 
     Arguments:
-    - `system_addr`: Address of the system.
-    - `world_size`: Number of workers in a given mesh.
+    - `proxy_addr`: Address of the simulator's proxy server.
     """
 
-    def __init__(self, system_addr: str, world_size: int) -> None: ...
+    def __init__(self, proxy_addr: str) -> None: ...
     def kill_world(self, world_name: str) -> None:
         """
         Kill the world with the given name.
@@ -52,3 +51,11 @@ class SimulatorClient:
         backend to resolve a future
         """
         ...
+
+def bootstrap_simulator_backend(
+    system_addr: str, proxy_addr: str, world_size: int
+) -> None:
+    """
+    Bootstrap the simulator backend on the current process
+    """
+    ...
