@@ -432,7 +432,7 @@ pub fn initialize_logging(clock: impl TelemetryClock + Send + 'static) {
             Targets::new()
                 .with_default(LevelFilter::from_level(
                     tracing::Level::from_str(
-                        &std::env::var("RUST_LOG").unwrap_or(file_log_level.to_string()),
+                        &std::env::var("MONARCH_FILE_LOG").unwrap_or(file_log_level.to_string()),
                     )
                     .expect("Invalid log level"),
                 ))
@@ -454,7 +454,8 @@ pub fn initialize_logging(clock: impl TelemetryClock + Send + 'static) {
             Targets::new()
                 .with_default(LevelFilter::from_level(
                     tracing::Level::from_str(
-                        &std::env::var("MONARCH_LOG").unwrap_or(stderr_log_level.to_string()),
+                        &std::env::var("MONARCH_STDERR_LOG")
+                            .unwrap_or(stderr_log_level.to_string()),
                     )
                     .expect("Invalid log level"),
                 ))
