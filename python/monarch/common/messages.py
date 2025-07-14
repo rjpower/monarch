@@ -19,11 +19,9 @@ from typing import (
     Protocol,
     Tuple,
     TYPE_CHECKING,
-    Union,
 )
 
 from monarch._rust_bindings.monarch_extension import tensor_worker
-from monarch._rust_bindings.monarch_hyperactor.actor import PythonMessage
 from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
 
 from monarch._src.actor.shape import NDSlice
