@@ -621,10 +621,11 @@ mod tests {
             Some(reducer_spec),
         );
         let message = PythonMessage {
-            method: "test".to_string(),
-            message: ByteBuf::from(vec![1, 2, 3]),
-            response_port: Some(EitherPortRef::Unbounded(port_ref.clone().into())),
-            rank: None,
+            kind: PythonMessageKind::CallMethod {
+                name: "test".to_string(),
+                response_port: Some(EitherPortRef::Unbounded(port_ref.clone().into())),
+            },
+            message: vec![1, 2, 3],
         };
         {
             let mut erased = ErasedUnbound::try_from_message(message.clone()).unwrap();
@@ -641,7 +642,10 @@ mod tests {
         }
 
         let no_port_message = PythonMessage {
-            response_port: None,
+            kind: PythonMessageKind::CallMethod {
+                name: "test".to_string(),
+                response_port: None,
+            },
             ..message
         };
         {
