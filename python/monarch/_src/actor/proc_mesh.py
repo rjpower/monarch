@@ -23,6 +23,8 @@ from typing import (
     TypeVar,
 )
 
+from monarch._rust_bindings.monarch_extension.logging import LoggingMeshClient
+
 from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
     Alloc,
     AllocConstraints,
@@ -35,7 +37,7 @@ from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
 )
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
 from monarch._src.actor.actor_mesh import _Actor, _ActorMeshRefImpl, Actor, ActorMeshRef
-from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
+from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator, SimAllocator
 from monarch._src.actor.code_sync import RsyncMeshClient, WorkspaceLocation
 from monarch._src.actor.code_sync.auto_reload import AutoReloadActor
 from monarch._src.actor.debugger import (
@@ -98,12 +100,13 @@ class ProcMesh(MeshTrait):
         self._mailbox: Mailbox = self._proc_mesh.client
         self._rsync_mesh_client: Optional[RsyncMeshClient] = None
         self._auto_reload_actor: Optional[AutoReloadActor] = None
+        self._logging_mesh_client: Optional[LoggingMeshClient] = None
         self._maybe_device_mesh: Optional["DeviceMesh"] = _device_mesh
         self._stopped = False
         if _mock_shape is None and HAS_TENSOR_ENGINE:
             # type: ignore[21]
             self._rdma_manager = self._spawn_blocking("rdma_manager", RDMAManager)
-        if not _is_initializing_debugger:
+        if not _is_initializing_debugger and _mock_shape is None:
             self._debug_manager = self._spawn_blocking(
                 _DEBUG_MANAGER_ACTOR_NAME, DebugManager, debug_client()
             )
@@ -265,6 +268,23 @@ class ProcMesh(MeshTrait):
             assert self._auto_reload_actor is not None
             await self._auto_reload_actor.reload.call()
 
+    def logging_option(self, stream_to_client: bool = False) -> None:
+        """
+        Set the logging options for the remote processes
+
+        Args:
+            stream_to_client (bool): If True, logs from the remote processes will be streamed to the client.
+            Defaults to False.
+
+        Returns:
+            None
+        """
+        if self._logging_mesh_client is None:
+            self._logging_mesh_client = LoggingMeshClient.spawn_blocking(
+                proc_mesh=self._proc_mesh,
+            )
+        self._logging_mesh_client.set_mode(stream_to_client)
+
     async def stop(self) -> None:
         await self._proc_mesh.stop()
         self._stopped = True
@@ -326,6 +346,33 @@ def local_proc_mesh(*, gpus: Optional[int] = None, hosts: int = 1) -> Future[Pro
     return Future(
         lambda: local_proc_mesh_nonblocking(gpus=gpus, hosts=hosts),
         lambda: local_proc_mesh_blocking(gpus=gpus, hosts=hosts),
+    )
+
+
+async def sim_proc_mesh_nonblocking(
+    *, gpus: Optional[int] = None, hosts: int = 1
+) -> ProcMesh:
+    if gpus is None:
+        gpus = _local_device_count()
+    spec = AllocSpec(AllocConstraints(), gpus=gpus, hosts=hosts)
+    allocator = SimAllocator()
+    alloc = await allocator.allocate(spec)
+    return await ProcMesh.from_alloc(alloc)
+
+
+def sim_proc_mesh_blocking(*, gpus: Optional[int] = None, hosts: int = 1) -> ProcMesh:
+    if gpus is None:
+        gpus = _local_device_count()
+    spec = AllocSpec(AllocConstraints(), gpus=gpus, hosts=hosts)
+    allocator = SimAllocator()
+    alloc = allocator.allocate(spec).get()
+    return ProcMesh.from_alloc(alloc).get()
+
+
+def sim_proc_mesh(*, gpus: Optional[int] = None, hosts: int = 1) -> Future[ProcMesh]:
+    return Future(
+        lambda: sim_proc_mesh_nonblocking(gpus=gpus, hosts=hosts),
+        lambda: sim_proc_mesh_blocking(gpus=gpus, hosts=hosts),
     )
 
 

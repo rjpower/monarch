@@ -38,10 +38,6 @@ use hyperactor::proc::Proc;
 use hyperactor::reference::ProcId;
 use hyperactor::reference::Reference;
 use hyperactor::supervision::ActorSupervisionEvent;
-use hyperactor_state::client::ClientActor;
-use hyperactor_state::client::ClientActorParams;
-use hyperactor_state::state_actor::StateActor;
-use hyperactor_state::state_actor::StateMessageClient;
 use ndslice::Range;
 use ndslice::Shape;
 use ndslice::ShapeError;
@@ -56,8 +52,6 @@ use crate::alloc::ProcState;
 use crate::alloc::ProcStopReason;
 use crate::assign::Ranks;
 use crate::comm::CommActorMode;
-use crate::log_source::LogSource;
-use crate::log_source::StateServerInfo;
 use crate::proc_mesh::mesh_agent::MeshAgent;
 use crate::proc_mesh::mesh_agent::MeshAgentMessageClient;
 use crate::reference::ProcMeshId;
@@ -92,9 +86,6 @@ pub struct ProcMesh {
     client: Mailbox,
     comm_actors: Vec<ActorRef<CommActor>>,
     world_id: WorldId,
-    // this is optionally to hold the lifecycle of the state actor for log streaming
-    // TODO: we can implement the stop so the proc mesh can stop the state actor
-    _log_source: LogSource,
 }
 
 struct EventState {
@@ -184,6 +175,7 @@ impl ProcMesh {
         let (router_channel_addr, router_rx) = channel::serve(ChannelAddr::any(alloc.transport()))
             .await
             .map_err(|err| AllocatorError::Other(err.into()))?;
+        tracing::info!("router channel started listening on addr: {router_channel_addr}");
         let router = DialMailboxRouter::new_with_default(global_router().boxed());
         for (rank, (addr, _agent)) in running.iter().enumerate() {
             let proc_id = proc_ids.get(rank).unwrap().clone();
@@ -202,6 +194,7 @@ impl ProcMesh {
         let (client_proc_addr, client_rx) = channel::serve(ChannelAddr::any(alloc.transport()))
             .await
             .map_err(|err| AllocatorError::Other(err.into()))?;
+        tracing::info!("client proc started listening on addr: {client_proc_addr}");
         let client_proc = Proc::new(
             client_proc_id.clone(),
             BoxedMailboxSender::new(router.clone()),
@@ -306,43 +299,6 @@ impl ProcMesh {
                 .map_err(anyhow::Error::from)?;
         }
 
-        // Get a reference to the state actor for streaming logs.
-        let log_source = alloc.log_source().await?;
-        let StateServerInfo {
-            state_proc_addr,
-            state_actor_id,
-        } = log_source.server_info();
-        router.bind(state_actor_id.clone().into(), state_proc_addr.clone());
-
-        let log_handler = Box::new(hyperactor_state::client::StdlogHandler {});
-        let params = ClientActorParams { log_handler };
-
-        let client_logging_actor: ActorRef<ClientActor> = client_proc
-            .spawn::<ClientActor>("logging_client", params)
-            .await
-            .unwrap()
-            .bind();
-
-        let state_actor_ref: ActorRef<StateActor> = ActorRef::attest(state_actor_id);
-        match state_actor_ref
-            .subscribe_logs(
-                &client,
-                client_proc_addr.clone(),
-                client_logging_actor.clone(),
-            )
-            .await
-        {
-            Ok(_) => {}
-            Err(err) => {
-                // TODO: talking to the state actor is not on the critical path.
-                // However, if the state actor is not reachable, we will receive spams of mailbox warnings.
-                tracing::warn!(
-                    "failed to subscribe to state actor logs; remote logging will not be available on the client: {}",
-                    err
-                );
-            }
-        }
-
         let shape = alloc.shape().clone();
         let world_id = alloc.world_id().clone();
 
@@ -362,7 +318,6 @@ impl ProcMesh {
             client,
             comm_actors,
             world_id,
-            _log_source: log_source,
         })
     }
 

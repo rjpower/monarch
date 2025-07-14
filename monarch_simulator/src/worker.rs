@@ -18,7 +18,6 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use hyperactor::Actor;
 use hyperactor::ActorRef;
-use hyperactor::Instance;
 use hyperactor::Mailbox;
 use hyperactor::Named;
 use hyperactor::data::Serialized;
@@ -754,8 +753,6 @@ mod tests {
 
     use anyhow::Result;
     use futures::future::try_join_all;
-    use hyperactor::channel::ChannelAddr;
-    use hyperactor::channel::ChannelTransport;
     use hyperactor::id;
     use hyperactor::proc::Proc;
     use hyperactor::simnet;
@@ -809,12 +806,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_reduce() -> Result<()> {
-        simnet::start(
-            "local!0".parse::<ChannelAddr>().unwrap(),
-            ChannelAddr::any(ChannelTransport::Unix),
-            1000,
-        )
-        .unwrap();
+        simnet::start();
         let proc = Proc::local();
         //let (client, controller_ref, mut controller_rx) = proc.attach_actor("controller")?;
         let client = proc.attach("client")?;
