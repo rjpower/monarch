@@ -18,6 +18,7 @@ from monarch._src.actor.actor_mesh import (
     endpoint,
     MonarchContext,
     Point,
+    port,
     send,
     ValueMesh,
 )
@@ -27,8 +28,8 @@ from monarch._src.actor.proc_mesh import (
     local_proc_mesh,
     proc_mesh,
     ProcMesh,
+    sim_proc_mesh,
 )
-
 
 __all__ = [
     "Accumulator",
@@ -44,7 +45,9 @@ __all__ = [
     "Point",
     "proc_mesh",
     "ProcMesh",
+    "port",
     "send",
+    "sim_proc_mesh",
     "ValueMesh",
     "debug_client",
 ]

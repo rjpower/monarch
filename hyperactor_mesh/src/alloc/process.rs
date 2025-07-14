@@ -18,7 +18,6 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use enum_as_inner::EnumAsInner;
-use hyperactor::ActorRef;
 use hyperactor::ProcId;
 use hyperactor::WorldId;
 use hyperactor::channel;
@@ -31,7 +30,6 @@ use hyperactor::channel::Tx;
 use hyperactor::channel::TxStatus;
 use hyperactor::sync::flag;
 use hyperactor::sync::monitor;
-use hyperactor_state::state_actor::StateActor;
 use ndslice::Shape;
 use nix::sys::signal;
 use nix::unistd::Pid;
@@ -52,8 +50,7 @@ use crate::bootstrap;
 use crate::bootstrap::Allocator2Process;
 use crate::bootstrap::Process2Allocator;
 use crate::bootstrap::Process2AllocatorMessage;
-use crate::log_source::LogSource;
-use crate::log_source::StateServerInfo;
+use crate::logging::create_log_writers;
 use crate::shortuuid::ShortUuid;
 
 /// The maximum number of log lines to tail keep for managed processes.
@@ -90,9 +87,6 @@ impl Allocator for ProcessAllocator {
         let (bootstrap_addr, rx) = channel::serve(ChannelAddr::any(ChannelTransport::Unix))
             .await
             .map_err(anyhow::Error::from)?;
-        let log_source = LogSource::new_with_local_actor()
-            .await
-            .map_err(AllocatorError::from)?;
 
         let name = ShortUuid::generate();
         let n = spec.shape.slice().len();
@@ -101,7 +95,6 @@ impl Allocator for ProcessAllocator {
             world_id: WorldId(name.to_string()),
             spec: spec.clone(),
             bootstrap_addr,
-            log_source,
             rx,
             index: 0,
             active: HashMap::new(),
@@ -120,7 +113,6 @@ pub struct ProcessAlloc {
     world_id: WorldId, // to provide storage
     spec: AllocSpec,
     bootstrap_addr: ChannelAddr,
-    log_source: LogSource,
     rx: channel::ChannelRx<Process2Allocator>,
     index: usize,
     active: HashMap<usize, Child>,
@@ -151,14 +143,11 @@ struct Child {
 impl Child {
     fn monitored(
         mut process: tokio::process::Child,
-        state_server_info: StateServerInfo,
+        log_channel: ChannelAddr,
     ) -> (Self, impl Future<Output = ProcStopReason>) {
         let (group, handle) = monitor::group();
         let (exit_flag, exit_guard) = flag::guarded();
         let stop_reason = Arc::new(OnceLock::new());
-
-        // TODO(lky): enable state actor branch and remove this flag
-        let use_state_actor = false;
 
         // Set up stdout and stderr writers
         let mut stdout_tee: Box<dyn io::AsyncWrite + Send + Unpin + 'static> =
@@ -166,23 +155,14 @@ impl Child {
         let mut stderr_tee: Box<dyn io::AsyncWrite + Send + Unpin + 'static> =
             Box::new(io::stderr());
 
-        // If state actor is enabled, try to set up LogWriter instances
-        if use_state_actor {
-            let state_actor_ref = ActorRef::<StateActor>::attest(state_server_info.state_actor_id);
-            let state_actor_addr = state_server_info.state_proc_addr;
-            // Use the helper function to create both writers at once
-            match hyperactor_state::log_writer::create_log_writers(
-                state_actor_addr,
-                state_actor_ref,
-                process.id().unwrap_or(0),
-            ) {
-                Ok((stdout_writer, stderr_writer)) => {
-                    stdout_tee = stdout_writer;
-                    stderr_tee = stderr_writer;
-                }
-                Err(e) => {
-                    tracing::error!("failed to create log writers: {}", e);
-                }
+        // Use the helper function to create both writers at once
+        match create_log_writers(log_channel, process.id().unwrap_or(0)) {
+            Ok((stdout_writer, stderr_writer)) => {
+                stdout_tee = stdout_writer;
+                stderr_tee = stderr_writer;
+            }
+            Err(e) => {
+                tracing::error!("failed to create log writers: {}", e);
             }
         }
 
@@ -367,12 +347,14 @@ impl ProcessAlloc {
         let mut cmd = self.cmd.lock().await;
         let index = self.index;
         self.index += 1;
+        let log_channel: ChannelAddr = ChannelAddr::any(ChannelTransport::Unix);
 
         cmd.env(
             bootstrap::BOOTSTRAP_ADDR_ENV,
             self.bootstrap_addr.to_string(),
         );
         cmd.env(bootstrap::BOOTSTRAP_INDEX_ENV, index.to_string());
+        cmd.env(bootstrap::BOOTSTRAP_LOG_CHANNEL, log_channel.to_string());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
@@ -398,8 +380,7 @@ impl ProcessAlloc {
                         None
                     }
                     Ok(rank) => {
-                        let (handle, monitor) =
-                            Child::monitored(process, self.log_source.server_info());
+                        let (handle, monitor) = Child::monitored(process, log_channel);
                         self.children.spawn(async move { (index, monitor.await) });
                         self.active.insert(index, handle);
                         // Adjust for shape slice offset for non-zero shapes (sub-shapes).
@@ -501,10 +482,6 @@ impl Alloc for ProcessAlloc {
 
     fn transport(&self) -> ChannelTransport {
         ChannelTransport::Unix
-    }
-
-    async fn log_source(&self) -> Result<LogSource, AllocatorError> {
-        Ok(self.log_source.clone())
     }
 
     async fn stop(&mut self) -> Result<(), AllocatorError> {

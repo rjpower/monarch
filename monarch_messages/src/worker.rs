@@ -27,7 +27,6 @@ use hyperactor::Named;
 use hyperactor::RefClient;
 use hyperactor::Unbind;
 use hyperactor::reference::ActorId;
-use monarch_hyperactor::actor::PythonMessage;
 use monarch_types::SerializablePyErr;
 use ndslice::Slice;
 use pyo3::exceptions::PyValueError;
@@ -417,8 +416,11 @@ pub struct ActorCallParams {
     /// The actor to call is (proc_id of stream worker, 'actor', 'index')
     pub actor: String,
     pub index: usize,
-    /// The PythonMessage object to send to the actor.
-    pub python_message: PythonMessage,
+
+    // method name to call
+    pub method: String,
+    // pickled arguments, that will need to be patched with local state
+    pub args_kwargs_tuple: Vec<u8>,
     /// Referenceable objects to pass to the actor,
     /// these will be put into the PythonMessage
     /// during its unpickling. Because unpickling also needs to

@@ -260,7 +260,8 @@ class RemoteException(Exception):
 
 def actor_send(
     actor_mesh: ActorMeshRef,
-    message: PythonMessage,
+    method: str,
+    args_kwargs_tuple: bytes,
     refs: Sequence[Any],
     port: Optional[Port[Any]],
 ):
@@ -299,13 +300,13 @@ def actor_send(
         ident,
         actor_name,
         actor_index,
-        message,
+        method,
+        args_kwargs_tuple,
         cast("List[Mailbox | Referenceable]", refs),
         [],
         stream_ref,
     )
 
-    print("SENDING MESSAGE", msg)
     client.send(checker.mesh._ndslice, msg)
     # we have to ask for status updates
     # from workers to be sure they have finished

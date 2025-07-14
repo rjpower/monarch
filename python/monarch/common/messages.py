@@ -432,7 +432,8 @@ class SendResultOfActorCall(NamedTuple):
     seq: int
     actor: str
     actor_index: int
-    python_message: PythonMessage
+    method: str
+    args_kwargs_tuple: bytes
     local_state: List[Referenceable | Mailbox]
     mutates: List[tensor_worker.Ref]
     stream: tensor_worker.StreamRef

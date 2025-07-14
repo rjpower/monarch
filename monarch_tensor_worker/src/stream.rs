@@ -40,7 +40,6 @@ use monarch_hyperactor::actor::LocalPythonMessage;
 use monarch_hyperactor::actor::PythonActor;
 use monarch_hyperactor::actor::PythonMessage;
 use monarch_hyperactor::mailbox::EitherPortRef;
-use monarch_hyperactor::mailbox::PythonPortRef;
 use monarch_messages::controller::ControllerMessageClient;
 use monarch_messages::controller::Seq;
 use monarch_messages::controller::WorkerError;
@@ -1688,8 +1687,10 @@ impl StreamMessageHandler for StreamActor {
         let send = send.bind();
         let send = EitherPortRef::Once(send.into());
         let message = PythonMessage {
+            method: params.method,
+            message: params.args_kwargs_tuple.into(),
             response_port: Some(send),
-            ..params.python_message
+            rank: None,
         };
         let local_state: Result<Vec<monarch_hyperactor::actor::LocalState>> =
             Python::with_gil(|py| {
