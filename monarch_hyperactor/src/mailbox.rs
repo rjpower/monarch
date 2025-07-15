@@ -82,7 +82,7 @@ impl PyMailbox {
         let receiver = Py::new(
             py,
             PythonOncePortReceiver {
-                inner: std::sync::Mutex::new(Some(receiver)),
+                inner: Arc::new(std::sync::Mutex::new(Some(receiver))),
             },
         )?;
         PyTuple::new(py, vec![handle.into_any(), receiver.into_any()])
@@ -159,7 +159,7 @@ impl PyMailbox {
     }
 
     #[getter]
-    fn actor_id(&self) -> PyActorId {
+    pub(super) fn actor_id(&self) -> PyActorId {
         PyActorId {
             inner: self.inner.actor_id().clone(),
         }
@@ -372,6 +372,12 @@ impl PythonPortReceiver {
     }
 }
 
+impl PythonPortReceiver {
+    pub fn inner(&self) -> Arc<tokio::sync::Mutex<PortReceiver<PythonMessage>>> {
+        Arc::clone(&self.inner)
+    }
+}
+
 #[derive(Debug)]
 #[pyclass(
     name = "UndeliverableMessageEnvelope",
@@ -496,7 +502,7 @@ impl From<OncePortRef<PythonMessage>> for PythonOncePortRef {
     module = "monarch._rust_bindings.monarch_hyperactor.mailbox"
 )]
 pub(super) struct PythonOncePortReceiver {
-    inner: std::sync::Mutex<Option<OncePortReceiver<PythonMessage>>>,
+    inner: Arc<std::sync::Mutex<Option<OncePortReceiver<PythonMessage>>>>,
 }
 
 #[pymethods]
@@ -519,6 +525,12 @@ impl PythonOncePortReceiver {
         };
         signal_safe_block_on(py, async move { receiver.recv().await })?
             .map_err(|err| PyErr::new::<PyEOFError, _>(format!("Port closed: {}", err)))
+    }
+}
+
+impl PythonOncePortReceiver {
+    pub fn inner(&self) -> Arc<std::sync::Mutex<Option<OncePortReceiver<PythonMessage>>>> {
+        Arc::clone(&self.inner)
     }
 }
 
