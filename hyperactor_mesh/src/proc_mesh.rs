@@ -20,6 +20,7 @@ use hyperactor::Mailbox;
 use hyperactor::Named;
 use hyperactor::RemoteMessage;
 use hyperactor::WorldId;
+use hyperactor::actor::ActorStatus;
 use hyperactor::actor::RemoteActor;
 use hyperactor::actor::remote::Remote;
 use hyperactor::cap;
@@ -52,6 +53,7 @@ use crate::alloc::ProcState;
 use crate::alloc::ProcStopReason;
 use crate::assign::Ranks;
 use crate::comm::CommActorMode;
+use crate::proc_mesh::mesh_agent::GspawnResult;
 use crate::proc_mesh::mesh_agent::MeshAgent;
 use crate::proc_mesh::mesh_agent::MeshAgentMessageClient;
 use crate::reference::ProcMeshId;
@@ -352,9 +354,16 @@ impl ProcMesh {
         }
         let mut completed = Ranks::new(n);
         while !completed.is_full() {
-            let (rank, actor_id) = completed_receiver.recv().await?;
-            if completed.insert(rank, actor_id).is_some() {
-                tracing::warn!("multiple completions received for rank {}", rank);
+            let result = completed_receiver.recv().await?;
+            match result {
+                GspawnResult::Success { rank, actor_id } => {
+                    if completed.insert(rank, actor_id).is_some() {
+                        tracing::warn!("multiple completions received for rank {}", rank);
+                    }
+                }
+                GspawnResult::Error(error_msg) => {
+                    anyhow::bail!("gspawn failed: {}", error_msg);
+                }
             }
         }
 
@@ -443,7 +452,7 @@ impl ProcMesh {
 }
 
 /// Proc lifecycle events.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ProcEvent {
     /// The proc of the given rank was stopped with the provided reason.
     Stopped(usize, ProcStopReason),
@@ -498,6 +507,21 @@ impl ProcEvents {
                         continue;
                     };
 
+                    // Need to send this event to actor meshes to notify them of the proc's death.
+                    // TODO(albertli): only send this event to all root actor meshes if any of them use this proc.
+                    for entry in self.actor_event_router.iter() {
+                        // Make a dummy actor supervision event.
+                        let client_proc = ProcId(WorldId(format!("{}_manager", self.event_state.alloc.world_id().name())), 0);
+                        let client = client_proc.actor_id("client", 0);
+                        let event = ActorSupervisionEvent::new(
+                            client.clone(),
+                            ActorStatus::Failed(format!("proc {} is stopped", proc_id))
+                        );
+                        if entry.value().send(event).is_err() {
+                            tracing::warn!("unable to transmit supervision event to actor {}", client);
+                        }
+                    }
+
                     break Some(ProcEvent::Stopped(*rank, reason));
                 }
                 Ok(event) = self.event_state.supervision_events.recv() => {
@@ -513,17 +537,15 @@ impl ProcEvents {
                     };
                     // transmit to the correct root actor mesh.
                     {
-                        let Some(tx) = self.actor_event_router.get(actor_id.name()) else {
+                        if let Some(tx) = self.actor_event_router.get(actor_id.name()) {
+                            if tx.send(event).is_err() {
+                                tracing::warn!("unable to transmit supervision event to actor {}", actor_id);
+                            }
+                        } else {
                             tracing::warn!("received supervision event for unregistered actor {}", actor_id);
-                            continue;
-                        };
-                        let Ok(_) = tx.send(event) else {
-                            tracing::warn!("unable to transmit supervision event to actor {}", actor_id);
-                            continue;
-                        };
+                        }
                     }
-                    // TODO: Actor supervision events need to be wired to the frontend.
-                    // TODO: This event should be handled by the proc mesh if unhandled by actor mesh.
+                    // Send this event to Python proc mesh to keep its health status up to date.
                     break Some(ProcEvent::Crashed(*rank, actor_status.to_string()))
                 }
             }
@@ -730,6 +752,7 @@ mod tests {
         let mut events = mesh.events().unwrap();
 
         let mut actors = mesh.spawn::<TestActor>("failing", &()).await.unwrap();
+        let mut actor_events = actors.events().unwrap();
 
         actors
             .cast(
@@ -743,7 +766,7 @@ mod tests {
             ProcEvent::Crashed(0, reason) if reason.contains("failmonkey")
         );
 
-        let event = actors.next().await.unwrap();
+        let mut event = actor_events.next().await.unwrap();
         assert_matches!(event.actor_status(), ActorStatus::Failed(_));
         assert_eq!(event.actor_id().1, "failing".to_string());
         assert_eq!(event.actor_id().2, 0);
@@ -759,6 +782,24 @@ mod tests {
         );
 
         assert!(events.next().await.is_none());
-        assert!(actors.next().await.is_none());
+        event = actor_events.next().await.unwrap();
+        assert_matches!(event.actor_status(), ActorStatus::Failed(_));
+        assert_eq!(event.actor_id().2, 0);
+    }
+
+    #[timed_test::async_timed_test(timeout_secs = 5)]
+    async fn test_spawn_twice() {
+        let alloc = LocalAllocator
+            .allocate(AllocSpec {
+                shape: shape! { replica = 1  },
+                constraints: Default::default(),
+            })
+            .await
+            .unwrap();
+        let mesh = ProcMesh::allocate(alloc).await.unwrap();
+
+        mesh.spawn::<TestActor>("dup", &()).await.unwrap();
+        let result = mesh.spawn::<TestActor>("dup", &()).await;
+        assert!(result.is_err());
     }
 }

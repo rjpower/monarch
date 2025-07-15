@@ -77,19 +77,46 @@ impl TelemetryClock for DefaultTelemetryClock {
     }
 }
 
+fn try_create_appender(
+    path: &str,
+    create_dir: bool,
+) -> Result<RollingFileAppender, Box<dyn std::error::Error>> {
+    if create_dir {
+        std::fs::create_dir_all(path)?;
+    }
+    Ok(RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix("dedicated_log_monarch")
+        .filename_suffix("log")
+        .build(path)?)
+}
+
 // Need to keep this around so that the tracing subscriber doesn't drop the writer.
 lazy_static! {
     static ref FILE_WRITER_GUARD: Arc<(NonBlocking, WorkerGuard)> = {
-        let writer: Box<dyn Write + Send> = match RollingFileAppender::builder()
-            .rotation(Rotation::DAILY)
-            .filename_prefix("dedicated_log_monarch")
-            .filename_suffix("log")
-            .build("/logs/")
-        {
-            Ok(file) => Box::new(file),
-            Err(e) => {
-                tracing::warn!("unable to create custom log file: {}", e);
-                Box::new(std::io::stderr())
+        let writer: Box<dyn Write + Send> = {
+            let logs_dir_exists = std::fs::metadata("/logs/").map(|m| m.is_dir()).unwrap_or(false);
+
+            // First try /logs/ if it exists and is a directory
+            let logs_result = if logs_dir_exists {
+                try_create_appender("/logs/", false)
+            } else {
+                Err("logs directory not available".into())
+            };
+
+            // Fall back to /tmp/monarch_log if not.
+            match logs_result {
+                Ok(file_appender) => Box::new(file_appender),
+                Err(_) => {
+                    match try_create_appender("/tmp/monarch_log/", true) {
+                        Ok(file_appender) => Box::new(file_appender),
+                        // Fall back to stderr as a last resort
+                        Err(e) => {
+                            eprintln!("unable to create log file in /tmp/monarch_log/: {}. Falling back to stderr", e);
+                            Box::new(std::io::stderr())
+                        }
+                    }
+                }
             }
         };
         return Arc::new(
@@ -478,13 +505,13 @@ pub fn initialize_logging(clock: impl TelemetryClock + Send + 'static) {
             } else {
                 None
             })
+            .with(file_layer)
+            .with(stderr_layer)
             .with(if is_layer_enabled(DISABLE_RECORDER_TRACING) {
                 Some(recorder().layer())
             } else {
                 None
             })
-            .with(file_layer)
-            .with(stderr_layer)
             .try_init()
         {
             tracing::debug!("logging already initialized for this process: {}", err);
