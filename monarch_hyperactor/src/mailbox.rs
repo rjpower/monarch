@@ -54,7 +54,13 @@ use crate::shape::PyShape;
     module = "monarch._rust_bindings.monarch_hyperactor.mailbox"
 )]
 pub struct PyMailbox {
-    pub inner: Mailbox,
+    pub(super) inner: Mailbox,
+}
+
+impl PyMailbox {
+    pub fn get_inner(&self) -> &Mailbox {
+        &self.inner
+    }
 }
 
 #[pymethods]
