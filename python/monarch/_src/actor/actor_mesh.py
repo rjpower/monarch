@@ -690,27 +690,22 @@ class RankedPortReceiver(PortReceiver[Tuple[int, R]]):
 singleton_shape = Shape([], NDSlice(offset=0, sizes=[], strides=[]))
 
 
-class AsyncState(threading.local):
-    def __init__(self):
-        self._is_fake_sync = False
-
-
-# current the synchronous function of actors are run on a python thread that has an active event loop.
-# Technically it is unsafe for them to block at all, so all calls to .get() should be failing.
-# but in the meantime, to implement get() with async functions we need to signal to the consumer of
-# the PythonTask object that the thread really isn't in an async context. This isn't safe though:
-# if the user of sync function made their own async context, we won't know that blocking is not allowed
-# and do it anyway.
-async_state_please_remove = AsyncState()
+# Currently the synchronous function of actors are run on a python thread that has an active event loop.
+# Technically it is unsafe for them to block at all because they will block the loop of other
+# calls, so all calls to .get() should be failing.
+# But in the meantime, to implement get() by reusing async functions,
+#  we need to signal to the consumer of the PythonTask object that the thread really isn't in an async context.
+# We do this by blanking out the running event loop during the call to the synchronous actor function.
 
 
 @contextmanager
 def fake_sync_state():
-    async_state_please_remove._is_fake_sync = True
+    prev_loop = asyncio.events._get_running_loop()
+    asyncio._set_running_loop(None)
     try:
         yield
     finally:
-        async_state_please_remove._is_fake_sync = False
+        asyncio._set_running_loop(prev_loop)
 
 
 class _Actor:

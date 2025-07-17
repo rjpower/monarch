@@ -606,17 +606,7 @@ impl PyPythonTask {
             .unwrap()
             .call_method0("_get_running_loop")
             .unwrap();
-        if lp.is_none()
-            || py
-                .import("monarch._src.actor.actor_mesh")
-                .unwrap()
-                .getattr("async_state_please_remove")
-                .unwrap()
-                .getattr("_is_fake_sync")
-                .unwrap()
-                .is_truthy()
-                .unwrap()
-        {
+        if lp.is_none() {
             let value = self.block_on(py)?;
             Ok(JustStopWithValueIterator { value: Some(value) }.into_py_any(py)?)
         } else {
