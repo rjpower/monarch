@@ -424,7 +424,7 @@ class ActorEndpoint(Endpoint[P, R]):
             self._actor_mesh.cast(message, selection)
         else:
             importlib.import_module("monarch." + "mesh_controller").actor_send(
-                self, self._name, bytes, refs, port
+                self, bytes, refs, port, selection
             )
         shape = self._actor_mesh._shape
         return Extent(shape.labels, shape.ndslice.sizes)
@@ -720,11 +720,8 @@ class _Actor:
         shape: Shape,
         message: PythonMessage,
         panic_flag: PanicFlag,
-        local_state: List[Any] | None,
+        local_state: Iterable[Any],
     ) -> None:
-        if local_state is None:
-            local_state = itertools.repeat(mailbox)
-
         match message.kind:
             case PythonMessageKind.CallMethod(response_port=response_port):
                 pass
@@ -985,7 +982,7 @@ class ActorError(Exception):
     def __init__(
         self,
         exception: Exception,
-        message: str = "A remote actor call has failed asynchronously.",
+        message: str = "A remote actor call has failed.",
     ) -> None:
         self.exception = exception
         self.actor_mesh_ref_frames: StackSummary = extract_tb(exception.__traceback__)
