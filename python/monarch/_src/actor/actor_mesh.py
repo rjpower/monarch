@@ -430,7 +430,7 @@ class ActorEndpoint(Endpoint[P, R]):
             self._actor_mesh.cast(message, selection)
         else:
             importlib.import_module("monarch." + "mesh_controller").actor_send(
-                self, self._name, bytes, refs, port
+                self, bytes, refs, port, selection
             )
         shape = self._actor_mesh._shape
         return Extent(shape.labels, shape.ndslice.sizes)
@@ -660,15 +660,7 @@ class PortReceiver(Generic[R]):
         self._receiver = receiver
 
     async def _recv(self) -> R:
-        rt = self._receiver.recv_task()
-        if (
-            asyncio.events._get_running_loop() is None
-            or async_state_please_remove._is_fake_sync
-        ):
-            msg = rt.block_on()
-        else:
-            msg = await rt.into_future()
-        return self._process(msg)
+        return self._process(await self._receiver.recv_task())
 
     def _process(self, msg: PythonMessage) -> R:
         # TODO: Try to do something more structured than a cast here
@@ -746,11 +738,8 @@ class _Actor:
         shape: Shape,
         message: PythonMessage,
         panic_flag: PanicFlag,
-        local_state: List[Any] | None,
+        local_state: Iterable[Any],
     ) -> None:
-        if local_state is None:
-            local_state = itertools.repeat(mailbox)
-
         match message.kind:
             case PythonMessageKind.CallMethod(response_port=response_port):
                 pass
@@ -1012,7 +1001,7 @@ class ActorError(Exception):
     def __init__(
         self,
         exception: Exception,
-        message: str = "A remote actor call has failed asynchronously.",
+        message: str = "A remote actor call has failed.",
     ) -> None:
         self.exception = exception
         self.actor_mesh_ref_frames: StackSummary = extract_tb(exception.__traceback__)

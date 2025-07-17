@@ -21,6 +21,7 @@ use hyperactor::Context;
 use hyperactor::HandleClient;
 use hyperactor::Handler;
 use hyperactor::Named;
+use hyperactor::cap::CanSend;
 use hyperactor::forward;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;
@@ -31,9 +32,11 @@ use monarch_types::SerializablePyErr;
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::PyBaseException;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyStopIteration;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
+use pyo3::types::PyIterator;
 use pyo3::types::PyList;
 use pyo3::types::PyType;
 use serde::Deserialize;
@@ -43,6 +46,8 @@ use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
 use crate::config::SHARED_ASYNCIO_RUNTIME;
+use crate::local_state_broker::BrokerId;
+use crate::local_state_broker::LocalStateBrokerMessage;
 use crate::mailbox::EitherPortRef;
 use crate::mailbox::PyMailbox;
 use crate::proc::InstanceWrapper;
@@ -172,6 +177,13 @@ impl PickledMessageClientActor {
 }
 
 #[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.actor")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum UnflattenArg {
+    Mailbox,
+    PyObject,
+}
+
+#[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.actor")]
 #[derive(Clone, Debug, Serialize, Deserialize, Named, PartialEq)]
 pub enum PythonMessageKind {
     CallMethod {
@@ -185,12 +197,25 @@ pub enum PythonMessageKind {
         rank: Option<usize>,
     },
     Uninit {},
+    CallMethodIndirect {
+        name: String,
+        local_state_broker: (String, usize),
+        id: usize,
+        // specify whether the argument to unflatten the local mailbox,
+        // or the next argument of the local state.
+        unflatten_args: Vec<UnflattenArg>,
+    },
 }
 
 impl Default for PythonMessageKind {
     fn default() -> Self {
         PythonMessageKind::Uninit {}
     }
+}
+
+fn mailbox<'py, T: Actor>(py: Python<'py>, cx: &Context<'_, T>) -> Bound<'py, PyAny> {
+    let mailbox: PyMailbox = cx.mailbox_for_py().clone().into();
+    mailbox.into_bound_py_any(py).unwrap()
 }
 
 #[pyclass(frozen, module = "monarch._rust_bindings.monarch_hyperactor.actor")]
@@ -218,6 +243,56 @@ impl PythonMessage {
             },
             _ => panic!("PythonMessage is not a response but {:?}", self),
         }
+    }
+
+    pub async fn resolve_indirect_call<T: Actor>(
+        mut self,
+        cx: &Context<'_, T>,
+    ) -> anyhow::Result<(Self, PyObject)> {
+        let local_state: PyObject;
+        match self.kind {
+            PythonMessageKind::CallMethodIndirect {
+                name,
+                local_state_broker,
+                id,
+                unflatten_args,
+            } => {
+                let broker = BrokerId::new(local_state_broker).resolve(cx).unwrap();
+                let (send, recv) = cx.open_once_port();
+                broker.send(LocalStateBrokerMessage::Get(id, send))?;
+                let state = recv.recv().await?;
+                let mut state_it = state.state.into_iter();
+                local_state = Python::with_gil(|py| {
+                    let mailbox = mailbox(py, cx);
+                    PyList::new(
+                        py,
+                        unflatten_args.into_iter().map(|x| -> Bound<'_, PyAny> {
+                            match x {
+                                UnflattenArg::Mailbox => mailbox.clone(),
+                                UnflattenArg::PyObject => state_it.next().unwrap().into_bound(py),
+                            }
+                        }),
+                    )
+                    .unwrap()
+                    .into()
+                });
+                self.kind = PythonMessageKind::CallMethod {
+                    name,
+                    response_port: Some(state.response_port),
+                }
+            }
+            _ => {
+                local_state = Python::with_gil(|py| {
+                    let mailbox = mailbox(py, cx);
+                    py.import("itertools")
+                        .unwrap()
+                        .call_method1("repeat", (mailbox.clone(),))
+                        .unwrap()
+                        .unbind()
+                });
+            }
+        };
+        Ok((self, local_state))
     }
 }
 
@@ -408,30 +483,16 @@ impl PanicFlag {
 }
 
 #[async_trait]
-impl Handler<LocalPythonMessage> for PythonActor {
-    async fn handle(
-        &mut self,
-        cx: &Context<Self>,
-        message: LocalPythonMessage,
-    ) -> anyhow::Result<()> {
-        let mailbox: PyMailbox = PyMailbox {
-            inner: cx.mailbox_for_py().clone(),
-        };
+impl Handler<PythonMessage> for PythonActor {
+    async fn handle(&mut self, cx: &Context<Self>, message: PythonMessage) -> anyhow::Result<()> {
+        let (message, local_state) = message.resolve_indirect_call(cx).await?;
+
         // Create a channel for signaling panics in async endpoints.
         // See [Panics in async endpoints].
         let (sender, receiver) = oneshot::channel();
 
         let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
-            let mailbox = mailbox.into_bound_py_any(py).unwrap();
-            let local_state: Option<Vec<Bound<'_, PyAny>>> = message.local_state.map(|state| {
-                state
-                    .into_iter()
-                    .map(|e| match e {
-                        LocalState::Mailbox => mailbox.clone(),
-                        LocalState::PyObject(obj) => obj.into_bound_py_any(py).unwrap(),
-                    })
-                    .collect()
-            });
+            let mailbox = mailbox(py, cx);
             let (rank, shape) = cx.cast_info();
             let awaitable = self.actor.call_method(
                 py,
@@ -440,7 +501,7 @@ impl Handler<LocalPythonMessage> for PythonActor {
                     mailbox,
                     rank,
                     PyShape::from(shape),
-                    message.message,
+                    message,
                     PanicFlag {
                         sender: Some(sender),
                     },
@@ -460,20 +521,6 @@ impl Handler<LocalPythonMessage> for PythonActor {
         let handler = AsyncEndpointTask::spawn(cx, ()).await?;
         handler.run(cx, PythonTask::new(future), receiver).await?;
         Ok(())
-    }
-}
-
-#[async_trait]
-impl Handler<PythonMessage> for PythonActor {
-    async fn handle(&mut self, cx: &Context<Self>, message: PythonMessage) -> anyhow::Result<()> {
-        self.handle(
-            cx,
-            LocalPythonMessage {
-                message,
-                local_state: None,
-            },
-        )
-        .await
     }
 }
 
@@ -519,9 +566,24 @@ impl From<PythonTask> for PyPythonTask {
     }
 }
 
+#[pyclass(
+    name = "JustStopWithValueIterator",
+    module = "monarch._rust_bindings.monarch_hyperactor.actor"
+)]
+struct JustStopWithValueIterator {
+    value: Option<PyObject>,
+}
+
+#[pymethods]
+impl JustStopWithValueIterator {
+    fn __next__<'py>(&mut self) -> PyResult<PyObject> {
+        Err(PyStopIteration::new_err(self.value.take().unwrap()))
+    }
+}
+
 #[pymethods]
 impl PyPythonTask {
-    fn into_future(&mut self, py: Python) -> PyResult<PyObject> {
+    fn into_future(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let task = self
             .inner
             .take()
@@ -529,13 +591,37 @@ impl PyPythonTask {
             .expect("PythonTask already consumed");
         Ok(pyo3_async_runtimes::tokio::future_into_py(py, task)?.unbind())
     }
-    fn block_on(&mut self, py: Python) -> PyResult<PyObject> {
+    fn block_on(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let task = self
             .inner
             .take()
             .map(|task| task.take())
             .expect("PythonTask already consumed");
         signal_safe_block_on(py, task)?
+    }
+
+    fn __await__(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let lp = py
+            .import("asyncio.events")
+            .unwrap()
+            .call_method0("_get_running_loop")
+            .unwrap();
+        if lp.is_none()
+            || py
+                .import("monarch._src.actor.actor_mesh")
+                .unwrap()
+                .getattr("async_state_please_remove")
+                .unwrap()
+                .getattr("_is_fake_sync")
+                .unwrap()
+                .is_truthy()
+                .unwrap()
+        {
+            let value = self.block_on(py)?;
+            Ok(JustStopWithValueIterator { value: Some(value) }.into_py_any(py)?)
+        } else {
+            self.into_future(py)?.call_method0(py, "__await__")
+        }
     }
 }
 
@@ -611,17 +697,6 @@ impl AsyncEndpointInvocationHandler for AsyncEndpointTask {
         Ok(())
     }
 }
-#[derive(Debug)]
-pub enum LocalState {
-    Mailbox,
-    PyObject(PyObject),
-}
-
-#[derive(Debug)]
-pub struct LocalPythonMessage {
-    pub message: PythonMessage,
-    pub local_state: Option<Vec<LocalState>>,
-}
 
 pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     hyperactor_mod.add_class::<PickledMessage>()?;
@@ -629,6 +704,7 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     hyperactor_mod.add_class::<PythonActorHandle>()?;
     hyperactor_mod.add_class::<PythonMessage>()?;
     hyperactor_mod.add_class::<PythonMessageKind>()?;
+    hyperactor_mod.add_class::<UnflattenArg>()?;
     hyperactor_mod.add_class::<PanicFlag>()?;
     hyperactor_mod.add_class::<PyPythonTask>()?;
     Ok(())

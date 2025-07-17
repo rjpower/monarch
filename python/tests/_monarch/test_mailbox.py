@@ -8,7 +8,7 @@
 
 import asyncio
 import pickle
-from typing import Any, Callable, cast, final, Generic, List, TYPE_CHECKING, TypeVar
+from typing import Any, Callable, cast, final, Generic, Iterable, TYPE_CHECKING, TypeVar
 
 import monarch
 
@@ -114,7 +114,7 @@ async def test_accumulator() -> None:
         )
 
     async def recv_message() -> str:
-        messge = await asyncio.wait_for(receiver.recv(), timeout=5)
+        messge = await asyncio.wait_for(receiver.recv_task().into_future(), timeout=5)
         value = pickle.loads(messge.message)
         return cast(str, value)
 
@@ -137,7 +137,7 @@ class MyActor:
         shape: Shape,
         message: PythonMessage,
         panic_flag: PanicFlag,
-        local_state: List[Any] | None,
+        local_state: Iterable[Any],
     ) -> None:
         call_method = cast("CallMethod", message.kind)
         assert call_method.response_port is not None
@@ -177,6 +177,6 @@ async def test_reducer() -> None:
         ),
     )
 
-    messge = await asyncio.wait_for(receiver.recv(), timeout=5)
+    messge = await asyncio.wait_for(receiver.recv_task().into_future(), timeout=5)
     value = cast(str, pickle.loads(messge.message))
     assert "[reduced](start+msg0)" in value

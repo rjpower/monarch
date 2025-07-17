@@ -31,7 +31,7 @@ async def _aincomplete(impl, self):
 # TODO: consolidate with monarch.common.future
 class Future(Generic[R]):
     def __init__(self, impl, blocking_impl=None, requires_loop=True):
-        if blocking_impl is None or Future.always:
+        if blocking_impl is None:
             blocking_impl = partial(asyncio.run, impl())
         self._get = partial(_incomplete, blocking_impl)
         self._aget = partial(_aincomplete, impl)

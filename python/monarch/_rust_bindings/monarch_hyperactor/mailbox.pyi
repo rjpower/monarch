@@ -7,7 +7,7 @@
 # pyre-strict
 
 import asyncio
-from typing import Any, final, Generic, Protocol, TypeVar
+from typing import Any, final, Generator, Generic, Protocol, TypeVar
 
 from monarch._rust_bindings.monarch_hyperactor.actor import (
     PythonMessage,
@@ -239,3 +239,5 @@ class PythonTask(Generic[T]):
         Consumes the PythonTask object.
         """
         ...
+
+    def __await__(self) -> Generator[T, None, T]: ...
