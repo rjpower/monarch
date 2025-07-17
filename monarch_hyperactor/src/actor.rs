@@ -480,18 +480,19 @@ impl Handler<PythonMessage> for PythonActor {
 /// Helper struct to make a Python future passable in an actor message.
 ///
 /// Also so that we don't have to write this massive type signature everywhere
-struct PythonTask {
+
+pub(crate) struct PythonTask {
     future: Mutex<Pin<Box<dyn Future<Output = PyResult<PyObject>> + Send + 'static>>>,
 }
 
 impl PythonTask {
-    fn new(fut: impl Future<Output = PyResult<PyObject>> + Send + 'static) -> Self {
+    pub(crate) fn new(fut: impl Future<Output = PyResult<PyObject>> + Send + 'static) -> Self {
         Self {
             future: Mutex::new(Box::pin(fut)),
         }
     }
 
-    async fn take(self) -> Pin<Box<dyn Future<Output = PyResult<PyObject>> + Send + 'static>> {
+    fn take(self) -> Pin<Box<dyn Future<Output = PyResult<PyObject>> + Send + 'static>> {
         self.future.into_inner()
     }
 }
@@ -501,6 +502,40 @@ impl fmt::Debug for PythonTask {
         f.debug_struct("PythonTask")
             .field("future", &"<PythonFuture>")
             .finish()
+    }
+}
+
+#[pyclass(
+    name = "PythonTask",
+    module = "monarch._rust_bindings.monarch_hyperactor.actor"
+)]
+pub(crate) struct PyPythonTask {
+    inner: Option<PythonTask>,
+}
+
+impl From<PythonTask> for PyPythonTask {
+    fn from(task: PythonTask) -> Self {
+        Self { inner: Some(task) }
+    }
+}
+
+#[pymethods]
+impl PyPythonTask {
+    fn into_future(&mut self, py: Python) -> PyResult<PyObject> {
+        let task = self
+            .inner
+            .take()
+            .map(|task| task.take())
+            .expect("PythonTask already consumed");
+        Ok(pyo3_async_runtimes::tokio::future_into_py(py, task)?.unbind())
+    }
+    fn block_on(&mut self, py: Python) -> PyResult<PyObject> {
+        let task = self
+            .inner
+            .take()
+            .map(|task| task.take())
+            .expect("PythonTask already consumed");
+        signal_safe_block_on(py, task)?
     }
 }
 
@@ -557,7 +592,7 @@ impl AsyncEndpointInvocationHandler for AsyncEndpointTask {
                 Err(_) => pending().await,
             }
         };
-        let future = task.take().await;
+        let future = task.take();
         let result: Result<(), SerializablePyErr> = tokio::select! {
             result = future => {
                 match result {
@@ -595,6 +630,7 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     hyperactor_mod.add_class::<PythonMessage>()?;
     hyperactor_mod.add_class::<PythonMessageKind>()?;
     hyperactor_mod.add_class::<PanicFlag>()?;
+    hyperactor_mod.add_class::<PyPythonTask>()?;
     Ok(())
 }
 

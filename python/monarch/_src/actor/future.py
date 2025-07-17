@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import traceback
 from functools import partial
 from typing import Generator, Generic, Optional, TypeVar
 
@@ -29,15 +30,26 @@ async def _aincomplete(impl, self):
 
 # TODO: consolidate with monarch.common.future
 class Future(Generic[R]):
-    def __init__(self, impl, blocking_impl=None):
-        if blocking_impl is None:
+    def __init__(self, impl, blocking_impl=None, requires_loop=True):
+        if blocking_impl is None or Future.always:
             blocking_impl = partial(asyncio.run, impl())
         self._get = partial(_incomplete, blocking_impl)
         self._aget = partial(_aincomplete, impl)
+        self._requires_loop = requires_loop
 
     def get(self, timeout: Optional[float] = None) -> R:
         if timeout is not None:
             return asyncio.run(asyncio.wait_for(self._aget(self), timeout))
+        if not self._requires_loop:
+            try:
+                coro = self._aget(self)
+                next(coro.__await__())
+                tb_str = "".join(traceback.format_stack(coro.cr_frame))
+                raise RuntimeError(
+                    f"a coroutine paused with a future with requires_loop=False cannot block on a python asyncio.Future. Use requires_loop=True.\n{tb_str}"
+                )
+            except StopIteration as e:
+                return e.value
         return self._get(self)
 
     def __await__(self) -> Generator[R, None, R]:

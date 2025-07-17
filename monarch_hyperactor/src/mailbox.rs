@@ -6,6 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::future::Future;
 use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -45,9 +46,12 @@ use pyo3::types::PyTuple;
 use pyo3::types::PyType;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::sync::mpsc::UnboundedReceiver;
 
+use crate::actor::PyPythonTask;
 use crate::actor::PythonMessage;
 use crate::actor::PythonMessageKind;
+use crate::actor::PythonTask;
 use crate::proc::PyActorId;
 use crate::runtime::signal_safe_block_on;
 use crate::shape::PyShape;
@@ -374,23 +378,23 @@ pub(super) struct PythonPortReceiver {
     inner: Arc<tokio::sync::Mutex<PortReceiver<PythonMessage>>>,
 }
 
+async fn recv_async(
+    receiver: Arc<tokio::sync::Mutex<PortReceiver<PythonMessage>>>,
+) -> PyResult<PyObject> {
+    receiver
+        .lock()
+        .await
+        .recv()
+        .await
+        .map_err(|err| PyErr::new::<PyEOFError, _>(format!("Port closed: {}", err)))
+        .and_then(|message| Python::with_gil(|py| message.into_py_any(py)))
+}
+
 #[pymethods]
 impl PythonPortReceiver {
-    fn recv<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn recv_task<'py>(&mut self) -> PyPythonTask {
         let receiver = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            receiver
-                .lock()
-                .await
-                .recv()
-                .await
-                .map_err(|err| PyErr::new::<PyEOFError, _>(format!("Port closed: {}", err)))
-        })
-    }
-    fn blocking_recv<'py>(&mut self, py: Python<'py>) -> PyResult<PythonMessage> {
-        let receiver = self.inner.clone();
-        signal_safe_block_on(py, async move { receiver.lock().await.recv().await })?
-            .map_err(|err| PyErr::new::<PyEOFError, _>(format!("Port closed: {}", err)))
+        PythonTask::new(recv_async(receiver)).into()
     }
 }
 
@@ -545,24 +549,18 @@ pub(super) struct PythonOncePortReceiver {
 
 #[pymethods]
 impl PythonOncePortReceiver {
-    fn recv<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn recv_task<'py>(&mut self) -> PyResult<PyPythonTask> {
         let Some(receiver) = self.inner.lock().unwrap().take() else {
             return Err(PyErr::new::<PyValueError, _>("OncePort is already used"));
         };
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let fut = async move {
             receiver
                 .recv()
                 .await
                 .map_err(|err| PyErr::new::<PyEOFError, _>(format!("Port closed: {}", err)))
-        })
-    }
-    fn blocking_recv<'py>(&mut self, py: Python<'py>) -> PyResult<PythonMessage> {
-        let Some(receiver) = self.inner.lock().unwrap().take() else {
-            return Err(PyErr::new::<PyValueError, _>("OncePort is already used"));
+                .and_then(|message| Python::with_gil(|py| message.into_py_any(py)))
         };
-        signal_safe_block_on(py, async move { receiver.recv().await })?
-            .map_err(|err| PyErr::new::<PyEOFError, _>(format!("Port closed: {}", err)))
+        Ok(PythonTask::new(fut).into())
     }
 }
 
@@ -704,6 +702,5 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     hyperactor_mod.add_class::<PythonOncePortHandle>()?;
     hyperactor_mod.add_class::<PythonOncePortRef>()?;
     hyperactor_mod.add_class::<PythonOncePortReceiver>()?;
-
     Ok(())
 }

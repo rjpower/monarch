@@ -6,6 +6,7 @@
 
 # pyre-unsafe
 
+import asyncio
 import collections
 import contextvars
 import functools
@@ -14,9 +15,11 @@ import inspect
 import itertools
 import logging
 import random
+import threading
 import traceback
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 
 from dataclasses import dataclass
 from operator import mul
@@ -60,9 +63,12 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
     OncePortReceiver,
     OncePortRef,
-    PortReceiver as HyPortReceiver,
     PortRef,
 )
+
+if TYPE_CHECKING:
+    from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiverBase
+
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
 from monarch._rust_bindings.monarch_hyperactor.supervision import SupervisionError
@@ -648,24 +654,21 @@ class PortReceiver(Generic[R]):
     def __init__(
         self,
         mailbox: Mailbox,
-        receiver: MonitoredPortReceiver
-        | MonitoredOncePortReceiver
-        | HyPortReceiver
-        | OncePortReceiver,
+        receiver: "PortReceiverBase",
     ) -> None:
         self._mailbox: Mailbox = mailbox
-        self._receiver: (
-            MonitoredPortReceiver
-            | MonitoredOncePortReceiver
-            | HyPortReceiver
-            | OncePortReceiver
-        ) = receiver
+        self._receiver = receiver
 
     async def _recv(self) -> R:
-        return self._process(await self._receiver.recv())
-
-    def _blocking_recv(self) -> R:
-        return self._process(self._receiver.blocking_recv())
+        rt = self._receiver.recv_task()
+        if (
+            asyncio.events._get_running_loop() is None
+            or async_state_please_remove._is_fake_sync
+        ):
+            msg = rt.block_on()
+        else:
+            msg = await rt.into_future()
+        return self._process(msg)
 
     def _process(self, msg: PythonMessage) -> R:
         # TODO: Try to do something more structured than a cast here
@@ -679,7 +682,7 @@ class PortReceiver(Generic[R]):
                 raise ValueError(f"Unexpected message kind: {msg.kind}")
 
     def recv(self) -> "Future[R]":
-        return Future(lambda: self._recv(), self._blocking_recv)
+        return Future(lambda: self._recv(), None, requires_loop=False)
 
 
 class RankedPortReceiver(PortReceiver[Tuple[int, R]]):
@@ -693,6 +696,29 @@ class RankedPortReceiver(PortReceiver[Tuple[int, R]]):
 
 
 singleton_shape = Shape([], NDSlice(offset=0, sizes=[], strides=[]))
+
+
+class AsyncState(threading.local):
+    def __init__(self):
+        self._is_fake_sync = False
+
+
+# current the synchronous function of actors are run on a python thread that has an active event loop.
+# Technically it is unsafe for them to block at all, so all calls to .get() should be failing.
+# but in the meantime, to implement get() with async functions we need to signal to the consumer of
+# the PythonTask object that the thread really isn't in an async context. This isn't safe though:
+# if the user of sync function made their own async context, we won't know that blocking is not allowed
+# and do it anyway.
+async_state_please_remove = AsyncState()
+
+
+@contextmanager
+def fake_sync_state():
+    async_state_please_remove._is_fake_sync = True
+    try:
+        yield
+    finally:
+        async_state_please_remove._is_fake_sync = False
 
 
 class _Actor:
@@ -796,7 +822,8 @@ class _Actor:
                 result = await instrumented()
             else:
                 enter_span(the_method.__module__, method, str(ctx.mailbox.actor_id))
-                result = the_method(self.instance, *args, **kwargs)
+                with fake_sync_state():
+                    result = the_method(self.instance, *args, **kwargs)
                 self._maybe_exit_debugger()
                 exit_span()
 

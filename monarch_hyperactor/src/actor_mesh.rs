@@ -20,6 +20,7 @@ use hyperactor_mesh::actor_mesh::ActorSupervisionEvents;
 use hyperactor_mesh::reference::ActorMeshRef;
 use hyperactor_mesh::shared_cell::SharedCell;
 use hyperactor_mesh::shared_cell::SharedCellRef;
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyEOFError;
 use pyo3::exceptions::PyException;
 use pyo3::exceptions::PyNotImplementedError;
@@ -31,8 +32,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
+use crate::actor::PyPythonTask;
 use crate::actor::PythonActor;
 use crate::actor::PythonMessage;
+use crate::actor::PythonTask;
 use crate::mailbox::PyMailbox;
 use crate::mailbox::PythonOncePortReceiver;
 use crate::mailbox::PythonPortReceiver;
@@ -332,36 +335,21 @@ impl MonitoredPythonPortReceiver {
         }
     }
 
-    fn recv<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn recv_task<'py>(&mut self) -> PyPythonTask {
         let receiver = self.inner.clone();
         let monitor = self.monitor.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        PythonTask::new(async move {
             let mut receiver = receiver.lock().await;
-            tokio::select! {
+            let result = tokio::select! {
                 result = receiver.recv() => {
                     result.map_err(|err| PyErr::new::<PyEOFError, _>(format!("port closed: {}", err)))
                 }
                 event = monitor.next() => {
                     Err(PyErr::new::<SupervisionError, _>(format!("supervision error: {:?}", event.unwrap())))
                 }
-            }
-        })
-    }
-
-    fn blocking_recv<'py>(&mut self, py: Python<'py>) -> PyResult<PythonMessage> {
-        let receiver = self.inner.clone();
-        let monitor = self.monitor.clone();
-        signal_safe_block_on(py, async move {
-            let mut receiver = receiver.lock().await;
-            tokio::select! {
-                result = receiver.recv() => {
-                   result.map_err(|err| PyErr::new::<PyEOFError, _>(format!("port closed: {}", err)))
-                }
-                event = monitor.next() => {
-                    Err(PyErr::new::<SupervisionError, _>(format!("supervision error: {:?}", event.unwrap())))
-                }
-            }
-        })?
+            };
+            result.and_then(|message: PythonMessage| Python::with_gil(|py| message.into_py_any(py)))
+        }).into()
     }
 }
 
@@ -385,38 +373,22 @@ impl MonitoredPythonOncePortReceiver {
         }
     }
 
-    fn recv<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn recv_task<'py>(&mut self) -> PyResult<PyPythonTask> {
         let Some(receiver) = self.inner.lock().unwrap().take() else {
             return Err(PyErr::new::<PyValueError, _>("OncePort is already used"));
         };
         let monitor = self.monitor.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            tokio::select! {
+        Ok(PythonTask::new(async move {
+            let result = tokio::select! {
                 result = receiver.recv() => {
                     result.map_err(|err| PyErr::new::<PyEOFError, _>(format!("port closed: {}", err)))
                 }
                 event = monitor.next() => {
                     Err(PyErr::new::<SupervisionError, _>(format!("supervision error: {:?}", event.unwrap())))
                 }
-            }
-        })
-    }
-
-    fn blocking_recv<'py>(&mut self, py: Python<'py>) -> PyResult<PythonMessage> {
-        let Some(receiver) = self.inner.lock().unwrap().take() else {
-            return Err(PyErr::new::<PyValueError, _>("OncePort is already used"));
-        };
-        let monitor = self.monitor.clone();
-        signal_safe_block_on(py, async move {
-            tokio::select! {
-                result = receiver.recv() => {
-                   result.map_err(|err| PyErr::new::<PyEOFError, _>(format!("port closed: {}", err)))
-                }
-                event = monitor.next() => {
-                    Err(PyErr::new::<SupervisionError, _>(format!("supervision error: {:?}", event.unwrap())))
-                }
-            }
-        })?
+            };
+            result.and_then(|message: PythonMessage| Python::with_gil(|py| message.into_py_any(py)))
+        }).into())
     }
 }
 
