@@ -64,5 +64,7 @@ def invoke_main():
 
 
 if __name__ == "__main__":
+    # Ensure that processes started via `multiprocessing` are spawned, not forked.
+    # forking is a terrible default, see: https://github.com/python/cpython/issues/84559
     multiprocessing.set_start_method("spawn", force=True)
     invoke_main()  # pragma: no cover
