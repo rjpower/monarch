@@ -13,6 +13,7 @@ import importlib.resources
 import logging
 import os
 import sys
+import multiprocessing
 
 # Import torch to avoid import-time races if a spawned actor tries to import torch.
 try:
@@ -63,4 +64,5 @@ def invoke_main():
 
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn", force=True)
     invoke_main()  # pragma: no cover
