@@ -691,6 +691,11 @@ impl PyPythonTask {
         signal_safe_block_on(py, task)?
     }
 
+    /// In an async context this turns the tokio::Future into
+    /// an asyncio Future and awaits it.
+    /// In a synchronous context, this just blocks on the future and
+    /// immediately returns the value without pausing caller coroutine.
+    /// See [avoiding async code duplication] for justitifcation.
     fn __await__(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let lp = py
             .import("asyncio.events")
