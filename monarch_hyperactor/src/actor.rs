@@ -488,7 +488,7 @@ impl Handler<PythonMessage> for PythonActor {
         // Create a channel for signaling panics in async endpoints.
         // See [Panics in async endpoints].
         let (sender, receiver) = oneshot::channel();
-        let method_name = message.method.clone();
+        let method_kind = message.kind.clone();
 
         let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
             let mailbox = mailbox(py, cx);
@@ -517,8 +517,8 @@ impl Handler<PythonMessage> for PythonActor {
         })?;
 
         // Spawn a child actor to await the Python handler method.
-        tracing::debug!("spawning handler for method '{}'", method_name);
-        let handler = AsyncEndpointTask::spawn(cx, method_name).await?;
+        tracing::debug!("spawning handler for PythonMessage {:?}", method_kind);
+        let handler = AsyncEndpointTask::spawn(cx, method_kind).await?;
         handler.run(cx, PythonTask::new(future), receiver).await?;
         Ok(())
     }
@@ -557,7 +557,7 @@ impl fmt::Debug for PythonTask {
 /// - Any uncaught errors in the async endpoint will get propagated as a supervision event.
 #[derive(Debug)]
 struct AsyncEndpointTask {
-    name: String,
+    message_kind: PythonMessageKind,
 }
 
 /// An invocation of an async endpoint on a [`PythonActor`].
@@ -568,10 +568,10 @@ enum AsyncEndpointInvocation {
 
 #[async_trait]
 impl Actor for AsyncEndpointTask {
-    type Params = String;
+    type Params = PythonMessageKind;
 
-    async fn new(name: Self::Params) -> anyhow::Result<Self> {
-        Ok(Self { name })
+    async fn new(message_kind: Self::Params) -> anyhow::Result<Self> {
+        Ok(Self { message_kind })
     }
 }
 
@@ -621,7 +621,7 @@ impl AsyncEndpointInvocationHandler for AsyncEndpointTask {
         result?;
 
         // Stop this actor now that its job is done.
-        tracing::debug!("Finished processing method '{}'", self.name);
+        tracing::debug!("Finished processing PythonMessage '{:?}'", self.message_kind);
         cx.stop()?;
         Ok(())
     }
