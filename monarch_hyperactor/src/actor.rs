@@ -621,7 +621,10 @@ impl AsyncEndpointInvocationHandler for AsyncEndpointTask {
         result?;
 
         // Stop this actor now that its job is done.
-        tracing::debug!("Finished processing PythonMessage '{:?}'", self.message_kind);
+        tracing::debug!(
+            "Finished processing PythonMessage '{:?}'",
+            self.message_kind
+        );
         cx.stop()?;
         Ok(())
     }
