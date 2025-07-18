@@ -735,7 +735,7 @@ async fn handle_async_endpoint_panic(
             Err(_) => pending().await,
         }
     };
-    let future = task.take().await;
+    let future = task.take();
     let result: anyhow::Result<(), SerializablePyErr> = tokio::select! {
         result = future => {
             match result {
