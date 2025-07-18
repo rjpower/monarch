@@ -17,13 +17,20 @@ use hyperactor_mesh::Mesh;
 use hyperactor_mesh::RootActorMesh;
 use hyperactor_mesh::actor_mesh::ActorMesh;
 use hyperactor_mesh::actor_mesh::ActorSupervisionEvents;
+use hyperactor_mesh::reference::ActorMeshRef;
 use hyperactor_mesh::shared_cell::SharedCell;
 use hyperactor_mesh::shared_cell::SharedCellRef;
 use pyo3::exceptions::PyEOFError;
 use pyo3::exceptions::PyException;
+use pyo3::exceptions::PyNotImplementedError;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
+use pyo3::types::PyDict;
+use pyo3::types::PySlice;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::actor::PythonActor;
@@ -92,7 +99,12 @@ impl PythonActorMesh {
 
             // Ignore the sender error when there is no receiver, which happens when there
             // is no active requests to this mesh.
-            let _ = user_sender.send(event);
+            let _ = user_sender.send(event.clone());
+
+            if event.is_none() {
+                // The mesh is stopped, so we can stop the monitor.
+                break;
+            }
         }
     }
 
@@ -100,6 +112,14 @@ impl PythonActorMesh {
         self.inner
             .borrow()
             .map_err(|_| PyRuntimeError::new_err("`PythonActorMesh` has already been stopped"))
+    }
+
+    fn pickling_err(&self) -> PyErr {
+        PyErr::new::<PyNotImplementedError, _>(
+            "PythonActorMesh cannot be pickled. If applicable, use bind() \
+            to get a PythonActorMeshRef, and use that instead."
+                .to_string(),
+        )
     }
 }
 
@@ -121,6 +141,11 @@ impl PythonActorMesh {
             .cast(selection.inner().clone(), message.clone())
             .map_err(|err| PyException::new_err(err.to_string()))?;
         Ok(())
+    }
+
+    fn bind(&self) -> PyResult<PythonActorMeshRef> {
+        let mesh = self.try_inner()?;
+        Ok(PythonActorMeshRef { inner: mesh.bind() })
     }
 
     fn get_supervision_event(&self) -> PyResult<Option<PyActorSupervisionEvent>> {
@@ -160,6 +185,11 @@ impl PythonActorMesh {
         Ok(monitor_instance.into_py(py))
     }
 
+    #[pyo3(signature = (**kwargs))]
+    fn slice(&self, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PythonActorMeshRef> {
+        self.bind()?.slice(kwargs)
+    }
+
     #[getter]
     pub fn client(&self) -> PyMailbox {
         self.client.clone()
@@ -168,6 +198,133 @@ impl PythonActorMesh {
     #[getter]
     fn shape(&self) -> PyResult<PyShape> {
         Ok(PyShape::from(self.try_inner()?.shape().clone()))
+    }
+
+    // Override the pickling methods to provide a meaningful error message.
+    fn __reduce__(&self) -> PyResult<()> {
+        Err(self.pickling_err())
+    }
+
+    fn __reduce_ex__(&self, _proto: u8) -> PyResult<()> {
+        Err(self.pickling_err())
+    }
+}
+
+#[pyclass(
+    frozen,
+    name = "PythonActorMeshRef",
+    module = "monarch._rust_bindings.monarch_hyperactor.actor_mesh"
+)]
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct PythonActorMeshRef {
+    inner: ActorMeshRef<PythonActor>,
+}
+
+#[pymethods]
+impl PythonActorMeshRef {
+    fn cast(
+        &self,
+        client: &PyMailbox,
+        selection: &PySelection,
+        message: &PythonMessage,
+    ) -> PyResult<()> {
+        self.inner
+            .cast(&client.inner, selection.inner().clone(), message.clone())
+            .map_err(|err| PyException::new_err(err.to_string()))?;
+        Ok(())
+    }
+
+    #[pyo3(signature = (**kwargs))]
+    fn slice(&self, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        // When the input type is `int`, convert it into `ndslice::Range`.
+        fn convert_int(index: isize) -> PyResult<ndslice::Range> {
+            if index < 0 {
+                return Err(PyException::new_err(format!(
+                    "does not support negative index in selection: {}",
+                    index
+                )));
+            }
+            Ok(ndslice::Range::from(index as usize))
+        }
+
+        // When the input type is `slice`, convert it into `ndslice::Range`.
+        fn convert_py_slice<'py>(s: &Bound<'py, PySlice>) -> PyResult<ndslice::Range> {
+            fn get_attr<'py>(s: &Bound<'py, PySlice>, attr: &str) -> PyResult<Option<isize>> {
+                let v = s.getattr(attr)?.extract::<Option<isize>>()?;
+                if v.is_some() && v.unwrap() < 0 {
+                    return Err(PyException::new_err(format!(
+                        "does not support negative {} in slice: {}",
+                        attr,
+                        v.unwrap(),
+                    )));
+                }
+                Ok(v)
+            }
+
+            let start = get_attr(s, "start")?.unwrap_or(0);
+            let stop: Option<isize> = get_attr(s, "stop")?;
+            let step = get_attr(s, "step")?.unwrap_or(1);
+            Ok(ndslice::Range(
+                start as usize,
+                stop.map(|s| s as usize),
+                step as usize,
+            ))
+        }
+
+        if kwargs.is_none() || kwargs.unwrap().is_empty() {
+            return Err(PyException::new_err("selection cannot be empty"));
+        }
+
+        let mut sliced = self.inner.clone();
+
+        for entry in kwargs.unwrap().items() {
+            let label = entry.get_item(0)?.str()?;
+            let label_str = label.to_str()?;
+
+            let value = entry.get_item(1)?;
+
+            let range = if let Ok(index) = value.extract::<isize>() {
+                convert_int(index)?
+            } else if let Ok(s) = value.downcast::<PySlice>() {
+                convert_py_slice(s)?
+            } else {
+                return Err(PyException::new_err(
+                    "selection only supports type int or slice",
+                ));
+            };
+            sliced = sliced.select(label_str, range).map_err(|err| {
+                PyException::new_err(format!(
+                    "failed to select label {}; error is: {}",
+                    label_str, err
+                ))
+            })?;
+        }
+
+        Ok(Self { inner: sliced })
+    }
+
+    #[getter]
+    fn shape(&self) -> PyShape {
+        PyShape::from(self.inner.shape().clone())
+    }
+
+    #[staticmethod]
+    fn from_bytes(bytes: &Bound<'_, PyBytes>) -> PyResult<Self> {
+        bincode::deserialize(bytes.as_bytes())
+            .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))
+    }
+
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, (Bound<'py, PyBytes>,))> {
+        let bytes = bincode::serialize(&*slf.borrow())
+            .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
+        let py_bytes = PyBytes::new(slf.py(), &bytes);
+        Ok((slf.as_any().getattr("from_bytes")?, (py_bytes,)))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self)
     }
 }
 
@@ -379,6 +536,7 @@ impl From<ActorSupervisionEvent> for PyActorSupervisionEvent {
 
 pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     hyperactor_mod.add_class::<PythonActorMesh>()?;
+    hyperactor_mod.add_class::<PythonActorMeshRef>()?;
     hyperactor_mod.add_class::<PyActorMeshMonitor>()?;
     hyperactor_mod.add_class::<MonitoredPythonPortReceiver>()?;
     hyperactor_mod.add_class::<MonitoredPythonOncePortReceiver>()?;

@@ -17,13 +17,64 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._rust_bindings.monarch_hyperactor.selection import Selection
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape
+from typing_extensions import Self
+
+@final
+class PythonActorMeshRef:
+    """
+    A reference to a remote actor mesh over which PythonMessages can be sent.
+    """
+
+    def cast(
+        self, mailbox: Mailbox, selection: Selection, message: PythonMessage
+    ) -> None:
+        """Cast a message to the selected actors in the mesh."""
+        ...
+
+    def slice(self, **kwargs: int | slice[int | None, int | None, int | None]) -> Self:
+        """
+        See PythonActorMeshRef.slice for documentation.
+        """
+        ...
+
+    @property
+    def shape(self) -> Shape:
+        """
+        The Shape object that describes how the rank of an actor
+        retrieved with get corresponds to coordinates in the
+        mesh.
+        """
+        ...
 
 @final
 class PythonActorMesh:
+    def bind(self) -> PythonActorMeshRef:
+        """
+        Bind this actor mesh. The returned mesh ref can be used to reach the
+        mesh remotely.
+        """
+        ...
+
     def cast(self, selection: Selection, message: PythonMessage) -> None:
         """
         Cast a message to the selected actors in the mesh.
         """
+        ...
+
+    def slice(
+        self, **kwargs: int | slice[int | None, int | None, int | None]
+    ) -> PythonActorMeshRef:
+        """
+        Slice the mesh into a new mesh ref with the given selection. The reason
+        it returns a mesh ref, rather than the mesh object itself, is because
+        sliced mesh is a view of the original mesh, and does not own the mesh's
+        resources.
+
+        Arguments:
+        - `kwargs`: argument name is the label, and argument value is how to
+          slice the mesh along the dimension of that label.
+        """
+        ...
 
     def get_supervision_event(self) -> ActorSupervisionEvent | None:
         """
