@@ -353,8 +353,8 @@ class DebugClient(Actor):
             )
         table_info = sorted(session_info, key=lambda r: r[0])
 
-        # TODO
         from tabulate import tabulate
+
         print(
             tabulate(
                 table_info,
