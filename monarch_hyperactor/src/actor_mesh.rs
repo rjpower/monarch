@@ -43,7 +43,6 @@ use crate::mailbox::PythonOncePortReceiver;
 use crate::mailbox::PythonPortReceiver;
 use crate::proc::PyActorId;
 use crate::proc_mesh::Keepalive;
-use crate::runtime::signal_safe_block_on;
 use crate::selection::PySelection;
 use crate::shape::PyShape;
 use crate::supervision::SupervisionError;

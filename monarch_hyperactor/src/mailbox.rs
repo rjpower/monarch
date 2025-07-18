@@ -6,11 +6,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::future::Future;
 use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::ops::Deref;
 use std::sync::Arc;
 
 use hyperactor::Mailbox;
@@ -46,7 +44,6 @@ use pyo3::types::PyTuple;
 use pyo3::types::PyType;
 use serde::Deserialize;
 use serde::Serialize;
-use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::actor::PyPythonTask;
 use crate::actor::PythonMessage;
