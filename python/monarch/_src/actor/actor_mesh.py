@@ -15,7 +15,6 @@ import inspect
 import itertools
 import logging
 import random
-import threading
 import traceback
 
 from abc import ABC, abstractmethod
