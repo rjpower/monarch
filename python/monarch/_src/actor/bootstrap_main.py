@@ -11,9 +11,9 @@ This is the main function for the boostrapping a new process using a ProcessAllo
 import asyncio
 import importlib.resources
 import logging
+import multiprocessing
 import os
 import sys
-import multiprocessing
 
 # Import torch to avoid import-time races if a spawned actor tries to import torch.
 try:
