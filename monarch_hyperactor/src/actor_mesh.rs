@@ -20,7 +20,6 @@ use hyperactor_mesh::actor_mesh::ActorSupervisionEvents;
 use hyperactor_mesh::reference::ActorMeshRef;
 use hyperactor_mesh::shared_cell::SharedCell;
 use hyperactor_mesh::shared_cell::SharedCellRef;
-use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyEOFError;
 use pyo3::exceptions::PyException;
 use pyo3::exceptions::PyNotImplementedError;
