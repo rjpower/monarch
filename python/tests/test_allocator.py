@@ -204,7 +204,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
 
             self.assert_computed_world_size(values, world_size)
 
-    async def test_stop_proc_mesh_blocking(self) -> None:
+    def test_stop_proc_mesh_blocking(self) -> None:
         spec = AllocSpec(AllocConstraints(), host=2, gpu=4)
         with remote_process_allocator() as host1, remote_process_allocator() as host2:
             allocator = RemoteAllocator(
@@ -212,8 +212,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 initializer=StaticRemoteAllocInitializer(host1, host2),
                 heartbeat_interval=_100_MILLISECONDS,
             )
-            alloc = await allocator.allocate(spec)
-            proc_mesh = await ProcMesh.from_alloc(alloc)
+            alloc = allocator.allocate(spec).get()
+            proc_mesh = ProcMesh.from_alloc(alloc).get()
             actor = proc_mesh.spawn("test_actor", TestActor).get()
             proc_mesh.stop().get()
             with self.assertRaises(
