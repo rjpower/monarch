@@ -644,7 +644,7 @@ impl fmt::Debug for PythonTask {
     name = "PythonTask",
     module = "monarch._rust_bindings.monarch_hyperactor.actor"
 )]
-pub(crate) struct PyPythonTask {
+pub struct PyPythonTask {
     inner: Option<PythonTask>,
 }
 
@@ -664,8 +664,22 @@ struct JustStopWithValueIterator {
 
 #[pymethods]
 impl JustStopWithValueIterator {
-    fn __next__<'py>(&mut self) -> PyResult<PyObject> {
+    fn __next__(&mut self) -> PyResult<PyObject> {
         Err(PyStopIteration::new_err(self.value.take().unwrap()))
+    }
+}
+
+impl PyPythonTask {
+    pub fn new<F, T>(fut: F) -> PyResult<Self>
+    where
+        F: Future<Output = PyResult<T>> + Send + 'static,
+        T: for<'py> IntoPyObject<'py>,
+    {
+        Ok(PythonTask::new(async {
+            fut.await
+                .and_then(|t| Python::with_gil(|py| t.into_py_any(py)))
+        })
+        .into())
     }
 }
 
