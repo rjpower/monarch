@@ -25,7 +25,6 @@ from monarch._src.actor.actor_mesh import (
 )
 from monarch._src.actor.pdb_wrapper import DebuggerWrite, PdbWrapper
 from monarch._src.actor.sync_state import fake_sync_state
-from tabulate import tabulate
 
 
 logger = logging.getLogger(__name__)
@@ -354,6 +353,9 @@ class DebugClient(Actor):
                 )
             )
         table_info = sorted(session_info, key=lambda r: r[0])
+
+        from tabulate import tabulate
+
         print(
             tabulate(
                 table_info,
