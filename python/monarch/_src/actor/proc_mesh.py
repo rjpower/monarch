@@ -139,7 +139,7 @@ class ProcMesh(MeshTrait):
     def _new_with_shape(self, shape: Shape) -> "ProcMesh":
         device_mesh = (
             None
-            if self._device_mesh is None
+            if self._maybe_device_mesh is None
             else self._device_mesh._new_with_shape(shape)
         )
         return ProcMesh(self._proc_mesh, _mock_shape=shape, _device_mesh=device_mesh)
@@ -235,11 +235,12 @@ class ProcMesh(MeshTrait):
             self._code_sync_client = CodeSyncMeshClient.spawn_blocking(
                 proc_mesh=self._proc_mesh,
             )
-            # TODO(agallagher): Merge this into the `CodeSyncMeshClient` actor.
-            self._auto_reload_actor = await self._spawn_nonblocking(
-                "auto_reload",
-                AutoReloadActor,
-            )
+            if auto_reload:
+                # TODO(agallagher): Merge this into the `CodeSyncMeshClient` actor.
+                self._auto_reload_actor = await self._spawn_nonblocking(
+                    "auto_reload",
+                    AutoReloadActor,
+                )
         # TODO(agallagher): We need some way to configure and pass this
         # in -- right now we're assuming the `gpu` dimension, which isn't
         # correct.
