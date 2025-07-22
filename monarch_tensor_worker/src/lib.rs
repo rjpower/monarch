@@ -176,7 +176,7 @@ pub struct WorkerActor {
     comm: Option<ActorHandle<NcclCommActor>>,
     controller_actor: ActorRef<ControllerActor>,
     /// Pipes created for the worker.
-    pipes: HashMap<Ref, Result<ActorHandle<PipeActor>, Arc<CallFunctionError>>>,
+    pipes: HashMap<Ref, ActorHandle<PipeActor>>,
     /// Remember the process groups "created" via `CreateRemoteProcessGroup` for
     /// subsequent `CallFunction` calls, as this is where the actual allocation
     /// will happen.
@@ -663,41 +663,32 @@ impl WorkerMessageHandler for WorkerActor {
         args: Vec<WireValue>,
         kwargs: HashMap<String, WireValue>,
     ) -> Result<()> {
-        self.pipes.insert(
-            result,
-            // We never explicitly fail.  In the event we see an error creating
-            // the pipe, store the error instead.
-            async {
-                let args: Vec<PyTree<RValue>> = args
-                    .into_iter()
-                    .map(|object| RValue::PyObject(object.into_py_object().unwrap()).into())
-                    .collect();
-                let kwargs: HashMap<_, PyTree<RValue>> = kwargs
-                    .into_iter()
-                    .map(|(k, object)| {
-                        (k, RValue::PyObject(object.into_py_object().unwrap()).into())
-                    })
-                    .collect();
-                let device_mesh = self.device_meshes.get(&device_mesh).ok_or_else(|| {
-                    CallFunctionError::Error(anyhow::anyhow!("ref not found: {}", device_mesh))
-                })?;
-                let pipe = PipeActor::spawn(
-                    cx,
-                    PipeParams {
-                        function,
-                        max_messages,
-                        ranks: device_mesh.0.ranks(),
-                        sizes: device_mesh.0.sizes(),
-                        args,
-                        kwargs,
-                    },
-                )
-                .await?;
-                Ok(pipe)
-            }
-            .await
-            .map_err(Arc::new),
-        );
+        let args: Vec<PyTree<RValue>> = args
+            .into_iter()
+            .map(|object| RValue::PyObject(object.into_py_object().unwrap()).into())
+            .collect();
+        let kwargs: HashMap<_, PyTree<RValue>> = kwargs
+            .into_iter()
+            .map(|(k, object)| (k, RValue::PyObject(object.into_py_object().unwrap()).into()))
+            .collect();
+        let device_mesh = self.device_meshes.get(&device_mesh).ok_or_else(|| {
+            CallFunctionError::Error(anyhow::anyhow!("ref not found: {}", device_mesh))
+        })?;
+        // TODO(agallagher): Fix error prop. (When pipe is read from the pipes dict if it had an error it should cause a dependent error in send_value not an actor error as it does now)
+        let pipe = PipeActor::spawn(
+            cx,
+            PipeParams {
+                function,
+                max_messages,
+                ranks: device_mesh.0.ranks(),
+                sizes: device_mesh.0.sizes(),
+                args,
+                kwargs,
+            },
+        )
+        .await?;
+
+        self.pipes.insert(result, pipe);
         Ok(())
     }
 
@@ -828,19 +819,16 @@ impl WorkerMessageHandler for WorkerActor {
                 .collect()
         };
 
-        // Resolve the pipe, if a ref to it is provided.
-        let pipe = destination
-            .map(|pipe| {
-                self.pipes
-                    .get(&pipe)
-                    .ok_or_else(|| anyhow::anyhow!("invalid pipe id: {:#?}", pipe))
-            })
-            // TODO(agallagher): Fix error prop.
-            .transpose()?
-            .map(|r| r.as_ref().map_err(|e| e.clone()))
-            .transpose()?
-            .map(|pipe| pipe.port());
-
+        let pipe = if let Some(destination) = destination {
+            let pipe = self
+                .pipes
+                .get(&destination)
+                .ok_or_else(|| anyhow::anyhow!("invalid pipe id: {:#?}", destination))?
+                .port();
+            Some(pipe)
+        } else {
+            None
+        };
         // Resolve the value on the stream, then send the value to the pipe if provided,
         // or back to the controller if not.
         stream
@@ -990,7 +978,7 @@ impl WorkerMessageHandler for WorkerActor {
             .pipes
             .get(&pipe)
             .ok_or_else(|| anyhow::anyhow!("ref not found: {}", pipe))?;
-        let pipe = pipe.as_ref().map(|p| p.port()).map_err(|x| x.clone());
+        let pipe = pipe.port();
         // Resolve the stream.
         let stream = self.try_get_stream(stream)?;
         // Push result into the stream.
