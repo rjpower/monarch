@@ -23,7 +23,6 @@ from typing import (
     Optional,
     overload,
     ParamSpec,
-    Protocol,
     Sequence,
     Tuple,
     TYPE_CHECKING,
