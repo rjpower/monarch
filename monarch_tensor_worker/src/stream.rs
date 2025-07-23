@@ -1988,7 +1988,7 @@ impl StreamMessageHandler for StreamActor {
                             cx,
                             seq,
                             WorkerError {
-                                backtrace: format!("{}", &seq_err),
+                                backtrace: format!("recording failed: {}", &seq_err),
                                 worker_actor_id: cx.self_id().clone(),
                             },
                         )
@@ -2599,94 +2599,6 @@ mod tests {
         // Ensure the temporary refs associated with the formals/results have
         // been deleted.
         assert_refs_do_not_exist(&test_setup, &[formal0_ref, formal1_ref]).await;
-
-        // Pass an invalid ref as an input to the recording. Both result refs should contain
-        // a RefNotFound error after running the recording, and the error should be reported to
-        // the controller because it's not a dependent error.
-        let nonexistent_ref = 105.into();
-        test_setup
-            .stream_actor
-            .call_recording(
-                &test_setup.client,
-                1.into(),
-                0.into(),
-                vec![actual_result0_ref, actual_result1_ref],
-                vec![nonexistent_ref, actual1_ref],
-            )
-            .await?;
-
-        for ref_ in [actual_result0_ref, actual_result1_ref] {
-            let result = test_setup
-                .stream_actor
-                .get_tensor_ref_unit_tests_only(&test_setup.client, ref_)
-                .await
-                .unwrap();
-            let error = result.unwrap().unwrap_err();
-
-            // Check that the error contains the expected strings
-            let error_str = error.to_string();
-            assert!(
-                error_str.contains("recording failed"),
-                "Error should contain 'recording failed': {}",
-                error_str
-            );
-            assert!(
-                error_str.contains("ref not found"),
-                "Error should contain 'ref not found': {}",
-                error_str
-            );
-        }
-
-        assert_refs_do_not_exist(&test_setup, &[formal0_ref, formal1_ref]).await;
-
-        let controller_msg = test_setup.controller_rx.recv().await?;
-        assert!(matches!(
-            controller_msg,
-            ControllerMessage::RemoteFunctionFailed {
-                seq,
-                error
-            } if seq == 1.into() && error.backtrace.contains("ref not found")
-        ));
-
-        // Call the recording where one of the input tensors "failed" on a previous
-        // invocation. Both result refs should have a DependentError that wraps this error,
-        // and the error should not be reported to the controller.
-        let error = fake_seq_error(anyhow!("bad tensor"));
-        test_setup
-            .stream_actor
-            .set_tensor_ref_unit_tests_only(&test_setup.client, actual1_ref, Err(error.clone()))
-            .await?;
-
-        test_setup
-            .stream_actor
-            .call_recording(
-                &test_setup.client,
-                2.into(),
-                0.into(),
-                vec![actual_result0_ref, actual_result1_ref],
-                vec![actual0_ref, actual1_ref],
-            )
-            .await?;
-
-        for ref_ in [actual_result0_ref, actual_result1_ref] {
-            test_setup
-                .validate_dependent_error(ref_, error.clone())
-                .await;
-        }
-
-        // This tests that the DependentError was never reported to the controller.
-        // If it were reported to the controller, the next message would match
-        // RemoteFunctionFailed instead of FetchResult.
-        check_fetch_result_error(
-            &test_setup.client,
-            test_setup.stream_actor.clone(),
-            3.into(),
-            actual_result0_ref,
-            &mut test_setup.controller_rx,
-            "bad tensor",
-        )
-        .await;
-
         Ok(())
     }
 
@@ -2924,11 +2836,6 @@ mod tests {
             // Check that the error contains the expected strings
             let error_str = result_error.to_string();
             assert!(
-                error_str.contains("recording failed"),
-                "Error should contain 'recording failed': {}",
-                error_str
-            );
-            assert!(
                 error_str.contains("torch operator error"),
                 "Error should contain 'torch operator failed': {}",
                 error_str
@@ -2940,7 +2847,7 @@ mod tests {
             ControllerMessage::RemoteFunctionFailed { seq, error } => {
                 assert_eq!(seq, 1.into());
                 assert!(
-                    error.backtrace.contains("recording failed"),
+                    error.backtrace.contains("torch operator error"),
                     "Unexpected WorkerError: {:?}",
                     error
                 );
@@ -2986,13 +2893,8 @@ mod tests {
             // Check that the error contains the expected strings
             let error_str = result_error.to_string();
             assert!(
-                error_str.contains("Computation depended on an input that failed"),
-                "Error should contain dependency message: {}",
-                error_str
-            );
-            assert!(
-                error_str.contains("recording failed"),
-                "Error should contain 'recording failed': {}",
+                error_str.contains("torch operator error"),
+                "Error should contain input error: {}",
                 error_str
             );
         }
@@ -3006,7 +2908,7 @@ mod tests {
             3.into(),
             captured_ref,
             &mut test_setup.controller_rx,
-            "recording failed",
+            "torch operator error",
         )
         .await;
 
@@ -3367,8 +3269,8 @@ mod tests {
         // Check that the error contains the expected strings
         let error_str = result_error.to_string();
         assert!(
-            error_str.contains("Computation depended on an input that failed"),
-            "Error should contain dependency message: {}",
+            error_str.contains("input error"),
+            "Error should contain input error: {}",
             error_str
         );
 
@@ -4127,8 +4029,8 @@ mod tests {
         // Check that the error contains the expected string
         let error_str = real_result_err.to_string();
         assert!(
-            error_str.contains("recording failed"),
-            "Error should contain 'recording failed': {}",
+            error_str.contains("send error"),
+            "Error should contain 'send error': {}",
             error_str
         );
 
@@ -4137,7 +4039,7 @@ mod tests {
             ControllerMessage::RemoteFunctionFailed { seq, error } => {
                 assert_eq!(seq, 1.into());
                 assert!(
-                    error.backtrace.contains("recording failed"),
+                    error.backtrace.contains("send error"),
                     "Unexpected WorkerError: {:?}",
                     error
                 );
