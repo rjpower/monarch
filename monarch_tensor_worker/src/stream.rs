@@ -1766,7 +1766,7 @@ impl StreamMessageHandler for StreamActor {
         }
 
         self.try_define(cx, seq, results, &vec![], async |self| {
-            let pipe = pipe.map_err(|e| CallFunctionError::DependentError(e))?;
+            let pipe = pipe.map_err(CallFunctionError::DependentError)?;
             let (tx, rx) = cx.open_once_port();
             pipe.send(PipeMessage::RecvValue(tx))
                 .map_err(anyhow::Error::from)
@@ -2145,7 +2145,7 @@ impl StreamMessageHandler for StreamActor {
 mod tests {
     use hyperactor::actor::ActorStatus;
     use hyperactor::cap;
-    use hyperactor::id;
+    
     use hyperactor::supervision::ActorSupervisionEvent;
     use monarch_messages::controller::ControllerMessage;
     use monarch_messages::worker::StreamCreationMode;
