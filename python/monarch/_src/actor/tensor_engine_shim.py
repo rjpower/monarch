@@ -48,6 +48,10 @@ def actor_send(
 ) -> None: ...
 
 
+@shim(module="monarch.mesh_controller")
+def actor_rref(endpoint, args_kwargs_tuple: bytes, refs: Sequence[Any]): ...
+
+
 @shim(module="monarch.common.remote")
 def _cached_propagation(_cache, rfunction: "Endpoint", args, kwargs) -> Any: ...
 

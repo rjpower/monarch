@@ -33,7 +33,7 @@ from monarch._src.actor.future import Future
 from monarch._src.actor.tensor_engine_shim import _cached_propagation, fake_call
 
 if TYPE_CHECKING:
-    from monarch._src.actor.actor_mesh import Port, PortTuple, ValueMesh
+    from monarch._src.actor.actor_mesh import ActorMeshRef, Port, PortTuple, ValueMesh
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -173,11 +173,17 @@ class Endpoint(ABC, Generic[P, R]):
         # pyre-ignore
         send(self, args, kwargs)
 
+    @abstractmethod
+    def _rref(self, args, kwargs) -> Any: ...
+
+    def rref(self, *args: P.args, **kwargs: P.kwargs) -> R:
+        return self._rref(args, kwargs)
+
     def _propagate(self, args, kwargs, fake_args, fake_kwargs):
         if self._propagator_arg is None or self._propagator_arg == "cached":
             if self._cache is None:
                 self._cache = {}
-            return _cached_propagation(self._cache, self._resolvable, args, kwargs)
+            return _cached_propagation(self._cache, self, args, kwargs)
         elif self._propagator_arg == "inspect":
             return None
         elif self._propagator_arg == "mocked":
@@ -220,13 +226,34 @@ class EndpointProperty(Generic[P, R]):
         return cast(Endpoint[P, R], self)
 
 
+class NotAnEndpoint:
+    """
+    Used as the dynamic value of functions on an ActorMeshRef that were not marked as endpoints.
+    This is used both to give a better error message (since we cannot prevent the type system from thinking they are methods),
+    and to provide the oppurtunity for someone to do endpoint(x.foo) on something that wasn't marked as an endpoint.
+    """
+
+    def __init__(self, ref: "ActorMeshRef", name: str):
+        self._ref = ref
+        self._name = name
+
+    def __call__(self, *args, **kwargs) -> None:
+        raise RuntimeError(
+            f"Actor {self._ref._class}.{self._name} is not annotated as an endpoint. To call it as one, add a @endpoint decorator to it, or directly wrap it in one as_endpoint(obj.method).call(...)"
+        )
+
+
 # This can't just be Callable because otherwise we are not
 # allowed to use type arguments in the return value.
 class EndpointIfy:
     @overload
-    def __call__(self, function: Callable[P, Awaitable[R]]) -> Endpoint[P, R]: ...
+    def __call__(
+        self, function: Callable[Concatenate[Any, P], Awaitable[R]]
+    ) -> Endpoint[P, R]: ...
     @overload
-    def __call__(self, function: Callable[P, R]) -> Endpoint[P, R]: ...
+    def __call__(
+        self, function: Callable[Concatenate[Any, P], R]
+    ) -> Endpoint[P, R]: ...
 
     def __call__(self, function: Any):
         pass

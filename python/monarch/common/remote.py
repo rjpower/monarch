@@ -157,7 +157,7 @@ class Remote(Generic[P, R], Endpoint[P, R]):
     def _maybe_resolvable(self):
         return None if self._remote_impl is None else self._resolvable
 
-    def rref(self, *args: P.args, **kwargs: P.kwargs) -> R:
+    def _rref(self, args, kwargs):
         return dtensor_dispatch(
             self._resolvable,
             self._propagate,
