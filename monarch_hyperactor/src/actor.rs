@@ -259,7 +259,7 @@ impl PythonMessage {
     }
 
     async fn resolve_indirect_call<T: Actor>(
-        mut self,
+        self,
         cx: &Context<'_, T>,
     ) -> anyhow::Result<ResolvedCallMethod> {
         match self.kind {
