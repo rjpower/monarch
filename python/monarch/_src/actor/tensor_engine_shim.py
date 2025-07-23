@@ -33,7 +33,6 @@ def shim(fn=None, *, module=None):
         nonlocal impl
         if impl is None:
             impl = getattr(importlib.import_module(module), name)
-            print(module, name, impl)
         return impl(*args, **kwargs)
 
     return wrap
