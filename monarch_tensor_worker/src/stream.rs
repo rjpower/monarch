@@ -657,7 +657,7 @@ impl StreamActor {
         match error {
             CallFunctionError::DependentError(root) => Ok(root),
             CallFunctionError::Error(e) => {
-                if !self.active_recording.is_some() {
+                if self.active_recording.is_none() {
                     let worker_error = WorkerError {
                         backtrace: format!("{e}"),
                         worker_actor_id: cx.self_id().clone(),
@@ -2089,7 +2089,6 @@ impl StreamMessageHandler for StreamActor {
 mod tests {
     use hyperactor::actor::ActorStatus;
     use hyperactor::cap;
-    use hyperactor::id;
     use hyperactor::supervision::ActorSupervisionEvent;
     use monarch_messages::controller::ControllerMessage;
     use monarch_messages::worker::StreamCreationMode;
