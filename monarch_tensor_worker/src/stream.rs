@@ -2145,7 +2145,6 @@ impl StreamMessageHandler for StreamActor {
 mod tests {
     use hyperactor::actor::ActorStatus;
     use hyperactor::cap;
-    
     use hyperactor::supervision::ActorSupervisionEvent;
     use monarch_messages::controller::ControllerMessage;
     use monarch_messages::worker::StreamCreationMode;
