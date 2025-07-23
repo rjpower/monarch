@@ -681,7 +681,7 @@ impl StreamActor {
         match error {
             CallFunctionError::DependentError(root) => Ok(root),
             CallFunctionError::Error(e) => {
-                if !self.active_recording.is_some() {
+                if self.active_recording.is_none() {
                     let worker_error = WorkerError {
                         backtrace: format!("{e}"),
                         worker_actor_id: cx.self_id().clone(),
@@ -1045,7 +1045,7 @@ impl StreamActor {
                         )
                     })?;
                     pickle_python_result(py, python_result, worker_actor_id)
-                        .map_err(|e| CallFunctionError::Error(e))
+                        .map_err(CallFunctionError::Error)
                 })?;
             let ser = Serialized::serialize(&python_message).unwrap();
             self_
@@ -2102,7 +2102,6 @@ impl StreamMessageHandler for StreamActor {
 mod tests {
     use hyperactor::actor::ActorStatus;
     use hyperactor::cap;
-    use hyperactor::id;
     use hyperactor::supervision::ActorSupervisionEvent;
     use monarch_messages::controller::ControllerMessage;
     use monarch_messages::worker::StreamCreationMode;

@@ -33,7 +33,14 @@ from monarch._src.actor.future import Future
 from monarch._src.actor.tensor_engine_shim import _cached_propagation, fake_call
 
 if TYPE_CHECKING:
-    from monarch._src.actor.actor_mesh import ActorMeshRef, Port, PortTuple, ValueMesh
+    from monarch._src.actor.actor_mesh import (
+        ActorMeshRef,
+        HyPortReceiver,
+        OncePortReceiver,
+        Port,
+        PortTuple,
+        ValueMesh,
+    )
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -91,6 +98,9 @@ class Endpoint(ABC, Generic[P, R]):
         Something to use in InputChecker to represent calling this thingy.
         """
         pass
+
+    def _supervise(self, r: "HyPortReceiver | OncePortReceiver") -> Any:
+        return r
 
     # the following are all 'adverbs' or different ways to handle the
     # return values of this endpoint. Adverbs should only ever take *args, **kwargs
