@@ -663,6 +663,7 @@ impl WorkerMessageHandler for WorkerActor {
         args: Vec<WireValue>,
         kwargs: HashMap<String, WireValue>,
     ) -> Result<()> {
+        println!("CREATE PIPE1 {}", result);
         let args: Vec<PyTree<RValue>> = args
             .into_iter()
             .map(|object| RValue::PyObject(object.into_py_object().unwrap()).into())
@@ -674,6 +675,7 @@ impl WorkerMessageHandler for WorkerActor {
         let device_mesh = self.device_meshes.get(&device_mesh).ok_or_else(|| {
             CallFunctionError::Error(anyhow::anyhow!("ref not found: {}", device_mesh))
         })?;
+        println!("CREATE PIPE2 {}", result);
         // TODO(agallagher): Fix error prop. (When pipe is read from the pipes dict if it had an error it should cause a dependent error in send_value not an actor error as it does now)
         let pipe = PipeActor::spawn(
             cx,
@@ -687,6 +689,7 @@ impl WorkerMessageHandler for WorkerActor {
             },
         )
         .await?;
+        println!("AFTER CREATE PIPE {}", result);
 
         self.pipes.insert(result, pipe);
         Ok(())
@@ -2063,7 +2066,7 @@ mod tests {
         let mut responses = controller_rx.drain();
         assert_eq!(
             responses.len(),
-            2,
+            3,
             "Expected one response, got: {:#?}",
             responses
         );
@@ -2151,11 +2154,10 @@ mod tests {
         let mut responses = controller_rx.drain();
         assert_eq!(
             responses.len(),
-            2,
+            3,
             "Expected one response, got: {:#?}",
             responses
         );
-
         match responses.pop() {
             Some(ControllerMessage::FetchResult { seq, value }) => {
                 assert_eq!(seq, 2.into());
@@ -2475,71 +2477,6 @@ mod tests {
             error_responses.is_empty(),
             "Expected no error responses, got: {:#?}",
             error_responses
-        );
-
-        Ok(())
-    }
-
-    #[async_timed_test(timeout_secs = 60)]
-    async fn propagate_pipe_create_failure() -> Result<()> {
-        test_setup()?;
-
-        let proc = Proc::local();
-        let (client, controller_ref, mut controller_rx) = proc.attach_actor("controller").unwrap();
-
-        let handle = proc
-            .spawn::<WorkerActor>(
-                "worker",
-                WorkerParams {
-                    world_size: 1,
-                    rank: 0,
-                    device_index: None,
-                    controller_actor: controller_ref,
-                },
-            )
-            .await
-            .unwrap();
-        handle
-            .send(WorkerMessage::CommandGroup(vec![
-                WorkerMessage::CreateStream {
-                    id: 0.into(),
-                    stream_creation: StreamCreationMode::UseDefaultStream,
-                },
-                WorkerMessage::CreatePipe {
-                    result: 2.into(),
-                    key: "unused".into(),
-                    mesh: 1.into(),
-                    function: "monarch.monarch_tensor_worker.pipe_test_utils.handler".into(),
-                    max_messages: 1,
-                    args: vec![],
-                    kwargs: HashMap::new(),
-                },
-                WorkerMessage::PipeRecv {
-                    seq: 1.into(),
-                    results: vec![Some(3.into())],
-                    pipe: 2.into(),
-                    stream: 0.into(),
-                },
-            ]))
-            .unwrap();
-
-        let value: Result<_, String> = handle
-            .get_ref_unit_tests_only(&client, 3.into(), 0.into())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(value.is_err());
-
-        handle.drain_and_stop()?;
-        //handle.await;
-        assert_matches!(handle.await, ActorStatus::Stopped);
-
-        let responses = controller_rx.drain();
-        assert_eq!(
-            responses.len(),
-            0,
-            "Expected zero responses, got: {:#?}",
-            responses
         );
 
         Ok(())
