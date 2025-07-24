@@ -13,7 +13,6 @@ from typing import Any, Callable, cast, final, Generic, Iterable, TYPE_CHECKING,
 import monarch
 
 from monarch._rust_bindings.monarch_hyperactor.actor import (
-    MethodSpecifier,
     PanicFlag,
     PythonMessage,
     PythonMessageKind,
@@ -76,9 +75,7 @@ class Accumulator(Generic[S, U]):
     @property
     def initial_state(self) -> PythonMessage:
         return PythonMessage(
-            PythonMessageKind.CallMethod(
-                MethodSpecifier.ReturnsResponse(" @Accumulator.initial_state"), None
-            ),
+            PythonMessageKind.CallMethod(" @Accumulator.initial_state", None),
             pickle.dumps(self._initial_state),
         )
 
@@ -111,9 +108,7 @@ async def test_accumulator() -> None:
         port_ref.send(
             mailbox,
             PythonMessage(
-                PythonMessageKind.CallMethod(
-                    MethodSpecifier.ReturnsResponse("test_accumulator"), None
-                ),
+                PythonMessageKind.CallMethod("test_accumulator", None),
                 pickle.dumps(value),
             ),
         )
@@ -140,11 +135,11 @@ class MyActor:
         mailbox: Mailbox,
         rank: int,
         shape: Shape,
-        method: MethodSpecifier,
+        method: str,
         message: bytes,
         panic_flag: PanicFlag,
         local_state: Iterable[Any],
-        response_port: "PortProtocol[Any]",
+        response_port: "PortProtocol",
     ) -> None:
         response_port.send(pickle.loads(message))
         for i in range(100):
@@ -169,10 +164,7 @@ async def test_reducer() -> None:
     actor_mesh.cast(
         Selection.from_string("*"),
         PythonMessage(
-            PythonMessageKind.CallMethod(
-                MethodSpecifier.ReturnsResponse("echo"), port_ref
-            ),
-            pickle.dumps("start"),
+            PythonMessageKind.CallMethod("echo", port_ref), pickle.dumps("start")
         ),
     )
 
