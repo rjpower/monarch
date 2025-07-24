@@ -12,16 +12,15 @@ from monarch._src.actor.actor_mesh import (
     Accumulator,
     Actor,
     ActorError,
-    as_endpoint,
     current_actor_name,
     current_rank,
     current_size,
+    endpoint,
     Point,
     port,
     send,
     ValueMesh,
 )
-from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
 from monarch._src.actor.proc_mesh import (
     debug_client,
@@ -36,7 +35,6 @@ __all__ = [
     "Actor",
     "ActorError",
     "current_actor_name",
-    "as_endpoint",
     "current_rank",
     "current_size",
     "endpoint",
