@@ -17,7 +17,7 @@ import pytest
 
 import torch
 
-from monarch._src.actor.actor_mesh import Actor, current_rank, endpoint
+from monarch._src.actor.actor_mesh import Actor, current_rank
 from monarch._src.actor.debugger import (
     Attach,
     Cast,
@@ -29,6 +29,7 @@ from monarch._src.actor.debugger import (
     ListCommand,
     Quit,
 )
+from monarch._src.actor.endpoint import endpoint
 
 from monarch._src.actor.proc_mesh import proc_mesh
 
