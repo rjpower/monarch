@@ -352,7 +352,7 @@ _miss = 0
 _hit = 0
 
 
-def _cached_propagation(_cache, rfunction: Endpoint, args, kwargs):
+def _cached_propagation(_cache, rfunction: ResolvableFunction, args, kwargs):
     tensors, shape_key = hashable_tensor_flatten(args, kwargs)
     # pyre-ignore
     inputs_group = TensorGroup([t._fake for t in tensors])

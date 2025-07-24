@@ -193,7 +193,12 @@ class Endpoint(ABC, Generic[P, R]):
         if self._propagator_arg is None or self._propagator_arg == "cached":
             if self._cache is None:
                 self._cache = {}
-            return _cached_propagation(self._cache, self, args, kwargs)
+            resolvable = getattr(self, "_resolvable", None)
+            if resolvable is None:
+                raise NotImplementedError(
+                    "Cached propagation is not implemented for actor endpoints."
+                )
+            return _cached_propagation(self._cache, resolvable, args, kwargs)
         elif self._propagator_arg == "inspect":
             return None
         elif self._propagator_arg == "mocked":
