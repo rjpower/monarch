@@ -885,7 +885,9 @@ mod tests {
         );
         let message = PythonMessage {
             kind: PythonMessageKind::CallMethod {
-                name: "test".to_string(),
+                name: MethodSpecifier::ReturnsResponse {
+                    name: "test".to_string(),
+                },
                 response_port: Some(EitherPortRef::Unbounded(port_ref.clone().into())),
             },
             message: vec![1, 2, 3],
@@ -906,7 +908,9 @@ mod tests {
 
         let no_port_message = PythonMessage {
             kind: PythonMessageKind::CallMethod {
-                name: "test".to_string(),
+                name: MethodSpecifier::ReturnsResponse {
+                    name: "test".to_string(),
+                },
                 response_port: None,
             },
             ..message
