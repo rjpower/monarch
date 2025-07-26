@@ -8,8 +8,8 @@ edition = "2021"
 license = "BSD-3-Clause"
 
 [dependencies]
-tokio = { version = "1.45.0", features = ["full", "test-util", "tracing"] }
+tokio = { version = "1.46.1", features = ["full", "test-util", "tracing"] }
 
 [dev-dependencies]
 anyhow = "1.0.98"
-futures = { version = "0.3.30", features = ["async-await", "compat"] }
+futures = { version = "0.3.31", features = ["async-await", "compat"] }
