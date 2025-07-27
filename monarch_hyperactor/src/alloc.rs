@@ -38,7 +38,7 @@ use pyo3::types::PyDict;
 use tokio::process::Command;
 
 use crate::channel::PyChannelAddr;
-use crate::tokio::PyPythonTask;
+use crate::pytokio::PyPythonTask;
 
 /// A python class that wraps a Rust Alloc trait object. It represents what
 /// is shown on the python side. Internals are not exposed.

@@ -133,7 +133,7 @@ class RDMABuffer:
                 dst_gpu.copy_(dst)
             return res
 
-        return Future(impl=read_into_nonblocking, requires_loop=False)
+        return Future(coro=read_into_nonblocking())
 
     def write_from(
         self, src: torch.Tensor, offset: int = 0, timeout: int = 3
@@ -177,4 +177,4 @@ class RDMABuffer:
                 src_gpu.copy_(src)
             return res
 
-        return Future(impl=write_from_nonblocking, requires_loop=False)
+        return Future(coro=write_from_nonblocking())

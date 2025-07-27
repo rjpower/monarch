@@ -45,7 +45,7 @@ impl std::fmt::Debug for PythonTask {
 
 #[pyclass(
     name = "PythonTask",
-    module = "monarch._rust_bindings.monarch_hyperactor.tokio"
+    module = "monarch._rust_bindings.monarch_hyperactor.pytokio"
 )]
 pub struct PyPythonTask {
     inner: Option<PythonTask>,

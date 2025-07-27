@@ -18,6 +18,7 @@ from monarch._rust_bindings.monarch_hyperactor.actor import (
     PythonMessage,
     PythonMessageKind,
 )
+from monarch._src.actor.future import Future
 
 if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.actor import CallMethod, PortProtocol
@@ -119,7 +120,7 @@ async def test_accumulator() -> None:
         )
 
     async def recv_message() -> str:
-        messge = await asyncio.wait_for(receiver.recv_task().into_future(), timeout=5)
+        messge = await asyncio.wait_for(Future(coro=receiver.recv_task()), timeout=5)
         value = pickle.loads(messge.message)
         return cast(str, value)
 
@@ -176,6 +177,6 @@ async def test_reducer() -> None:
         ),
     )
 
-    messge = await asyncio.wait_for(receiver.recv_task().into_future(), timeout=5)
+    messge = await asyncio.wait_for(Future(coro=receiver.recv_task()), timeout=5)
     value = pickle.loads(messge.message)
     assert "[reduced](start+msg0)" in value

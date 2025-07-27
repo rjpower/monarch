@@ -20,9 +20,7 @@ from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monar
 )
 
 if TYPE_CHECKING:
-    from monarch._rust_bindings.monarch_hyperactor.tokio import PythonTask
-
-from monarch._src.actor.future import Future
+    from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
 ALLOC_LABEL_PROC_MESH_NAME = "procmesh.monarch.meta.com/name"
 
@@ -33,7 +31,7 @@ class AllocateMixin(abc.ABC):
     @abc.abstractmethod
     def allocate_nonblocking(self, spec: AllocSpec) -> "Awaitable[Alloc]": ...
 
-    def allocate(self, spec: AllocSpec) -> Future[Alloc]:
+    def allocate(self, spec: AllocSpec) -> "Awaitable[Alloc]":
         """
         Allocate a process according to the provided spec.
 
@@ -43,7 +41,7 @@ class AllocateMixin(abc.ABC):
         Returns:
         - A future that will be fulfilled when the requested allocation is fulfilled.
         """
-        return Future(impl=lambda: self.allocate_nonblocking(spec), requires_loop=False)
+        return self.allocate_nonblocking(spec)
 
 
 @final
