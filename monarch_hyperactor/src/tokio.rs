@@ -6,58 +6,15 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::error::Error;
 use std::future::Future;
-use std::ops::Deref;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::OnceLock;
 
-use async_trait::async_trait;
-use hyperactor::Actor;
-use hyperactor::ActorHandle;
-use hyperactor::ActorId;
-use hyperactor::Context;
-use hyperactor::Handler;
-use hyperactor::Instance;
-use hyperactor::Named;
-use hyperactor::OncePortHandle;
-use hyperactor::message::Bind;
-use hyperactor::message::Bindings;
-use hyperactor::message::Unbind;
-use hyperactor_mesh::comm::multicast::CastInfo;
-use monarch_types::PickledPyObject;
-use monarch_types::SerializablePyErr;
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::PyBaseException;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyStopIteration;
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
-use pyo3::types::PyDict;
-use pyo3::types::PyList;
-use pyo3::types::PyType;
-use serde::Deserialize;
-use serde::Serialize;
-use serde_bytes::ByteBuf;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::oneshot;
-use tracing::Instrument;
 
-use crate::config::SHARED_ASYNCIO_RUNTIME;
-use crate::local_state_broker::BrokerId;
-use crate::local_state_broker::LocalStateBrokerMessage;
-use crate::mailbox::EitherPortRef;
-use crate::mailbox::PyMailbox;
-use crate::proc::InstanceWrapper;
-use crate::proc::PyActorId;
-use crate::proc::PyProc;
-use crate::proc::PySerialized;
 use crate::runtime::signal_safe_block_on;
-use crate::shape::PyShape;
 
 /// Helper struct to make a Python future passable in an actor message.
 ///
@@ -131,6 +88,7 @@ impl PyPythonTask {
 
 #[pymethods]
 impl PyPythonTask {
+    // kill this, its python code
     fn into_future(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let task = self
             .inner
@@ -139,6 +97,7 @@ impl PyPythonTask {
             .expect("PythonTask already consumed");
         Ok(pyo3_async_runtimes::tokio::future_into_py(py, task)?.unbind())
     }
+    // rename to block_in_place
     fn block_on(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let task = self
             .inner
@@ -148,11 +107,7 @@ impl PyPythonTask {
         signal_safe_block_on(py, task)?
     }
 
-    /// In an async context this turns the tokio::Future into
-    /// an asyncio Future and awaits it.
-    /// In a synchronous context, this just blocks on the future and
-    /// immediately returns the value without pausing caller coroutine.
-    /// See [avoiding async code duplication] for justitifcation.
+    /// Returns an iterator of just
     fn __await__(&mut self, py: Python<'_>) -> PyResult<PyObject> {
         let lp = py
             .import("asyncio.events")
