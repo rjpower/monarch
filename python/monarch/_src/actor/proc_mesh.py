@@ -109,7 +109,7 @@ class ProcMesh(MeshTrait):
     @staticmethod
     async def create_raw(alloc: Alloc) -> "ProcMesh":
         _proc_mesh = await HyProcMesh.allocate_nonblocking(alloc)
-        return ProcMesh("no", _proc_mesh)
+        return ProcMesh(_proc_mesh)
 
     @staticmethod
     async def create(
@@ -142,11 +142,9 @@ class ProcMesh(MeshTrait):
 
     def __init__(
         self,
-        no: str,
         hy_proc_mesh: HyProcMesh,
         _mock_shape: Optional[Shape] = None,
         _device_mesh: Optional["DeviceMesh"] = None,
-        _is_initializing_debugger: bool = False,
     ) -> None:
         self._proc_mesh = hy_proc_mesh
         self._mock_shape: Optional[Shape] = _mock_shape
@@ -158,21 +156,6 @@ class ProcMesh(MeshTrait):
         self._logging_mesh_client: Optional[LoggingMeshClient] = None
         self._maybe_device_mesh: Optional["DeviceMesh"] = _device_mesh
         self._stopped = False
-
-        # This code is unsafe in async contexts, but we currently do it all over the place
-        # we need to refactor this by moving it to the first time we try to spawn on the mesh.
-        # Right now we simply preserve the previous behavior and disable the check that prevents
-        # end users from doing the same.
-        # with fake_sync_state():
-        # if _mock_shape is None and HAS_TENSOR_ENGINE:
-        #     # type: ignore[21]
-        #     self._rdma_manager = _RdmaManager.create_rdma_manager_blocking(
-        #     self._proc_mesh
-        # )
-        # if not _is_initializing_debugger and _mock_shape is None:
-        #     self._debug_manager = self.spawn(
-        #         _DEBUG_MANAGER_ACTOR_NAME, DebugManager, debug_client()
-        #     ).get()
 
     @property
     def _shape(self) -> Shape:
@@ -192,9 +175,7 @@ class ProcMesh(MeshTrait):
             if self._maybe_device_mesh is None
             else self._device_mesh._new_with_shape(shape)
         )
-        return ProcMesh(
-            "no", self._proc_mesh, _mock_shape=shape, _device_mesh=device_mesh
-        )
+        return ProcMesh(self._proc_mesh, _mock_shape=shape, _device_mesh=device_mesh)
 
     def spawn(self, name: str, Class: Type[T], *args: Any, **kwargs: Any) -> Future[T]:
         if self._mock_shape is not None:
@@ -381,7 +362,7 @@ async def _local_allocator(gpus: Optional[int] = None, hosts: int = 1) -> Alloc:
         gpus = _local_device_count()
     spec = AllocSpec(AllocConstraints(), gpus=gpus, hosts=hosts)
     allocator = LocalAllocator()
-    return await allocator.allocate(spec)
+    return await allocator.allocate_nonblocking(spec)
 
 
 async def local_proc_mesh_nonblocking(
@@ -405,7 +386,7 @@ async def sim_proc_mesh_nonblocking(
         gpus = _local_device_count()
     spec = AllocSpec(AllocConstraints(), gpus=gpus, hosts=hosts)
     allocator = SimAllocator()
-    alloc = await allocator.allocate(spec)
+    alloc = await allocator.allocate_nonblocking(spec)
     return await ProcMesh.create(alloc)
 
 
@@ -452,7 +433,7 @@ async def proc_mesh_nonblocking(
     cmd, args, bootstrap_env = _get_bootstrap_args()
     env.update(bootstrap_env)
     allocator = ProcessAllocator(cmd, args, env)
-    alloc = await allocator.allocate(spec)
+    alloc = await allocator.allocate_nonblocking(spec)
 
     return await ProcMesh.create(
         alloc,

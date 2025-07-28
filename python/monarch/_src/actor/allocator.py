@@ -18,6 +18,7 @@ from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monar
     RemoteAllocatorBase,
     SimAllocatorBase,
 )
+from monarch._src.actor.future import Future
 
 if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
@@ -29,9 +30,9 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 class AllocateMixin(abc.ABC):
     @abc.abstractmethod
-    def allocate_nonblocking(self, spec: AllocSpec) -> "Awaitable[Alloc]": ...
+    def allocate_nonblocking(self, spec: AllocSpec) -> "PythonTask[Alloc]": ...
 
-    def allocate(self, spec: AllocSpec) -> "Awaitable[Alloc]":
+    def allocate(self, spec: AllocSpec) -> "Future[Alloc]":
         """
         Allocate a process according to the provided spec.
 
@@ -41,7 +42,7 @@ class AllocateMixin(abc.ABC):
         Returns:
         - A future that will be fulfilled when the requested allocation is fulfilled.
         """
-        return self.allocate_nonblocking(spec)
+        return Future(coro=self.allocate_nonblocking(spec))
 
 
 @final

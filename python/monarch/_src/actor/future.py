@@ -132,7 +132,6 @@ class Future(Generic[R]):
                 raise ValueError(
                     "already converted into a synchronous future, use 'get' to get the value."
                 )
-        return fut
 
     # compatibility with old tensor engine Future objects
     # hopefully we do not need done(), add_callback because
