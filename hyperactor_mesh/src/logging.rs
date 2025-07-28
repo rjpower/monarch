@@ -54,6 +54,9 @@ use tokio::task::JoinHandle;
 
 use crate::bootstrap::BOOTSTRAP_LOG_CHANNEL;
 
+mod line_prefixing_writer;
+use line_prefixing_writer::LinePrefixingWriter;
+
 const DEFAULT_AGGREGATE_WINDOW_SEC: u64 = 5;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -393,17 +396,17 @@ fn create_file_writer(
     Ok(Box::new(tokio_file))
 }
 
-pub fn get_tee_destination(
+pub fn get_local_log_destination(
     local_rank: usize,
     output_target: OutputTarget,
 ) -> Result<Box<dyn io::AsyncWrite + Send + Unpin>> {
-    match env::Env::current() {
+    Ok(match env::Env::current() {
         env::Env::Local | env::Env::MastEmulator | env::Env::Test => match output_target {
-            OutputTarget::Stdout => Ok(Box::new(io::stdout())),
-            OutputTarget::Stderr => Ok(Box::new(io::stderr())),
+            OutputTarget::Stdout => Box::new(LinePrefixingWriter::new(local_rank, io::stdout())),
+            OutputTarget::Stderr => Box::new(LinePrefixingWriter::new(local_rank, io::stderr())),
         },
-        env::Env::Mast => Ok(create_file_writer(local_rank, output_target)?),
-    }
+        env::Env::Mast => create_file_writer(local_rank, output_target)?,
+    })
 }
 
 /// Helper function to create stdout and stderr LogWriter instances
@@ -468,7 +471,7 @@ impl<T: LogSender + Unpin + 'static> LogWriter<T, Box<dyn io::AsyncWrite + Send 
         log_sender: T,
     ) -> Result<Self> {
         // Use a default writer based on the output target
-        let std_writer = get_tee_destination(local_rank, output_target)?;
+        let std_writer = get_local_log_destination(local_rank, output_target)?;
 
         Ok(Self {
             output_target,
@@ -788,10 +791,6 @@ impl LogMessageHandler for LogClientActor {
                 match output_target {
                     OutputTarget::Stdout => println!("{}", message),
                     OutputTarget::Stderr => eprintln!("{}", message),
-                    _ => {
-                        tracing::error!("unknown output target: {:?}", output_target);
-                        println!("{}", message);
-                    }
                 }
             }
         }
