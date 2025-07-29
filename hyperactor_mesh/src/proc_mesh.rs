@@ -94,7 +94,6 @@ pub fn global_mailbox() -> Mailbox {
             router.bind(client_proc_id.clone().into(), client_proc_addr.clone());
 
             global_router().bind(world_id.clone().into(), router.clone());
-            global_router().bind(client_proc_id.into(), router.clone());
 
             client_proc.attach("client").expect("root mailbox creation")
         })
