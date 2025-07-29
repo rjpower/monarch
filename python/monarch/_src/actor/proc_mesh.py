@@ -37,7 +37,13 @@ from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
     ProcMeshMonitor,
 )
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
-from monarch._src.actor.actor_mesh import _Actor, _ActorMeshRefImpl, Actor, ActorMeshRef
+from monarch._src.actor.actor_mesh import (
+    _Actor,
+    _ActorMeshRefImpl,
+    Actor,
+    ActorMeshRef,
+    MonarchContext,
+)
 
 from monarch._src.actor.allocator import (
     AllocateMixin,
@@ -122,7 +128,7 @@ class ProcMesh(MeshTrait):
         # type: ignore[21]
         self._rdma_manager: Optional["_RdmaManager"] = None
         self._debug_manager: Optional[DebugManager] = None
-        self._mailbox: Mailbox = self._proc_mesh.client
+        self._mailbox: Mailbox = MonarchContext.current_mailbox()
         self._code_sync_client: Optional[CodeSyncMeshClient] = None
         self._logging_mesh_client: Optional[LoggingMeshClient] = None
         self._maybe_device_mesh: Optional["DeviceMesh"] = _device_mesh
