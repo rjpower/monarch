@@ -39,7 +39,12 @@ from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
 from monarch._src.actor.actor_mesh import _Actor, _ActorMeshRefImpl, Actor, ActorMeshRef
 
-from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator, SimAllocator
+from monarch._src.actor.allocator import (
+    AllocHandle,
+    LocalAllocator,
+    ProcessAllocator,
+    SimAllocator,
+)
 from monarch._src.actor.code_sync import (
     CodeSyncMeshClient,
     RemoteWorkspace,
@@ -202,7 +207,7 @@ class ProcMesh(MeshTrait):
 
     @classmethod
     def from_alloc(
-        self, alloc: Alloc, setup: Callable[[], None] | None = None
+        self, alloc: AllocHandle, setup: Callable[[], None] | None = None
     ) -> Future["ProcMesh"]:
         """
         Allocate a process mesh according to the provided alloc.
@@ -222,7 +227,11 @@ class ProcMesh(MeshTrait):
             os.environ["LOCAL_RANK"] = str(rank["gpus"])
         ```
         """
-        return Future(coro=ProcMesh.create(alloc, setup))
+
+        async def _create() -> ProcMesh:
+            return await ProcMesh.create(await alloc._hy_alloc, setup)
+
+        return Future(coro=_create())
 
     def __repr__(self) -> str:
         return repr(self._proc_mesh)

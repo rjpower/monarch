@@ -8,6 +8,7 @@
 
 import abc
 import logging
+from dataclasses import dataclass
 from typing import Awaitable, final, Optional, TYPE_CHECKING
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
@@ -18,21 +19,26 @@ from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monar
     RemoteAllocatorBase,
     SimAllocatorBase,
 )
-from monarch._src.actor.future import Future
+from monarch._src.actor.future import DeprecatedNotAFuture, Future
 
 if TYPE_CHECKING:
-    from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+    from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 
 ALLOC_LABEL_PROC_MESH_NAME = "procmesh.monarch.meta.com/name"
 
 logger: logging.Logger = logging.getLogger(__name__)
 
 
+@dataclass
+class AllocHandle(DeprecatedNotAFuture):
+    _hy_alloc: Shared[Alloc]
+
+
 class AllocateMixin(abc.ABC):
     @abc.abstractmethod
     def allocate_nonblocking(self, spec: AllocSpec) -> "PythonTask[Alloc]": ...
 
-    def allocate(self, spec: AllocSpec) -> "Future[Alloc]":
+    def allocate(self, spec: AllocSpec) -> "AllocHandle":
         """
         Allocate a process according to the provided spec.
 
@@ -42,7 +48,7 @@ class AllocateMixin(abc.ABC):
         Returns:
         - A future that will be fulfilled when the requested allocation is fulfilled.
         """
-        return Future(coro=self.allocate_nonblocking(spec))
+        return AllocHandle(self.allocate_nonblocking(spec).spawn())
 
 
 @final

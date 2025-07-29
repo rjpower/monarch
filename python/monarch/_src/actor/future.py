@@ -6,6 +6,7 @@
 
 import asyncio
 import traceback
+import warnings
 from functools import partial
 from typing import (
     Any,
@@ -21,7 +22,7 @@ from typing import (
 
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
-from typing_extensions import Self
+from typing_extensions import deprecated, Self
 
 R = TypeVar("R")
 
@@ -145,3 +146,26 @@ class Future(Generic[R]):
             return None
         except Exception as e:
             return e
+
+
+class DeprecatedNotAFuture:
+    """
+    We used to return Future[Alloc] and Future[Actor] and Future[ProcMesh].
+    Now the only Futures are generated as responses to messages.
+
+    This polyfills the await/get methods to those objects and raises the deprecation
+    warning that we are going to remove this.
+    """
+
+    def get(self) -> "Self":
+        typ = str(type(self))
+        warnings.warn(
+            f".get() and await is deprecated for {typ}, we directly return {typ} instead of Future[{typ}]. {''.join(traceback.format_stack())}",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self
+
+    def __await__(self) -> "Generator[Any, Any, Self]":
+        yield from ()
+        return self
