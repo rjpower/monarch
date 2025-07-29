@@ -91,8 +91,8 @@ class Accumulator(Generic[S, U]):
 async def allocate() -> ProcMesh:
     spec = AllocSpec(AllocConstraints(), replica=1)
     allocator = monarch.LocalAllocator()
-    alloc = await allocator.allocate(spec)
-    proc_mesh = await ProcMesh.allocate_nonblocking(alloc)
+    alloc = await allocator.allocate_nonblocking(spec)
+    proc_mesh = await Future(coro=ProcMesh.allocate_nonblocking(alloc))
     return proc_mesh
 
 
@@ -154,7 +154,7 @@ class MyActor:
 
 async def test_reducer() -> None:
     proc_mesh = await allocate()
-    actor_mesh = await proc_mesh.spawn_nonblocking("test", MyActor)
+    actor_mesh = await Future(coro=proc_mesh.spawn_nonblocking("test", MyActor))
 
     def my_accumulate(state: str, update: str) -> str:
         return state + update

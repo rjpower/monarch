@@ -7,7 +7,7 @@
 # pyre-strict
 
 import asyncio
-from typing import Any, Awaitable, Coroutine, Generator, Generic, TypeVar
+from typing import Any, Awaitable, Callable, Coroutine, Generator, Generic, TypeVar
 
 T = TypeVar("T")
 
@@ -38,6 +38,14 @@ class PythonTask(Generic[T], Awaitable[T]):
         using the pytokio APIs.
 
         This allows async python code to particiipate in the tokio runtime. There is no asyncio runtime event loop involved.
+        """
+        ...
+
+    @staticmethod
+    def spawn_blocking(fn: Callable[[], T]) -> Shared[T]:
+        """
+        Concurrently run a python function in a way where it is acceptable for it to make synchronous calls back into
+        Tokio. See tokio::spawn_blocking for more information.
         """
         ...
 

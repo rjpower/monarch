@@ -12,7 +12,9 @@ use std::pin::Pin;
 
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
+use monarch_types::SerializablePyErr;
 use pyo3::IntoPyObjectExt;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyStopIteration;
 use pyo3::exceptions::PyTimeoutError;
 use pyo3::exceptions::PyValueError;
@@ -127,6 +129,24 @@ impl PyPythonTask {
     }
 }
 
+fn send_result(
+    tx: tokio::sync::watch::Sender<Option<PyResult<PyObject>>>,
+    result: PyResult<PyObject>,
+) {
+    // a SendErr just means that there are no consumers of the value left.
+    match tx.send(Some(result)) {
+        Err(tokio::sync::watch::error::SendError(Some(Err(pyerr)))) => {
+            Python::with_gil(|py| {
+                panic!(
+                    "PythonTask errored but is not being awaited: {}",
+                    SerializablePyErr::from(py, &pyerr)
+                )
+            });
+        }
+        _ => {}
+    };
+}
+
 #[pymethods]
 impl PyPythonTask {
     fn block_on(&mut self, py: Python<'_>) -> PyResult<PyObject> {
@@ -137,21 +157,20 @@ impl PyPythonTask {
         let (tx, rx) = watch::channel(None);
         let task = self.take_task()?;
         get_tokio_runtime().spawn(async move {
-            let result = task.await;
-            // a SendErr just means that there are no consumers of the value left.
-            match tx.send(Some(result)) {
-                Err(tokio::sync::watch::error::SendError(Some(Err(pyerr)))) => {
-                    eprintln!("warning: PythonTask errored but is not being awaited.");
-                    Python::with_gil(|py| pyerr.display(py));
-                }
-                _ => {}
-            };
+            send_result(tx, task.await);
         });
         Ok(PyShared { rx })
     }
 
     fn __await__(slf: PyRef<'_, Self>) -> PyResult<PythonTaskAwaitIterator> {
         let py = slf.py();
+        let l = pyo3_async_runtimes::get_running_loop(py);
+        if l.is_ok() {
+            return Err(PyRuntimeError::new_err(
+                "Attempting to __await__ a PythonTask when the asyncio event loop is active. PythonTask objects should only be awaited in coroutines passed to PythonTask.from_coroutine",
+            ));
+        }
+
         Ok(PythonTaskAwaitIterator::new(slf.into_py_any(py)?))
     }
 
@@ -215,6 +234,16 @@ impl PyPythonTask {
                 .map_err(|_| PyTimeoutError::new_err(()))?
         })
     }
+
+    #[staticmethod]
+    fn spawn_blocking(f: PyObject) -> PyResult<PyShared> {
+        let (tx, rx) = watch::channel(None);
+        get_tokio_runtime().spawn_blocking(move || {
+            let result = Python::with_gil(|py| f.call0(py));
+            send_result(tx, result);
+        });
+        Ok(PyShared { rx })
+    }
 }
 
 #[pyclass(
@@ -227,6 +256,11 @@ pub struct PyShared {
 
 impl PyShared {
     fn task(&mut self) -> PyResult<PyPythonTask> {
+        // watch channels start unchanged, and when a value is sent to them signal
+        // the receivers `changed` future.
+        // By cloning the rx before awaiting it,
+        // we can have multiple awaiters get triggered by the same change.
+        // self.rx will always be in the state where it hasn't see the change yet.
         let mut rx = self.rx.clone();
         PyPythonTask::new(async move {
             rx.changed().await.map_err(to_py_error)?;

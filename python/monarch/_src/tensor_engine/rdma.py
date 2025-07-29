@@ -120,12 +120,15 @@ class RDMABuffer:
                 f"offset + size ({offset + size}) must be <= dst.numel() ({dst.numel()})"
             )
 
+        local_proc_id = MonarchContext.get().proc_id
+        client = MonarchContext.get().mailbox
+
         async def read_into_nonblocking() -> Optional[int]:
             res = await self._buffer.read_into(
                 addr=addr,
                 size=size,
-                local_proc_id=MonarchContext.get().proc_id,
-                client=MonarchContext.get().mailbox,
+                local_proc_id=local_proc_id,
+                client=client,
                 timeout=timeout,
             )
             # TODO - remove this once GPU support is added.
@@ -164,12 +167,15 @@ class RDMABuffer:
                 f"size + offset ({size + offset}) must be <= src.numel() ({src.numel()})"
             )
 
+        local_proc_id = MonarchContext.get().proc_id
+        client = MonarchContext.get().mailbox
+
         async def write_from_nonblocking() -> None:
             res = await self._buffer.write_from(
                 addr=addr,
                 size=size,
-                local_proc_id=MonarchContext.get().proc_id,
-                client=MonarchContext.get().mailbox,
+                local_proc_id=local_proc_id,
+                client=client,
                 timeout=timeout,
             )
             # TODO - remove this once GPU support is added.
