@@ -167,6 +167,6 @@ class DeprecatedNotAFuture:
         )
         return self
 
-    def __await___(self) -> "Generator[Any, Any, Self]":
+    def __await__(self) -> "Generator[Any, Any, Self]":
         yield from ()
         return self
