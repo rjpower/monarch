@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import sys
+import threading
 import warnings
 from contextlib import AbstractContextManager
 
@@ -483,34 +484,31 @@ def proc_mesh(
     )
 
 
+_debug_client_init = threading.Lock()
 _debug_proc_mesh: Optional["ProcMesh"] = None
+_debug_client_mesh: "Optional[Shared[DebugClient]]" = None
 
 
-# Lazy init of the debug proc mesh so that importing monarch.proc_mesh
-# doesn't trigger the debug client to spawn, which could cause confusing
-# logs. This is defined in proc_mesh.py instead of debugger.py for
-# circular import reasons.
-def _get_debug_proc_mesh() -> "ProcMesh":
-    global _debug_proc_mesh
-    if _debug_proc_mesh is None:
+# Lazy init so that the debug client and proc does not produce logs when it isn't used.
+# Checking for the client needs a lock otherwise two initializing procs will both
+# try to init resulting in duplicates. The critical region is not blocking: it spawns
+# a separate task to do the init, asigns the Shared[Client] from that task to the global
+# and releases the lock.
+def _debug_client() -> "Shared[DebugClient]":
+    global _debug_client_mesh, _debug_proc_mesh
+
+    async def create() -> DebugClient:
         _debug_proc_mesh = _proc_mesh_from_allocator(
             gpus=1, hosts=1, allocator=LocalAllocator(), _init_manager_actors=False
         )
-    return _debug_proc_mesh
+        return await _debug_proc_mesh._spawn_nonblocking("debug_client", DebugClient)
 
+    with _debug_client_init:
+        if _debug_client_mesh is None:
+            _debug_client_mesh = PythonTask.from_coroutine(create()).spawn()
 
-_debug_client_mesh: Optional[DebugClient] = None
-
-
-# Lazy init for the same reason as above. This is defined in proc_mesh.py
-# instead of debugger.py for circular import reasons.
-async def _debug_client() -> DebugClient:
-    global _debug_client_mesh
-    if _debug_client_mesh is None:
-        mesh = await _get_debug_proc_mesh()
-        _debug_client_mesh = await mesh._spawn_nonblocking("debug_client", DebugClient)
     return _debug_client_mesh
 
 
 def debug_client() -> DebugClient:
-    return Future(coro=_debug_client()).get()
+    return Future(coro=_debug_client().task()).get()
