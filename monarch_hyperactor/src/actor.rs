@@ -6,11 +6,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::fmt;
-use std::future::Future;
+use std::error::Error;
 use std::future::pending;
 use std::ops::Deref;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -22,6 +20,7 @@ use hyperactor::Context;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
+use hyperactor::OncePortHandle;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;
 use hyperactor::message::Unbind;
@@ -31,7 +30,7 @@ use monarch_types::SerializablePyErr;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyBaseException;
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::exceptions::PyStopIteration;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
@@ -55,6 +54,8 @@ use crate::proc::InstanceWrapper;
 use crate::proc::PyActorId;
 use crate::proc::PyProc;
 use crate::proc::PySerialized;
+use crate::pytokio::PyPythonTask;
+use crate::pytokio::PythonTask;
 use crate::runtime::signal_safe_block_on;
 use crate::shape::PyShape;
 
@@ -185,10 +186,21 @@ pub enum UnflattenArg {
 }
 
 #[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.actor")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum MethodSpecifier {
+    /// Call method 'name', send its return value to the response port.
+    ReturnsResponse { name: String },
+    /// Call method 'name', send the response port as the first argument.
+    ExplicitPort { name: String },
+    /// Construct the object
+    Init {},
+}
+
+#[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.actor")]
 #[derive(Clone, Debug, Serialize, Deserialize, Named, PartialEq)]
 pub enum PythonMessageKind {
     CallMethod {
-        name: String,
+        name: MethodSpecifier,
         response_port: Option<EitherPortRef>,
     },
     Result {
@@ -199,7 +211,7 @@ pub enum PythonMessageKind {
     },
     Uninit {},
     CallMethodIndirect {
-        name: String,
+        name: MethodSpecifier,
         local_state_broker: (String, usize),
         id: usize,
         // specify whether the argument to unflatten the local mailbox,
@@ -223,7 +235,17 @@ fn mailbox<'py, T: Actor>(py: Python<'py>, cx: &Context<'_, T>) -> Bound<'py, Py
 #[derive(Clone, Serialize, Deserialize, Named, PartialEq, Default)]
 pub struct PythonMessage {
     pub kind: PythonMessageKind,
+    #[serde(with = "serde_bytes")]
     pub message: Vec<u8>,
+}
+
+struct ResolvedCallMethod {
+    method: MethodSpecifier,
+    bytes: Vec<u8>,
+    local_state: PyObject,
+    /// Implements PortProtocol
+    /// Concretely either a Port, DroppingPort, or LocalPort
+    response_port: PyObject,
 }
 
 impl PythonMessage {
@@ -246,11 +268,10 @@ impl PythonMessage {
         }
     }
 
-    pub async fn resolve_indirect_call<T: Actor>(
-        mut self,
+    async fn resolve_indirect_call<T: Actor>(
+        self,
         cx: &Context<'_, T>,
-    ) -> anyhow::Result<(Self, PyObject)> {
-        let local_state: PyObject;
+    ) -> anyhow::Result<ResolvedCallMethod> {
         match self.kind {
             PythonMessageKind::CallMethodIndirect {
                 name,
@@ -263,9 +284,9 @@ impl PythonMessage {
                 broker.send(LocalStateBrokerMessage::Get(id, send))?;
                 let state = recv.recv().await?;
                 let mut state_it = state.state.into_iter();
-                local_state = Python::with_gil(|py| {
+                Python::with_gil(|py| {
                     let mailbox = mailbox(py, cx);
-                    PyList::new(
+                    let local_state = PyList::new(
                         py,
                         unflatten_args.into_iter().map(|x| -> Bound<'_, PyAny> {
                             match x {
@@ -275,25 +296,59 @@ impl PythonMessage {
                         }),
                     )
                     .unwrap()
-                    .into()
-                });
-                self.kind = PythonMessageKind::CallMethod {
-                    name,
-                    response_port: Some(state.response_port),
-                }
+                    .into();
+                    let response_port = LocalPort {
+                        inner: Some(state.response_port),
+                    }
+                    .into_py_any(py)
+                    .unwrap();
+                    Ok(ResolvedCallMethod {
+                        method: name,
+                        bytes: self.message,
+                        local_state,
+                        response_port,
+                    })
+                })
             }
+            PythonMessageKind::CallMethod {
+                name,
+                response_port,
+            } => Python::with_gil(|py| {
+                let mailbox = mailbox(py, cx);
+                let local_state = py
+                    .import("itertools")
+                    .unwrap()
+                    .call_method1("repeat", (mailbox.clone(),))
+                    .unwrap()
+                    .unbind();
+                let response_port = response_port
+                    .map_or_else(
+                        || {
+                            py.import("monarch._src.actor.actor_mesh")
+                                .unwrap()
+                                .call_method0("DroppingPort")
+                                .unwrap()
+                        },
+                        |x| {
+                            let (rank, _) = cx.cast_info();
+                            py.import("monarch._src.actor.actor_mesh")
+                                .unwrap()
+                                .call_method1("Port", (x, mailbox, rank))
+                                .unwrap()
+                        },
+                    )
+                    .unbind();
+                Ok(ResolvedCallMethod {
+                    method: name,
+                    bytes: self.message,
+                    local_state,
+                    response_port,
+                })
+            }),
             _ => {
-                local_state = Python::with_gil(|py| {
-                    let mailbox = mailbox(py, cx);
-                    py.import("itertools")
-                        .unwrap()
-                        .call_method1("repeat", (mailbox.clone(),))
-                        .unwrap()
-                        .unbind()
-                });
+                panic!("unexpected message kind {:?}", self.kind)
             }
-        };
-        Ok((self, local_state))
+        }
     }
 }
 
@@ -566,7 +621,7 @@ impl Handler<HandlePanic> for PythonActorPanicWatcher {
 #[async_trait]
 impl Handler<PythonMessage> for PythonActor {
     async fn handle(&mut self, cx: &Context<Self>, message: PythonMessage) -> anyhow::Result<()> {
-        let (message, local_state) = message.resolve_indirect_call(cx).await?;
+        let resolved = message.resolve_indirect_call(cx).await?;
 
         // Create a channel for signaling panics in async endpoints.
         // See [Panics in async endpoints].
@@ -582,11 +637,13 @@ impl Handler<PythonMessage> for PythonActor {
                     mailbox,
                     rank,
                     PyShape::from(shape),
-                    message,
+                    resolved.method,
+                    resolved.bytes,
                     PanicFlag {
                         sender: Some(sender),
                     },
-                    local_state,
+                    resolved.local_state,
+                    resolved.response_port,
                 ),
                 None,
             )?;
@@ -612,115 +669,6 @@ impl Handler<PythonMessage> for PythonActor {
             ),
         );
         Ok(())
-    }
-}
-
-/// Helper struct to make a Python future passable in an actor message.
-///
-/// Also so that we don't have to write this massive type signature everywhere
-pub(crate) struct PythonTask {
-    future: Mutex<Pin<Box<dyn Future<Output = PyResult<PyObject>> + Send + 'static>>>,
-}
-
-impl PythonTask {
-    pub(crate) fn new(fut: impl Future<Output = PyResult<PyObject>> + Send + 'static) -> Self {
-        Self {
-            future: Mutex::new(Box::pin(fut)),
-        }
-    }
-
-    fn take(self) -> Pin<Box<dyn Future<Output = PyResult<PyObject>> + Send + 'static>> {
-        self.future.into_inner()
-    }
-}
-
-impl fmt::Debug for PythonTask {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PythonTask")
-            .field("future", &"<PythonFuture>")
-            .finish()
-    }
-}
-
-#[pyclass(
-    name = "PythonTask",
-    module = "monarch._rust_bindings.monarch_hyperactor.actor"
-)]
-pub struct PyPythonTask {
-    inner: Option<PythonTask>,
-}
-
-impl From<PythonTask> for PyPythonTask {
-    fn from(task: PythonTask) -> Self {
-        Self { inner: Some(task) }
-    }
-}
-
-#[pyclass(
-    name = "JustStopWithValueIterator",
-    module = "monarch._rust_bindings.monarch_hyperactor.actor"
-)]
-struct JustStopWithValueIterator {
-    value: Option<PyObject>,
-}
-
-#[pymethods]
-impl JustStopWithValueIterator {
-    fn __next__(&mut self) -> PyResult<PyObject> {
-        Err(PyStopIteration::new_err(self.value.take().unwrap()))
-    }
-}
-
-impl PyPythonTask {
-    pub fn new<F, T>(fut: F) -> PyResult<Self>
-    where
-        F: Future<Output = PyResult<T>> + Send + 'static,
-        T: for<'py> IntoPyObject<'py>,
-    {
-        Ok(PythonTask::new(async {
-            fut.await
-                .and_then(|t| Python::with_gil(|py| t.into_py_any(py)))
-        })
-        .into())
-    }
-}
-
-#[pymethods]
-impl PyPythonTask {
-    fn into_future(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        let task = self
-            .inner
-            .take()
-            .map(|task| task.take())
-            .expect("PythonTask already consumed");
-        Ok(pyo3_async_runtimes::tokio::future_into_py(py, task)?.unbind())
-    }
-    fn block_on(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        let task = self
-            .inner
-            .take()
-            .map(|task| task.take())
-            .expect("PythonTask already consumed");
-        signal_safe_block_on(py, task)?
-    }
-
-    /// In an async context this turns the tokio::Future into
-    /// an asyncio Future and awaits it.
-    /// In a synchronous context, this just blocks on the future and
-    /// immediately returns the value without pausing caller coroutine.
-    /// See [avoiding async code duplication] for justitifcation.
-    fn __await__(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        let lp = py
-            .import("asyncio.events")
-            .unwrap()
-            .call_method0("_get_running_loop")
-            .unwrap();
-        if lp.is_none() {
-            let value = self.block_on(py)?;
-            Ok(JustStopWithValueIterator { value: Some(value) }.into_py_any(py)?)
-        } else {
-            self.into_future(py)?.call_method0(py, "__await__")
-        }
     }
 }
 
@@ -765,15 +713,40 @@ async fn handle_async_endpoint_panic(
         .expect("Unable to send panic message");
 }
 
+#[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.actor")]
+#[derive(Debug)]
+struct LocalPort {
+    inner: Option<OncePortHandle<Result<PyObject, PyObject>>>,
+}
+
+fn to_py_error<T>(e: T) -> PyErr
+where
+    T: Error,
+{
+    PyErr::new::<PyValueError, _>(e.to_string())
+}
+
+#[pymethods]
+impl LocalPort {
+    fn send(&mut self, obj: PyObject) -> PyResult<()> {
+        let port = self.inner.take().expect("use local port once");
+        port.send(Ok(obj)).map_err(to_py_error)
+    }
+    fn exception(&mut self, e: PyObject) -> PyResult<()> {
+        let port = self.inner.take().expect("use local port once");
+        port.send(Err(e)).map_err(to_py_error)
+    }
+}
+
 pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     hyperactor_mod.add_class::<PickledMessage>()?;
     hyperactor_mod.add_class::<PickledMessageClientActor>()?;
     hyperactor_mod.add_class::<PythonActorHandle>()?;
     hyperactor_mod.add_class::<PythonMessage>()?;
     hyperactor_mod.add_class::<PythonMessageKind>()?;
+    hyperactor_mod.add_class::<MethodSpecifier>()?;
     hyperactor_mod.add_class::<UnflattenArg>()?;
     hyperactor_mod.add_class::<PanicFlag>()?;
-    hyperactor_mod.add_class::<PyPythonTask>()?;
     Ok(())
 }
 
@@ -801,7 +774,9 @@ mod tests {
         );
         let message = PythonMessage {
             kind: PythonMessageKind::CallMethod {
-                name: "test".to_string(),
+                name: MethodSpecifier::ReturnsResponse {
+                    name: "test".to_string(),
+                },
                 response_port: Some(EitherPortRef::Unbounded(port_ref.clone().into())),
             },
             message: vec![1, 2, 3],
@@ -822,7 +797,9 @@ mod tests {
 
         let no_port_message = PythonMessage {
             kind: PythonMessageKind::CallMethod {
-                name: "test".to_string(),
+                name: MethodSpecifier::ReturnsResponse {
+                    name: "test".to_string(),
+                },
                 response_port: None,
             },
             ..message

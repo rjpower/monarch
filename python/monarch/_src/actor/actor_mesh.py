@@ -6,21 +6,16 @@
 
 # pyre-unsafe
 
-import asyncio
 import collections
 import contextvars
 import functools
-import importlib
 import inspect
 import itertools
 import logging
 import random
 import traceback
 
-from abc import ABC, abstractmethod
-
 from dataclasses import dataclass
-from operator import mul
 from traceback import extract_tb, StackSummary
 from typing import (
     Any,
@@ -29,7 +24,9 @@ from typing import (
     Callable,
     cast,
     Concatenate,
+    Coroutine,
     Dict,
+    Generator,
     Generic,
     Iterable,
     Iterator,
@@ -39,7 +36,6 @@ from typing import (
     Optional,
     overload,
     ParamSpec,
-    Sequence,
     Tuple,
     Type,
     TYPE_CHECKING,
@@ -47,6 +43,7 @@ from typing import (
 )
 
 from monarch._rust_bindings.monarch_hyperactor.actor import (
+    MethodSpecifier,
     PanicFlag,
     PythonMessage,
     PythonMessageKind,
@@ -61,14 +58,22 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
 )
 
 if TYPE_CHECKING:
+    from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
     from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiverBase
 
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
 from monarch._rust_bindings.monarch_hyperactor.supervision import SupervisionError
-
 from monarch._rust_bindings.monarch_hyperactor.telemetry import enter_span, exit_span
 from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
+from monarch._src.actor.endpoint import (
+    Endpoint,
+    EndpointProperty,
+    Extent,
+    NotAnEndpoint,
+    Propagator,
+    Selection,
+)
 from monarch._src.actor.future import Future
 from monarch._src.actor.pdb_wrapper import PdbWrapper
 
@@ -76,6 +81,8 @@ from monarch._src.actor.pickle import flatten, unflatten
 
 from monarch._src.actor.shape import MeshTrait, NDSlice
 from monarch._src.actor.sync_state import fake_sync_state
+
+from monarch._src.actor.tensor_engine_shim import actor_rref, actor_send
 
 if TYPE_CHECKING:
     from monarch._src.actor.proc_mesh import ProcMesh
@@ -140,9 +147,6 @@ A = TypeVar("A")
 # keep this load balancing deterministic, but
 # equally distributed.
 _load_balancing_seed = random.Random(4)
-
-
-Selection = Literal["all", "choose"] | int  # TODO: replace with real selection objects
 
 
 # standin class for whatever is the serializable python object we use
@@ -279,130 +283,35 @@ class _ActorMeshRefImpl:
         await self._actor_mesh.stop()
 
 
-class Extent(NamedTuple):
-    labels: Sequence[str]
-    sizes: Sequence[int]
-
-    @property
-    def nelements(self) -> int:
-        return functools.reduce(mul, self.sizes, 1)
-
-    def __str__(self) -> str:
-        return str(dict(zip(self.labels, self.sizes)))
-
-
-class Endpoint(ABC, Generic[P, R]):
-    @abstractmethod
-    def _send(
-        self,
-        args: Tuple[Any, ...],
-        kwargs: Dict[str, Any],
-        port: "Optional[Port]" = None,
-        selection: Selection = "all",
-    ) -> Extent:
-        """
-        Implements sending a message to the endpoint. The return value of the endpoint will
-        be sent to port if provided. If port is not provided, the return will be dropped,
-        and any exception will cause the actor to fail.
-
-        The return value is the (multi-dimension) size of the actors that were sent a message.
-        For ActorEndpoints this will be the actor_meshes size. For free-function endpoints,
-        this will be the size of the currently active proc_mesh.
-        """
-        pass
-
-    @abstractmethod
-    def _port(self, once: bool = False) -> "PortTuple[R]":
-        pass
-
-    def _supervise(self, r: HyPortReceiver | OncePortReceiver) -> Any:
-        return r
-
-    # the following are all 'adverbs' or different ways to handle the
-    # return values of this endpoint. Adverbs should only ever take *args, **kwargs
-    # of the original call. If we want to add syntax sugar for something that needs additional
-    # arguments, it should be implemented as function indepdendent of endpoint like `send`
-    # and `Accumulator`
-    def choose(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]:
-        """
-        Load balanced sends a message to one chosen actor and awaits a result.
-
-        Load balanced RPC-style entrypoint for request/response messaging.
-        """
-        p, r = port(self, once=True)
-        # pyre-ignore
-        self._send(args, kwargs, port=p, selection="choose")
-        return r.recv()
-
-    def call_one(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]:
-        p, r = port(self, once=True)
-        # pyre-ignore
-        extent = self._send(args, kwargs, port=p, selection="choose")
-        if extent.nelements != 1:
-            raise ValueError(
-                f"Can only use 'call_one' on a single Actor but this actor has shape {extent}"
-            )
-        return r.recv()
-
-    def call(self, *args: P.args, **kwargs: P.kwargs) -> "Future[ValueMesh[R]]":
-        p, r = ranked_port(self)
-        # pyre-ignore
-        extent = self._send(args, kwargs, port=p)
-
-        async def process() -> ValueMesh[R]:
-            results: List[R] = [None] * extent.nelements  # pyre-fixme[9]
-            for _ in range(extent.nelements):
-                rank, value = await r.recv()
-                results[rank] = value
-            call_shape = Shape(
-                extent.labels,
-                NDSlice.new_row_major(extent.sizes),
-            )
-            return ValueMesh(call_shape, results)
-
-        return Future(impl=process, requires_loop=False)
-
-    async def stream(self, *args: P.args, **kwargs: P.kwargs) -> AsyncGenerator[R, R]:
-        """
-        Broadcasts to all actors and yields their responses as a stream / generator.
-
-        This enables processing results from multiple actors incrementally as
-        they become available. Returns an async generator of response values.
-        """
-        p, r = port(self)
-        # pyre-ignore
-        extent = self._send(args, kwargs, port=p)
-        for _ in range(extent.nelements):
-            yield await r.recv()
-
-    def broadcast(self, *args: P.args, **kwargs: P.kwargs) -> None:
-        """
-        Fire-and-forget broadcast to all actors without waiting for actors to
-        acknowledge receipt.
-
-        In other words, the return of this method does not guarrantee the
-        delivery of the message.
-        """
-        # pyre-ignore
-        send(self, args, kwargs)
-
-
 class ActorEndpoint(Endpoint[P, R]):
     def __init__(
         self,
         actor_mesh_ref: _ActorMeshRefImpl,
-        name: str,
+        name: MethodSpecifier,
         impl: Callable[Concatenate[Any, P], Awaitable[R]],
         mailbox: Mailbox,
+        propagator: Propagator,
+        explicit_response_port: bool,
     ) -> None:
+        super().__init__(propagator)
         self._actor_mesh = actor_mesh_ref
         self._name = name
         self._signature: inspect.Signature = inspect.signature(impl)
         self._mailbox = mailbox
+        self._explicit_response_port = explicit_response_port
 
     def _supervise(self, r: HyPortReceiver | OncePortReceiver) -> Any:
         mesh = self._actor_mesh._actor_mesh
         return r if mesh is None else mesh.supervise(r)
+
+    def _call_name(self) -> Any:
+        return self._name
+
+    def _check_arguments(self, args, kwargs):
+        if self._explicit_response_port:
+            self._signature.bind(None, None, *args, **kwargs)
+        else:
+            self._signature.bind(None, *args, **kwargs)
 
     def _send(
         self,
@@ -416,10 +325,9 @@ class ActorEndpoint(Endpoint[P, R]):
 
         This sends the message to all actors but does not wait for any result.
         """
-        self._signature.bind(None, *args, **kwargs)
+        self._check_arguments(args, kwargs)
         objects, bytes = flatten((args, kwargs), _is_ref_or_mailbox)
-        refs = [obj for obj in objects if hasattr(obj, "__monarch_ref__")]
-        if not refs:
+        if all(not hasattr(obj, "__monarch_ref__") for obj in objects):
             message = PythonMessage(
                 PythonMessageKind.CallMethod(
                     self._name, None if port is None else port._port_ref
@@ -428,9 +336,7 @@ class ActorEndpoint(Endpoint[P, R]):
             )
             self._actor_mesh.cast(message, selection)
         else:
-            importlib.import_module("monarch." + "mesh_controller").actor_send(
-                self, bytes, refs, port, selection
-            )
+            actor_send(self, bytes, objects, port, selection)
         shape = self._actor_mesh._shape
         return Extent(shape.labels, shape.ndslice.sizes)
 
@@ -442,6 +348,53 @@ class ActorEndpoint(Endpoint[P, R]):
             ), "unexpected receiver type"
         return PortTuple(p, PortReceiver(self._mailbox, self._supervise(r._receiver)))
 
+    def _rref(self, args, kwargs):
+        self._check_arguments(args, kwargs)
+        refs, bytes = flatten((args, kwargs), _is_ref_or_mailbox)
+
+        return actor_rref(self, bytes, refs)
+
+
+@overload
+def as_endpoint(
+    not_an_endpoint: Callable[P, R],
+    *,
+    propagate: Propagator = None,
+    explicit_response_port: Literal[False] = False,
+) -> Endpoint[P, R]: ...
+
+
+@overload
+def as_endpoint(
+    not_an_endpoint: Callable[Concatenate["PortProtocol[R]", P], None],
+    *,
+    propagate: Propagator = None,
+    explicit_response_port: Literal[True],
+) -> Endpoint[P, R]: ...
+
+
+def as_endpoint(
+    not_an_endpoint: Any,
+    *,
+    propagate: Propagator = None,
+    explicit_response_port: bool = False,
+):
+    if not isinstance(not_an_endpoint, NotAnEndpoint):
+        raise ValueError("expected an method of a spawned actor")
+    kind = (
+        MethodSpecifier.ExplicitPort
+        if explicit_response_port
+        else MethodSpecifier.ReturnsResponse
+    )
+    return ActorEndpoint(
+        not_an_endpoint._ref._actor_mesh_ref,
+        kind(not_an_endpoint._name),
+        getattr(not_an_endpoint._ref, not_an_endpoint._name),
+        not_an_endpoint._ref._mailbox,
+        propagate,
+        explicit_response_port,
+    )
+
 
 class Accumulator(Generic[P, R, A]):
     def __init__(
@@ -452,15 +405,17 @@ class Accumulator(Generic[P, R, A]):
         self._combine: Callable[[A, R], A] = combine
 
     def accumulate(self, *args: P.args, **kwargs: P.kwargs) -> "Future[A]":
-        gen: AsyncGenerator[R, R] = self._endpoint.stream(*args, **kwargs)
+        gen: Generator[Coroutine[None, None, R], None, None] = self._endpoint._stream(
+            *args, **kwargs
+        )
 
         async def impl() -> A:
             value = self._identity
-            async for x in gen:
-                value = self._combine(value, x)
+            for x in gen:
+                value = self._combine(value, await x)
             return value
 
-        return Future(impl=impl)
+        return Future(coro=impl())
 
 
 class ValueMesh(MeshTrait, Generic[R]):
@@ -519,43 +474,10 @@ def send(
     endpoint._send(args, kwargs, port, selection)
 
 
-class EndpointProperty(Generic[P, R]):
-    @overload
-    def __init__(self, method: Callable[Concatenate[Any, P], Awaitable[R]]) -> None: ...
-
-    @overload
-    def __init__(self, method: Callable[Concatenate[Any, P], R]) -> None: ...
-
-    def __init__(self, method: Any) -> None:
-        self._method = method
-
-    def __get__(self, instance, owner) -> Endpoint[P, R]:
-        # this is a total lie, but we have to actually
-        # recognize this was defined as an endpoint,
-        # and also lookup the method
-        return cast(Endpoint[P, R], self)
-
-
-@overload
-def endpoint(
-    method: Callable[Concatenate[Any, P], Awaitable[R]],
-) -> EndpointProperty[P, R]: ...
-
-
-@overload
-def endpoint(
-    method: Callable[Concatenate[Any, P], R],
-) -> EndpointProperty[P, R]: ...
-
-
-def endpoint(method):
-    return EndpointProperty(method)
-
-
 class Port(Generic[R]):
     def __init__(
         self,
-        port_ref: PortRef | OncePortRef | None,
+        port_ref: PortRef | OncePortRef,
         mailbox: Mailbox,
         rank: Optional[int],
     ) -> None:
@@ -564,8 +486,6 @@ class Port(Generic[R]):
         self._rank = rank
 
     def send(self, obj: R) -> None:
-        if self._port_ref is None:
-            return
         self._port_ref.send(
             self._mailbox,
             PythonMessage(PythonMessageKind.Result(self._rank), _pickle(obj)),
@@ -574,12 +494,28 @@ class Port(Generic[R]):
     def exception(self, obj: Exception) -> None:
         # we deliver each error exactly once, so if there is no port to respond to,
         # the error is sent to the current actor as an exception.
-        if self._port_ref is None:
-            raise obj from None
         self._port_ref.send(
             self._mailbox,
             PythonMessage(PythonMessageKind.Exception(self._rank), _pickle(obj)),
         )
+
+
+class DroppingPort:
+    """
+    Used in place of a real port when the message has no response port.
+    Makes sure any exception sent to it causes the actor to report an exception.
+    """
+
+    def __init__(self):
+        pass
+
+    def send(self, obj: Any) -> None:
+        pass
+
+    def exception(self, obj: Exception) -> None:
+        # we deliver each error exactly once, so if there is no port to respond to,
+        # the error is sent to the current actor as an exception.
+        raise obj from None
 
 
 R = TypeVar("R")
@@ -655,7 +591,7 @@ class PortReceiver(Generic[R]):
                 raise ValueError(f"Unexpected message kind: {msg.kind}")
 
     def recv(self) -> "Future[R]":
-        return Future(impl=lambda: self._recv(), requires_loop=False)
+        return Future(coro=self._recv())
 
 
 class RankedPortReceiver(PortReceiver[Tuple[int, R]]):
@@ -704,18 +640,14 @@ class _Actor:
         mailbox: Mailbox,
         rank: int,
         shape: Shape,
-        message: PythonMessage,
+        method_spec: MethodSpecifier,
+        message: bytes,
         panic_flag: PanicFlag,
         local_state: Iterable[Any],
+        port: "PortProtocol",
     ) -> None:
-        match message.kind:
-            case PythonMessageKind.CallMethod(response_port=response_port):
-                pass
-            case _:
-                response_port = None
         # response_port can be None. If so, then sending to port will drop the response,
         # and raise any exceptions to the caller.
-        port = Port(response_port, mailbox, rank)
         try:
             ctx: MonarchContext = MonarchContext(
                 mailbox, mailbox.actor_id.proc_id, Point(rank, shape)
@@ -724,24 +656,25 @@ class _Actor:
 
             DebugContext.set(DebugContext())
 
-            args, kwargs = unflatten(message.message, local_state)
+            args, kwargs = unflatten(message, local_state)
 
-            match message.kind:
-                case PythonMessageKind.CallMethod(name=name):
-                    method = name
-                    if method == "__init__":
-                        Class, *args = args
-                        try:
-                            self.instance = Class(*args, **kwargs)
-                        except Exception as e:
-                            self._saved_error = ActorError(
-                                e, f"Remote actor {Class}.__init__ call failed."
-                            )
-                            raise e
-                        port.send(None)
-                        return None
-                case _:
-                    raise ValueError(f"Unexpected message kind: {message.kind}")
+            match method_spec:
+                case MethodSpecifier.Init():
+                    Class, *args = args
+                    try:
+                        self.instance = Class(*args, **kwargs)
+                    except Exception as e:
+                        self._saved_error = ActorError(
+                            e, f"Remote actor {Class}.__init__ call failed."
+                        )
+                        raise e
+                    port.send(None)
+                    return None
+                case MethodSpecifier.ReturnsResponse(name=method):
+                    pass
+                case MethodSpecifier.ExplicitPort(name=method):
+                    args = (port, *args)
+                    port = DroppingPort()
 
             if self.instance is None:
                 # This could happen because of the following reasons. Both
@@ -760,18 +693,23 @@ class _Actor:
                         f" This is likely due to an earlier error: {self._saved_error}"
                     )
                 raise AssertionError(error_message)
-            the_method = getattr(self.instance, method)._method
+            the_method = getattr(self.instance, method)
+            if isinstance(the_method, EndpointProperty):
+                module = the_method._method.__module__
+                the_method = functools.partial(the_method._method, self.instance)
+            else:
+                module = the_method.__module__
 
             if inspect.iscoroutinefunction(the_method):
 
                 async def instrumented():
                     enter_span(
-                        the_method.__module__,
+                        module,
                         method,
                         str(ctx.mailbox.actor_id),
                     )
                     try:
-                        result = await the_method(self.instance, *args, **kwargs)
+                        result = await the_method(*args, **kwargs)
                         self._maybe_exit_debugger()
                     except Exception as e:
                         logging.critical(
@@ -784,9 +722,9 @@ class _Actor:
 
                 result = await instrumented()
             else:
-                enter_span(the_method.__module__, method, str(ctx.mailbox.actor_id))
+                enter_span(module, method, str(ctx.mailbox.actor_id))
                 with fake_sync_state():
-                    result = the_method(self.instance, *args, **kwargs)
+                    result = the_method(*args, **kwargs)
                 self._maybe_exit_debugger()
                 exit_span()
 
@@ -885,42 +823,29 @@ class ActorMeshRef(MeshTrait):
         for attr_name in dir(self._class):
             attr_value = getattr(self._class, attr_name, None)
             if isinstance(attr_value, EndpointProperty):
+                # Convert string method name to appropriate MethodSpecifier
+                kind = (
+                    MethodSpecifier.ExplicitPort
+                    if attr_value._explicit_response_port
+                    else MethodSpecifier.ReturnsResponse
+                )
                 setattr(
                     self,
                     attr_name,
                     ActorEndpoint(
                         self._actor_mesh_ref,
-                        attr_name,
+                        kind(attr_name),
                         attr_value._method,
                         self._mailbox,
+                        attr_value._propagator,
+                        attr_value._explicit_response_port,
                     ),
                 )
 
-    def __getattr__(self, name: str) -> Any:
-        # This method is called when an attribute is not found
-        # For linting purposes, we need to tell the type checker that any attribute
-        # could be an endpoint that's dynamically added at runtime
-        # At runtime, we still want to raise AttributeError for truly missing attributes
-
-        # Check if this is a method on the underlying class
-        if hasattr(self._class, name):
-            attr = getattr(self._class, name)
-            if isinstance(attr, EndpointProperty):
-                # Dynamically create the endpoint
-                endpoint = ActorEndpoint(
-                    self._actor_mesh_ref,
-                    name,
-                    attr._method,
-                    self._mailbox,
-                )
-                # Cache it for future use
-                setattr(self, name, endpoint)
-                return endpoint
-
-        # If we get here, it's truly not found
-        raise AttributeError(
-            f"'{self.__class__.__name__}' object has no attribute '{name}'"
-        )
+    def __getattr__(self, attr: str) -> NotAnEndpoint:
+        if attr in dir(self._class):
+            return NotAnEndpoint(self, attr)
+        raise AttributeError(attr)
 
     def _create(
         self,
@@ -932,9 +857,11 @@ class ActorMeshRef(MeshTrait):
 
         ep = ActorEndpoint(
             self._actor_mesh_ref,
-            "__init__",
+            MethodSpecifier.Init(),
             null_func,
             self._mailbox,
+            None,
+            False,
         )
         send(ep, (self._class, *args), kwargs)
 

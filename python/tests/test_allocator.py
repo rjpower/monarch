@@ -35,6 +35,7 @@ from monarch._rust_bindings.monarch_hyperactor.channel import (
 
 from monarch._src.actor.allocator import (
     ALLOC_LABEL_PROC_MESH_NAME,
+    LocalAllocator,
     RemoteAllocator,
     StaticRemoteAllocInitializer,
     TorchXRemoteAllocInitializer,
@@ -58,6 +59,18 @@ _100_MILLISECONDS = timedelta(milliseconds=100)
 
 SERVER_READY = "monarch.tools.commands.server_ready"
 UNUSED = "__UNUSED__"
+
+
+class EnvCheckActor(Actor):
+    """Actor that checks for the presence of an environment variable"""
+
+    def __init__(self) -> None:
+        pass
+
+    @endpoint
+    async def get_env_var(self, var_name: str) -> str:
+        """Return the value of the specified environment variable or 'NOT_SET' if not found"""
+        return os.environ.get(var_name, "NOT_SET")
 
 
 class TestActor(Actor):
@@ -84,13 +97,16 @@ class TestActor(Actor):
 
     @endpoint
     async def log(self, message: str) -> None:
-        print(f"LogMessage from print: {message}")
+        print(f"Stdout LogMessage from print: {message}")
+        sys.stderr.write(f"Stderr LogMessage from print: {message}\n")
         self.logger.info(f"LogMessage from logger: {message}")
 
 
 @contextlib.contextmanager
 def remote_process_allocator(
-    addr: Optional[str] = None, timeout: Optional[int] = None
+    addr: Optional[str] = None,
+    timeout: Optional[int] = None,
+    envs: Optional[dict[str, str]] = None,
 ) -> Generator[str, None, None]:
     """Start a remote process allocator on addr. If timeout is not None, have it
     timeout after that many seconds if no messages come in"""
@@ -106,16 +122,19 @@ def remote_process_allocator(
         if timeout is not None:
             args.append(f"--timeout-sec={timeout}")
 
+        env = {
+            # prefix PATH with this test module's directory to
+            # give 'process_allocator' and 'monarch_bootstrap' binary resources
+            # in this test module's directory precedence over the installed ones
+            # useful in BUCK where these binaries are added as 'resources' of this test target
+            "PATH": f"{package_path}:{os.getenv('PATH', '')}",
+            "RUST_LOG": "debug",
+        }
+        if envs:
+            env.update(envs)
         process_allocator = subprocess.Popen(
             args=args,
-            env={
-                # prefix PATH with this test module's directory to
-                # give 'process_allocator' and 'monarch_bootstrap' binary resources
-                # in this test module's directory precedence over the installed ones
-                # useful in BUCK where these binaries are added as 'resources' of this test target
-                "PATH": f"{package_path}:{os.getenv('PATH', '')}",
-                "RUST_LOG": "debug",
-            },
+            env=env,
         )
         try:
             yield addr
@@ -126,6 +145,79 @@ def remote_process_allocator(
                 process_allocator.wait(timeout=five_seconds)
             except subprocess.TimeoutExpired:
                 process_allocator.kill()
+
+
+class TestSetupActorInAllocator(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cloudpickle.register_pickle_by_value(sys.modules[TestActor.__module__])
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cloudpickle.unregister_pickle_by_value(sys.modules[TestActor.__module__])
+
+    async def test_setup_lambda_with_multiple_env_vars(self) -> None:
+        """Test that the setup lambda can set multiple environment variables"""
+        env_vars: dict[str, str] = {
+            "TEST_ENV_VAR_1": "value_1",
+            "TEST_ENV_VAR_2": "value_2",
+            "TEST_ENV_VAR_3": "value_3",
+        }
+
+        def setup_multiple_env_vars() -> None:
+            for name, value in env_vars.items():
+                os.environ[name] = value
+
+        spec = AllocSpec(AllocConstraints(), gpus=1, hosts=1)
+        allocator = LocalAllocator()
+        alloc = await allocator.allocate(spec)
+
+        proc_mesh = await ProcMesh.from_alloc(alloc, setup=setup_multiple_env_vars)
+
+        try:
+            actor = await proc_mesh.spawn("env_check", EnvCheckActor)
+
+            for name, expected_value in env_vars.items():
+                actual_value = await actor.get_env_var.call_one(name)
+                self.assertEqual(
+                    actual_value,
+                    expected_value,
+                    f"Environment variable {name} was not set correctly",
+                )
+        finally:
+            await proc_mesh.stop()
+
+    async def test_setup_lambda_with_context_info(self) -> None:
+        """Test that the setup lambda can access rank information"""
+        context_var_name: str = "PROC_MESH_RANK_INFO"
+
+        def setup_with_rank() -> None:
+            context_info = f"point_rank:{current_rank().rank}"
+            os.environ[context_var_name] = context_info
+
+        spec = AllocSpec(AllocConstraints(), gpus=1, hosts=1)
+        allocator = LocalAllocator()
+        alloc = await allocator.allocate(spec)
+
+        proc_mesh = await ProcMesh.from_alloc(alloc, setup=setup_with_rank)
+
+        try:
+            actor = await proc_mesh.spawn("env_check", EnvCheckActor)
+
+            rank_info = await actor.get_env_var.call_one(context_var_name)
+
+            self.assertNotEqual(
+                rank_info,
+                "NOT_SET",
+                "Context information was not stored in the environment variable",
+            )
+            self.assertIn(
+                "point_rank:0",
+                rank_info,
+                f"Context information {rank_info} does not contain point_rank",
+            )
+        finally:
+            await proc_mesh.stop()
 
 
 class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
@@ -145,6 +237,26 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
         }
         computed_world_sizes = {p.rank: v for p, v in list(computed.flatten("rank"))}
         self.assertDictEqual(expected_world_sizes, computed_world_sizes)
+
+    async def test_allocate_failure_message(self) -> None:
+        spec = AllocSpec(AllocConstraints(), host=2, gpu=4)
+
+        with self.assertRaisesRegex(
+            Exception,
+            r"exited with code 1: Traceback \(most recent call last\).*",
+        ):
+            with remote_process_allocator(
+                envs={"MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING": "1"}
+            ) as host1, remote_process_allocator(
+                envs={"MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING": "1"}
+            ) as host2:
+                allocator = RemoteAllocator(
+                    world_id="test_remote_allocator",
+                    initializer=StaticRemoteAllocInitializer(host1, host2),
+                    heartbeat_interval=_100_MILLISECONDS,
+                )
+                alloc = await allocator.allocate(spec)
+                await ProcMesh.from_alloc(alloc)
 
     async def test_call_allocate_twice(self) -> None:
         class DeletingAllocInitializer(StaticRemoteAllocInitializer):
@@ -179,7 +291,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             """test initializer that returns an empty list of addresses"""
 
             async def initialize_alloc(self, match_labels: dict[str, str]) -> list[str]:
-                _ = match_labels  # Suppress unused variable warning
+                _ = match_labels
                 return []
 
         empty_initializer = EmptyAllocInitializer()
@@ -281,7 +393,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaisesRegex(
                 Exception,
-                r"(?s)Remote actor <class 'monarch.python.tests.test_allocator.FailInitActor'>.__init__ call failed.*fail on init",
+                r"(?s)fail on init",
             ):
                 await actor_mesh.dummy.call()
 
@@ -338,6 +450,41 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             # immediately, trying to access the wrapped actor mesh, but right
             # now we doing casting without accessing the wrapped type.
             del actor
+
+    async def test_setup_lambda_sets_env_vars(self) -> None:
+        """Test that the setup lambda can set environment variables during proc_mesh allocation"""
+        test_var_name: str = "TEST_ENV_VAR_FOR_PROC_MESH"
+        test_var_value: str = "test_value_123"
+
+        def setup_env_vars() -> None:
+            os.environ[test_var_name] = test_var_value
+
+        hosts = 2
+        gpus = 4
+        spec = AllocSpec(AllocConstraints(), host=hosts, gpu=gpus)
+
+        with remote_process_allocator() as host1, remote_process_allocator() as host2:
+            allocator = RemoteAllocator(
+                world_id="test_remote_allocator",
+                initializer=StaticRemoteAllocInitializer(host1, host2),
+                heartbeat_interval=_100_MILLISECONDS,
+            )
+            alloc = await allocator.allocate(spec)
+            proc_mesh = await ProcMesh.from_alloc(alloc, setup=setup_env_vars)
+
+            try:
+                actor = await proc_mesh.spawn("env_check", EnvCheckActor)
+
+                env_var_values = await actor.get_env_var.call(test_var_name)
+                env_var_value = env_var_values.item(host=0, gpu=0)
+
+                self.assertEqual(
+                    env_var_value,
+                    test_var_value,
+                    f"Environment variable {test_var_name} was not set correctly",
+                )
+            finally:
+                await proc_mesh.stop()
 
     async def test_stop_proc_mesh_context_manager_multiple_times(self) -> None:
         spec = AllocSpec(AllocConstraints(), host=2, gpu=4)
@@ -576,10 +723,20 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
 
             proc_mesh = await ProcMesh.from_alloc(await allocator.allocate(spec))
 
+            # Generate aggregated log every 1 second.
+            await proc_mesh.logging_option(True, 1)
             actor = await proc_mesh.spawn("actor", TestActor)
-
-            for _ in range(3):
-                await actor.log.call("Hey there, from a test!!")
-                sleep(1)
+            # Run for 4 seconds, every second generates 5 logs, so we expect to see
+            # 2 actors x 5 logs/actor/sec * 1 sec = 10 logs per aggregation.
+            for _ in range(20):
+                await actor.log.call("Expect to see [10 processes]")
+                sleep(0.2)
+            # Generate aggregated log every 2 seconds.
+            await proc_mesh.logging_option(True, 2)
+            # Run for 8 seconds, every second generates 5 logs, so we expect to see
+            # 2 actors x 5 logs/actor/sec * 2 sec = 20 logs per aggregation.
+            for _ in range(40):
+                await actor.log.call("Expect to see [20 processes]")
+                sleep(0.2)
 
             print("======== All Done ========")

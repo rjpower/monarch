@@ -6,7 +6,7 @@
 
 from typing import Any, final, Optional
 
-from monarch._rust_bindings.monarch_hyperactor.mailbox import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
 @final
 class _RdmaMemoryRegionView:
@@ -16,9 +16,12 @@ class _RdmaMemoryRegionView:
 class _RdmaManager:
     device: str
     def __repr__(self) -> str: ...
+    @classmethod
+    def create_rdma_manager_nonblocking(
+        self,
+        proc_mesh: Any,
+    ) -> PythonTask[_RdmaManager | None]: ...
 
-def create_rdma_manager_blocking(proc_mesh: Any) -> Optional[_RdmaManager]: ...
-async def create_rdma_manager_nonblocking(proc_mesh: Any) -> Optional[_RdmaManager]: ...
 @final
 class _RdmaBuffer:
     name: str

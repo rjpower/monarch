@@ -35,15 +35,15 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
-use crate::actor::PyPythonTask;
 use crate::actor::PythonActor;
 use crate::actor::PythonMessage;
-use crate::actor::PythonTask;
 use crate::mailbox::PyMailbox;
 use crate::mailbox::PythonOncePortReceiver;
 use crate::mailbox::PythonPortReceiver;
 use crate::proc::PyActorId;
 use crate::proc_mesh::Keepalive;
+use crate::pytokio::PyPythonTask;
+use crate::pytokio::PythonTask;
 use crate::selection::PySelection;
 use crate::shape::PyShape;
 use crate::supervision::SupervisionError;
@@ -98,6 +98,7 @@ impl PythonActorMesh {
     ) {
         loop {
             let event = events.next().await;
+            tracing::debug!("actor_mesh_monitor received supervision event: {event:?}");
             let mut inner_unhealthy_event = unhealthy_event.lock().unwrap();
             match &event {
                 None => *inner_unhealthy_event = Unhealthy::StreamClosed,
@@ -107,7 +108,8 @@ impl PythonActorMesh {
             // Ignore the sender error when there is no receiver,
             // which happens when there is no active requests to this
             // mesh.
-            let _ = user_sender.send(event.clone());
+            let ret = user_sender.send(event.clone());
+            tracing::debug!("actor_mesh_monitor user_sender send: {ret:?}");
 
             if event.is_none() {
                 // The mesh is stopped, so we can stop the monitor.
@@ -381,10 +383,11 @@ impl PythonActorMeshRef {
 
 impl Drop for PythonActorMesh {
     fn drop(&mut self) {
-        tracing::info!(
-            "Dropping PythonActorMesh: {}",
-            self.inner.borrow().unwrap().name()
-        );
+        if let Ok(mesh) = self.inner.borrow() {
+            tracing::info!("Dropping PythonActorMesh: {}", mesh.name());
+        } else {
+            tracing::info!("Dropping stopped PythonActorMesh");
+        }
         self.monitor.abort();
     }
 }
@@ -395,22 +398,22 @@ struct ActorMeshMonitor {
 }
 
 impl ActorMeshMonitor {
-    pub async fn next(&self) -> PyActorSupervisionEvent {
+    pub async fn next(&self) -> Result<PyActorSupervisionEvent, PyErr> {
         let receiver = self.receiver.clone();
         let receiver = receiver
             .borrow()
             .expect("`Actor mesh receiver` is shutdown");
         let mut receiver = receiver.lock().await;
-        let event = receiver.recv().await.unwrap();
-        match event {
-            None => PyActorSupervisionEvent {
-                // Dummy actor as place holder to indicate the whole mesh is stopped
+        let event = receiver.recv().await;
+        Ok(match event {
+            Ok(Some(event)) => PyActorSupervisionEvent::from(event.clone()),
+            Ok(None) | Err(_) => PyActorSupervisionEvent {
+                // Dummy actor as placeholder to indicate the whole mesh is stopped
                 // TODO(albertli): remove this when pushing all supervision logic to rust.
                 actor_id: id!(default[0].actor[0]).into(),
                 actor_status: "actor mesh is stopped due to proc mesh shutdown".to_string(),
             },
-            Some(event) => PyActorSupervisionEvent::from(event.clone()),
-        }
+        })
     }
 }
 
