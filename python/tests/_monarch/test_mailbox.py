@@ -6,20 +6,31 @@
 
 # pyre-strict
 
-import asyncio
 import pickle
-from typing import Any, Callable, cast, final, Generic, Iterable, TYPE_CHECKING, TypeVar
+from typing import (
+    Any,
+    Callable,
+    cast,
+    Coroutine,
+    final,
+    Generic,
+    Iterable,
+    TYPE_CHECKING,
+    TypeVar,
+)
 
 import monarch
 
 from monarch._rust_bindings.monarch_hyperactor.actor import (
+    MethodSpecifier,
     PanicFlag,
     PythonMessage,
     PythonMessageKind,
 )
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
 if TYPE_CHECKING:
-    from monarch._rust_bindings.monarch_hyperactor.actor import CallMethod
+    from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
 
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
@@ -75,7 +86,9 @@ class Accumulator(Generic[S, U]):
     @property
     def initial_state(self) -> PythonMessage:
         return PythonMessage(
-            PythonMessageKind.CallMethod(" @Accumulator.initial_state", None),
+            PythonMessageKind.CallMethod(
+                MethodSpecifier.ReturnsResponse(" @Accumulator.initial_state"), None
+            ),
             pickle.dumps(self._initial_state),
         )
 
@@ -87,11 +100,21 @@ class Accumulator(Generic[S, U]):
 async def allocate() -> ProcMesh:
     spec = AllocSpec(AllocConstraints(), replica=1)
     allocator = monarch.LocalAllocator()
-    alloc = await allocator.allocate(spec)
-    proc_mesh = await ProcMesh.allocate_nonblocking(alloc)
-    return proc_mesh
+    alloc = await allocator.allocate_nonblocking(spec)
+    return await ProcMesh.allocate_nonblocking(alloc)
 
 
+def _python_task_test(
+    fn: Callable[[], Coroutine[Any, Any, None]],
+) -> Callable[[], None]:
+    """
+    Wrapper for tests that use the internal tokio event loop
+    APIs and need to run on that event loop.
+    """
+    return lambda: PythonTask.from_coroutine(fn()).block_on()
+
+
+@_python_task_test
 async def test_accumulator() -> None:
     proc_mesh = await allocate()
     mailbox: Mailbox = proc_mesh.client
@@ -108,13 +131,15 @@ async def test_accumulator() -> None:
         port_ref.send(
             mailbox,
             PythonMessage(
-                PythonMessageKind.CallMethod("test_accumulator", None),
+                PythonMessageKind.CallMethod(
+                    MethodSpecifier.ReturnsResponse("test_accumulator"), None
+                ),
                 pickle.dumps(value),
             ),
         )
 
     async def recv_message() -> str:
-        messge = await asyncio.wait_for(receiver.recv_task().into_future(), timeout=5)
+        messge = await receiver.recv_task().with_timeout(seconds=5)
         value = pickle.loads(messge.message)
         return cast(str, value)
 
@@ -135,26 +160,18 @@ class MyActor:
         mailbox: Mailbox,
         rank: int,
         shape: Shape,
-        message: PythonMessage,
+        method: MethodSpecifier,
+        message: bytes,
         panic_flag: PanicFlag,
         local_state: Iterable[Any],
+        response_port: "PortProtocol[Any]",
     ) -> None:
-        call_method = cast("CallMethod", message.kind)
-        assert call_method.response_port is not None
-        reply_port = call_method.response_port
-        reply_port.send(
-            mailbox,
-            PythonMessage(PythonMessageKind.CallMethod("echo", None), message.message),
-        )
+        response_port.send(pickle.loads(message))
         for i in range(100):
-            reply_port.send(
-                mailbox,
-                PythonMessage(
-                    PythonMessageKind.CallMethod("echo", None), pickle.dumps(f"msg{i}")
-                ),
-            )
+            response_port.send(f"msg{i}")
 
 
+@_python_task_test
 async def test_reducer() -> None:
     proc_mesh = await allocate()
     actor_mesh = await proc_mesh.spawn_nonblocking("test", MyActor)
@@ -173,10 +190,16 @@ async def test_reducer() -> None:
     actor_mesh.cast(
         Selection.from_string("*"),
         PythonMessage(
-            PythonMessageKind.CallMethod("echo", port_ref), pickle.dumps("start")
+            PythonMessageKind.CallMethod(
+                MethodSpecifier.ReturnsResponse("echo"), port_ref
+            ),
+            pickle.dumps("start"),
         ),
     )
 
-    messge = await asyncio.wait_for(receiver.recv_task().into_future(), timeout=5)
-    value = cast(str, pickle.loads(messge.message))
+    messge = await receiver.recv_task().with_timeout(seconds=5)
+    value = pickle.loads(messge.message)
     assert "[reduced](start+msg0)" in value
+
+    #  Note: occasionally test would hang without this stop
+    await proc_mesh.stop_nonblocking()

@@ -45,11 +45,11 @@ use pyo3::types::PyType;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::actor::PyPythonTask;
 use crate::actor::PythonMessage;
 use crate::actor::PythonMessageKind;
-use crate::actor::PythonTask;
 use crate::proc::PyActorId;
+use crate::pytokio::PyPythonTask;
+use crate::pytokio::PythonTask;
 use crate::runtime::signal_safe_block_on;
 use crate::shape::PyShape;
 #[derive(Clone, Debug)]
