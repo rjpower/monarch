@@ -37,7 +37,7 @@ setup_rust_toolchain() {
 
 install_build_dependencies() {
     echo "Installing build dependencies..."
-    pip install -r build-requirements.txt
+    pip install -r build-requirements.txt ${INSTALL_ARGS}
 }
 
 # Install Python test dependencies
