@@ -33,7 +33,7 @@ jobs:
       submodules: recursive
       upload-artifact: monarch-${{ matrix.python-version }}-${{ matrix.gpu-arch-type }}${{ matrix.gpu-arch-version }}
       script: |
-        INSTALL_ARGS=${{ matrix.install-args }}
+        INSTALL_ARGS="${{ matrix.install-args }}"
         source scripts/common-setup.sh
         setup_build_environment ${{ matrix.python-version }}
 
