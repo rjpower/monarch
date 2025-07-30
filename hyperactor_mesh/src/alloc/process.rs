@@ -132,6 +132,7 @@ enum ChannelState {
 }
 
 struct Child {
+    local_rank: usize,
     channel: ChannelState,
     group: monitor::Group,
     exit_flag: Option<flag::Flag>,
@@ -142,6 +143,7 @@ struct Child {
 
 impl Child {
     fn monitored(
+        local_rank: usize,
         mut process: tokio::process::Child,
         log_channel: ChannelAddr,
     ) -> (Self, impl Future<Output = ProcStopReason>) {
@@ -156,7 +158,7 @@ impl Child {
             Box::new(io::stderr());
 
         // Use the helper function to create both writers at once
-        match create_log_writers(log_channel, process.id().unwrap_or(0)) {
+        match create_log_writers(local_rank, log_channel, process.id().unwrap_or(0)) {
             Ok((stdout_writer, stderr_writer)) => {
                 stdout_tee = stdout_writer;
                 stderr_tee = stderr_writer;
@@ -179,6 +181,7 @@ impl Child {
         );
 
         let child = Self {
+            local_rank,
             channel: ChannelState::NotConnected,
             group,
             exit_flag: Some(exit_flag),
@@ -200,7 +203,9 @@ impl Child {
                     };
                     Self::exit_status_to_reason(process.wait().await)
                 }
-                result = process.wait() => Self::exit_status_to_reason(result),
+                result = process.wait() => {
+                    Self::exit_status_to_reason(result)
+                }
             };
             exit_guard.signal();
 
@@ -217,7 +222,7 @@ impl Child {
                 if let Some(signal) = status.signal() {
                     ProcStopReason::Killed(signal, status.core_dumped())
                 } else if let Some(code) = status.code() {
-                    ProcStopReason::Exited(code)
+                    ProcStopReason::Exited(code, String::new())
                 } else {
                     ProcStopReason::Unknown
                 }
@@ -262,6 +267,7 @@ impl Child {
 
     fn spawn_watchdog(&mut self) {
         let Some(exit_flag) = self.exit_flag.take() else {
+            tracing::info!("exit flag set, not spawning watchdog");
             return;
         };
         let group = self.group.clone();
@@ -383,7 +389,7 @@ impl ProcessAlloc {
                         None
                     }
                     Ok(rank) => {
-                        let (handle, monitor) = Child::monitored(process, log_channel);
+                        let (handle, monitor) = Child::monitored(rank, process, log_channel);
                         self.children.spawn(async move { (index, monitor.await) });
                         self.active.insert(index, handle);
                         // Adjust for shape slice offset for non-zero shapes (sub-shapes).
@@ -460,10 +466,17 @@ impl Alloc for ProcessAlloc {
                     }
                 },
 
-                Some(Ok((index, reason))) = self.children.join_next() => {
-                    if let Some(Child { stdout, stderr, ..} ) = self.remove(index) {
+                Some(Ok((index, mut reason))) = self.children.join_next() => {
+                    let stderr_content = if let Some(Child { stdout, stderr, ..} ) = self.remove(index) {
                         let (_stdout, _) = stdout.join().await;
-                        let (_stderr, _) = stderr.join().await;
+                        let (stderr_lines, _) = stderr.join().await;
+                        stderr_lines.join("\n")
+                    } else {
+                        String::new()
+                    };
+
+                    if let ProcStopReason::Exited(code, _) = &mut reason {
+                        reason = ProcStopReason::Exited(*code, stderr_content);
                     }
 
                     tracing::info!("child stopped with ProcStopReason::{:?}", reason);
