@@ -22,7 +22,7 @@ import pytest
 
 import torch
 
-from monarch._src.actor.actor_mesh import ActorMeshRef, Port, PortTuple
+from monarch._src.actor.actor_mesh import ActorMeshRef, Channel, Port
 
 from monarch.actor import (
     Accumulator,
@@ -543,10 +543,10 @@ class SendAlot(Actor):
             port.send(i)
 
 
-def test_port_as_argument():
+def test_port_as_argument() -> None:
     proc_mesh = local_proc_mesh(gpus=1).get()
     s = proc_mesh.spawn("send_alot", SendAlot).get()
-    send, recv = PortTuple.create(proc_mesh._mailbox)
+    send, recv = Channel[int].open()
 
     s.send.broadcast(send)
 

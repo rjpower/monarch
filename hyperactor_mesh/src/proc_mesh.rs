@@ -76,6 +76,30 @@ fn global_router() -> &'static MailboxRouter {
     GLOBAL_ROUTER.get_or_init(MailboxRouter::new)
 }
 
+pub fn global_mailbox() -> Mailbox {
+    static GLOBAL_MAILBOX: OnceLock<Mailbox> = OnceLock::new();
+    GLOBAL_MAILBOX
+        .get_or_init(|| {
+            let world_id = WorldId("root".to_string());
+            let client_proc_id = ProcId(world_id.clone(), 0);
+            let (client_proc_addr, client_rx) = channel::serve_local();
+            let router = DialMailboxRouter::new_with_default(global_router().boxed());
+            let client_proc = Proc::new(
+                client_proc_id.clone(),
+                BoxedMailboxSender::new(router.clone()),
+            );
+            client_proc
+                .clone()
+                .serve(client_rx, mailbox::monitored_return_handle());
+            router.bind(client_proc_id.clone().into(), client_proc_addr.clone());
+
+            global_router().bind(world_id.clone().into(), router.clone());
+
+            client_proc.attach("client").expect("root mailbox creation")
+        })
+        .clone()
+}
+
 type ActorEventRouter = Arc<DashMap<ActorMeshName, mpsc::UnboundedSender<ActorSupervisionEvent>>>;
 /// A ProcMesh maintains a mesh of procs whose lifecycles are managed by
 /// an allocator.
