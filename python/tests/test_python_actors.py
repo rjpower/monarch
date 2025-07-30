@@ -279,7 +279,7 @@ class TLSActor(Actor):
 
 async def test_actor_tls() -> None:
     """Test that thread-local state is respected."""
-    pm = await proc_mesh(gpus=1)
+    pm = proc_mesh(gpus=1)
     am = await pm.spawn("tls", TLSActor)
     await am.increment.call_one()
     await am.increment_async.call_one()
@@ -308,7 +308,7 @@ class TLSActorFullSync(Actor):
 
 async def test_actor_tls_full_sync() -> None:
     """Test that thread-local state is respected."""
-    pm = await proc_mesh(gpus=1)
+    pm = proc_mesh(gpus=1)
     am = await pm.spawn("tls", TLSActorFullSync)
     await am.increment.call_one()
     await am.increment.call_one()
@@ -481,7 +481,7 @@ async def test_actor_log_streaming() -> None:
             sys.stderr = stderr_file
 
             try:
-                pm = await proc_mesh(gpus=2)
+                pm = proc_mesh(gpus=2)
                 am = await pm.spawn("printer", Printer)
 
                 await am.print.call("hello 1")
@@ -556,7 +556,7 @@ def test_port_as_argument() -> None:
 
 @pytest.mark.timeout(15)
 async def test_same_actor_twice() -> None:
-    pm = await proc_mesh(gpus=1)
+    pm = proc_mesh(gpus=1)
     await pm.spawn("dup", Counter, 0)
 
     # The second spawn with the same name should fail with a specific error
@@ -572,7 +572,7 @@ async def test_same_actor_twice() -> None:
 
 class TestActorMeshStop(unittest.IsolatedAsyncioTestCase):
     async def test_actor_mesh_stop(self) -> None:
-        pm = await proc_mesh(gpus=2)
+        pm = proc_mesh(gpus=2)
         am_1 = await pm.spawn("printer", Printer)
         am_2 = await pm.spawn("printer2", Printer)
         await am_1.print.call("hello 1")

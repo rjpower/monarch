@@ -507,7 +507,7 @@ _debug_client_mesh: Optional[DebugClient] = None
 async def _debug_client() -> DebugClient:
     global _debug_client_mesh
     if _debug_client_mesh is None:
-        mesh = await _get_debug_proc_mesh()
+        mesh = _get_debug_proc_mesh()
         _debug_client_mesh = await mesh._spawn_nonblocking("debug_client", DebugClient)
     return _debug_client_mesh
 
