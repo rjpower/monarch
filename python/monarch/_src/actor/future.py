@@ -20,7 +20,7 @@ from typing import (
     TypeVar,
 )
 
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 
 from typing_extensions import deprecated, Self
 
@@ -158,14 +158,15 @@ class DeprecatedNotAFuture:
     """
 
     def get(self) -> "Self":
-        typ = str(type(self))
+        cls = type(self)
+        typ = f"{cls.__module__}.{cls.__qualname__}"
         warnings.warn(
-            f".get() and await is deprecated for {typ}, we directly return {typ} instead of Future[{typ}]. {''.join(traceback.format_stack())}",
+            f"This get()/await can be removed. get() and await is deprecated for {typ}, we directly return {typ} instead of Future[{typ}].\n",
             DeprecationWarning,
             stacklevel=2,
         )
         return self
 
-    def __await__(self) -> "Generator[Any, Any, Self]":
+    def __await___(self) -> "Generator[Any, Any, Self]":
         yield from ()
         return self

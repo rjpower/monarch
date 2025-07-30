@@ -9,7 +9,7 @@
 import abc
 import logging
 from dataclasses import dataclass
-from typing import Awaitable, final, Optional, TYPE_CHECKING
+from typing import Awaitable, Dict, final, Optional, TYPE_CHECKING
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
     Alloc,
@@ -31,7 +31,8 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 @dataclass
 class AllocHandle(DeprecatedNotAFuture):
-    _hy_alloc: Shared[Alloc]
+    _hy_alloc: "Shared[Alloc]"
+    _extent: Dict[str, int]
 
 
 class AllocateMixin(abc.ABC):
@@ -48,7 +49,7 @@ class AllocateMixin(abc.ABC):
         Returns:
         - A future that will be fulfilled when the requested allocation is fulfilled.
         """
-        return AllocHandle(self.allocate_nonblocking(spec).spawn())
+        return AllocHandle(self.allocate_nonblocking(spec).spawn(), spec.extent)
 
 
 @final

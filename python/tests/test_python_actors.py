@@ -22,7 +22,7 @@ import pytest
 
 import torch
 
-from monarch._src.actor.actor_mesh import ActorMeshRef, Port, PortTuple
+from monarch._src.actor.actor_mesh import ActorMeshRef, Channel, Port
 
 from monarch.actor import (
     Accumulator,
@@ -178,8 +178,8 @@ async def test_sync_actor():
     assert r == 5
 
 
-def test_sync_actor_sync_client():
-    proc = local_proc_mesh(gpus=2).get()
+def test_sync_actor_sync_client() -> None:
+    proc = local_proc_mesh(gpus=2)
     a = proc.spawn("actor", SyncActor).get()
     c = proc.spawn("counter", Counter, 5).get()
     r = a.sync_endpoint.choose(c).get()
@@ -187,12 +187,12 @@ def test_sync_actor_sync_client():
 
 
 def test_proc_mesh_size() -> None:
-    proc = local_proc_mesh(gpus=2).get()
+    proc = local_proc_mesh(gpus=2)
     assert 2 == proc.size("gpus")
 
 
 def test_rank_size_sync() -> None:
-    proc = local_proc_mesh(gpus=2).get()
+    proc = local_proc_mesh(gpus=2)
     r = proc.spawn("runit", RunIt).get()
 
     acc = Accumulator(r.run, 0, operator.add)
@@ -201,7 +201,7 @@ def test_rank_size_sync() -> None:
 
 
 def test_accumulate_sync() -> None:
-    proc = local_proc_mesh(gpus=2).get()
+    proc = local_proc_mesh(gpus=2)
     counter = proc.spawn("counter", Counter, 1).get()
     counter.incr.broadcast()
     acc = Accumulator(counter.value, 0, operator.add)
@@ -216,7 +216,7 @@ class CastToCounter(Actor):
 
 
 def test_value_mesh() -> None:
-    proc = local_proc_mesh(gpus=2).get()
+    proc = local_proc_mesh(gpus=2)
     counter = proc.spawn("counter", Counter, 0).get()
     counter.slice(hosts=0, gpus=1).incr.broadcast()
     x = counter.value.call().get()
@@ -244,7 +244,7 @@ def test_rust_binding_modules_correct() -> None:
 
 
 def test_proc_mesh_liveness() -> None:
-    mesh = proc_mesh(gpus=2).get()
+    mesh = proc_mesh(gpus=2)
     counter = mesh.spawn("counter", Counter, 1).get()
     del mesh
     # Give some time for the mesh to have been shut down.
@@ -543,10 +543,10 @@ class SendAlot(Actor):
             port.send(i)
 
 
-def test_port_as_argument():
-    proc_mesh = local_proc_mesh(gpus=1).get()
+def test_port_as_argument() -> None:
+    proc_mesh = local_proc_mesh(gpus=1)
     s = proc_mesh.spawn("send_alot", SendAlot).get()
-    send, recv = PortTuple.create(proc_mesh._mailbox)
+    send, recv = Channel[int].open()
 
     s.send.broadcast(send)
 
