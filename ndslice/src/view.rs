@@ -494,7 +494,7 @@ impl<T: Viewable> ViewExt for T {
         }
 
         offset += strides[dim] * begin;
-        sizes[dim] = (end - begin) / step;
+        sizes[dim] = (end - begin).div_ceil(step);
         strides[dim] *= step;
         let slice = Slice::new(offset, sizes, strides).unwrap();
 
@@ -656,6 +656,14 @@ mod test {
             0, 1, 1 => 10;
             0, 1, 2 => 12;
             0, 1, 3 => 14;
+        );
+
+        let extent = extent!(x = 3);
+        assert_view!(
+            extent.range("x", Range(0, None, 2)).unwrap(),
+            extent!(x = 2),
+            0 => 0;
+            1 => 2;
         );
     }
 }
