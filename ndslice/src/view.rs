@@ -393,23 +393,25 @@ impl View {
     }
 }
 
-/// The iterator over views.
-pub struct ViewIterator<'a> {
-    extent: Extent,
-    pos: SliceIterator<'a>,
-}
+  /// The iterator over views.
+  pub struct ViewIterator<'a> {
+      extent: Extent,         // Note that `extent` and...
+      pos: SliceIterator<'a>, // ... `pos` share the same `Slice`.
+  }
+
 
 impl<'a> Iterator for ViewIterator<'a> {
     type Item = (Point, usize);
 
-    fn next(&mut self) -> Option<Self::Item> {
-        // This is the rank in the space; we need to convert this to the 'dense' rank.
-        let rank = self.pos.next()?;
-        let index = self.pos.slice.index(rank).unwrap();
+     fn next(&mut self) -> Option<Self::Item> {
+         // This is a rank in the base space.
+         let rank = self.pos.next()?;
+         // Here, we convert to view space.
+         let coords = self.pos.slice.coordinates(rank).unwrap();
+         let point = coords.in_(&self.extent).unwrap();
+         Some((point, rank))
+     }
 
-        // Here, we have to convert to the new space.
-        Some((self.extent.point_of_rank(index).unwrap(), rank))
-    }
 }
 
 /// Viewable is a common trait implemented for data structures from which views
