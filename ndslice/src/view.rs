@@ -372,6 +372,7 @@ pub enum ViewError {
 }
 
 /// A view is a collection of ranks, organized into an extent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct View {
     labels: Vec<String>,
     slice: Slice,
@@ -393,25 +394,23 @@ impl View {
     }
 }
 
-  /// The iterator over views.
-  pub struct ViewIterator<'a> {
-      extent: Extent,         // Note that `extent` and...
-      pos: SliceIterator<'a>, // ... `pos` share the same `Slice`.
-  }
-
+/// The iterator over views.
+pub struct ViewIterator<'a> {
+    extent: Extent,         // Note that `extent` and...
+    pos: SliceIterator<'a>, // ... `pos` share the same `Slice`.
+}
 
 impl<'a> Iterator for ViewIterator<'a> {
     type Item = (Point, usize);
 
-     fn next(&mut self) -> Option<Self::Item> {
-         // This is a rank in the base space.
-         let rank = self.pos.next()?;
-         // Here, we convert to view space.
-         let coords = self.pos.slice.coordinates(rank).unwrap();
-         let point = coords.in_(&self.extent).unwrap();
-         Some((point, rank))
-     }
-
+    fn next(&mut self) -> Option<Self::Item> {
+        // This is a rank in the base space.
+        let rank = self.pos.next()?;
+        // Here, we convert to view space.
+        let coords = self.pos.slice.coordinates(rank).unwrap();
+        let point = coords.in_(&self.extent).unwrap();
+        Some((point, rank))
+    }
 }
 
 /// Viewable is a common trait implemented for data structures from which views
