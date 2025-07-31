@@ -408,7 +408,7 @@ impl<'a> Iterator for ViewIterator<'a> {
         let index = self.pos.slice.index(rank).unwrap();
 
         // Here, we have to convert to the new space.
-        Some((self.extent.rank(index).unwrap(), rank))
+        Some((self.extent.point_of_rank(index).unwrap(), rank))
     }
 }
 
@@ -540,19 +540,19 @@ mod test {
 
         assert_eq!(extent.len(), 4 * 5 * 6);
 
-        let p3 = extent.rank(0).unwrap();
+        let p3 = extent.point_of_rank(0).unwrap();
         assert_eq!(p3.coords(), &[0, 0, 0]);
         assert_eq!(p3.rank(), 0);
 
-        let p4 = extent.rank(1).unwrap();
+        let p4 = extent.point_of_rank(1).unwrap();
         assert_eq!(p4.coords(), &[0, 0, 1]);
         assert_eq!(p4.rank(), 1);
 
-        let p5 = extent.rank(2).unwrap();
+        let p5 = extent.point_of_rank(2).unwrap();
         assert_eq!(p5.coords(), &[0, 0, 2]);
         assert_eq!(p5.rank(), 2);
 
-        let p6 = extent.rank(6 * 5 + 1).unwrap();
+        let p6 = extent.point_of_rank(6 * 5 + 1).unwrap();
         assert_eq!(p6.coords(), &[1, 0, 1]);
         assert_eq!(p6.rank(), 6 * 5 + 1);
         assert_eq!(p6[0], 1);
