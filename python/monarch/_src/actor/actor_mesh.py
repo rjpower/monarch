@@ -116,13 +116,6 @@ class MonarchContext:
     def get() -> "MonarchContext":
         return _context.get()
 
-    @staticmethod
-    def current_mailbox() -> "Mailbox":
-        context = _context.get(None)
-        if context is not None:
-            return context.mailbox
-        return Mailbox.root_client_mailbox()
-
 
 _context: contextvars.ContextVar[MonarchContext] = contextvars.ContextVar(
     "monarch.actor_mesh._context"
@@ -347,13 +340,13 @@ class ActorEndpoint(Endpoint[P, R]):
         shape = self._actor_mesh._shape
         return Extent(shape.labels, shape.ndslice.sizes)
 
-    def _port(self, once: bool = False) -> "Tuple[Port[R], PortReceiver[R]]":
-        p, r = super()._port(once=once)
+    def _port(self, once: bool = False) -> "PortTuple[R]":
+        p, r = PortTuple.create(self._mailbox, once)
         if TYPE_CHECKING:
             assert isinstance(
                 r._receiver, (HyPortReceiver | OncePortReceiver)
             ), "unexpected receiver type"
-        return (p, PortReceiver(self._mailbox, self._supervise(r._receiver)))
+        return PortTuple(p, PortReceiver(self._mailbox, self._supervise(r._receiver)))
 
     def _rref(self, args, kwargs):
         self._check_arguments(args, kwargs)
@@ -529,25 +522,49 @@ R = TypeVar("R")
 
 T = TypeVar("T")
 
+if TYPE_CHECKING:
+    # Python <= 3.10 cannot inherit from Generic[R] and NamedTuple at the same time.
+    # we only need it for type checking though, so copypasta it until 3.11.
+    class PortTuple(NamedTuple, Generic[R]):
+        sender: "Port[R]"
+        receiver: "PortReceiver[R]"
+
+        @staticmethod
+        def create(mailbox: Mailbox, once: bool = False) -> "PortTuple[Any]":
+            handle, receiver = mailbox.open_once_port() if once else mailbox.open_port()
+            port_ref = handle.bind()
+            return PortTuple(
+                Port(port_ref, mailbox, rank=None),
+                PortReceiver(mailbox, receiver),
+            )
+else:
+
+    class PortTuple(NamedTuple):
+        sender: "Port[Any]"
+        receiver: "PortReceiver[Any]"
+
+        @staticmethod
+        def create(mailbox: Mailbox, once: bool = False) -> "PortTuple[Any]":
+            handle, receiver = mailbox.open_once_port() if once else mailbox.open_port()
+            port_ref = handle.bind()
+            return PortTuple(
+                Port(port_ref, mailbox, rank=None),
+                PortReceiver(mailbox, receiver),
+            )
+
 
 # advance lower-level API for sending messages. This is intentially
 # not part of the Endpoint API because they way it accepts arguments
 # and handles concerns is different.
-class Channel(Generic[R]):
-    @staticmethod
-    def open(once: bool = False) -> Tuple["Port[R]", "PortReceiver[R]"]:
-        mailbox = MonarchContext.current_mailbox()
-        handle, receiver = mailbox.open_once_port() if once else mailbox.open_port()
-        port_ref = handle.bind()
-        return (
-            Port(port_ref, mailbox, rank=None),
-            PortReceiver(mailbox, receiver),
-        )
+def port(endpoint: Endpoint[P, R], once: bool = False) -> "PortTuple[R]":
+    return endpoint._port(once)
 
-    @staticmethod
-    def open_ranked(once: bool = False) -> Tuple["Port[R]", "RankedPortReceiver[R]"]:
-        send, recv = Channel[R].open()
-        return (send, recv.ranked())
+
+def ranked_port(
+    endpoint: Endpoint[P, R], once: bool = False
+) -> Tuple["Port[R]", "RankedPortReceiver[R]"]:
+    p, receiver = port(endpoint, once)
+    return p, RankedPortReceiver[R](receiver._mailbox, receiver._receiver)
 
 
 class PortReceiver(Generic[R]):
@@ -575,9 +592,6 @@ class PortReceiver(Generic[R]):
 
     def recv(self) -> "Future[R]":
         return Future(coro=self._recv())
-
-    def ranked(self) -> "RankedPortReceiver[R]":
-        return RankedPortReceiver[R](self._mailbox, self._receiver)
 
 
 class RankedPortReceiver(PortReceiver[Tuple[int, R]]):
