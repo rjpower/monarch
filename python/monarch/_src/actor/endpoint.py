@@ -40,7 +40,7 @@ if TYPE_CHECKING:
         HyPortReceiver,
         OncePortReceiver,
         Port,
-        PortReceiver,
+        PortTuple,
         ValueMesh,
     )
 
@@ -90,10 +90,9 @@ class Endpoint(ABC, Generic[P, R]):
         """
         pass
 
-    def _port(self, once: bool = False) -> "Tuple[Port[R], PortReceiver[R]]":
-        from monarch._src.actor.actor_mesh import Channel
-
-        return Channel[R].open(once)
+    @abstractmethod
+    def _port(self, once: bool = False) -> "PortTuple[R]":
+        pass
 
     @abstractmethod
     def _call_name(self) -> Any:
@@ -116,14 +115,17 @@ class Endpoint(ABC, Generic[P, R]):
 
         Load balanced RPC-style entrypoint for request/response messaging.
         """
+        from monarch._src.actor.actor_mesh import port
 
-        p, r = self._port(once=True)
+        p, r = port(self, once=True)
         # pyre-ignore
         self._send(args, kwargs, port=p, selection="choose")
         return r.recv()
 
     def call_one(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]:
-        p, r = self._port(once=True)
+        from monarch._src.actor.actor_mesh import port
+
+        p, r = port(self, once=True)
         # pyre-ignore
         extent = self._send(args, kwargs, port=p, selection="choose")
         if extent.nelements != 1:
@@ -133,10 +135,9 @@ class Endpoint(ABC, Generic[P, R]):
         return r.recv()
 
     def call(self, *args: P.args, **kwargs: P.kwargs) -> "Future[ValueMesh[R]]":
-        from monarch._src.actor.actor_mesh import ValueMesh
+        from monarch._src.actor.actor_mesh import ranked_port, ValueMesh
 
-        p, unranked = self._port()
-        r = unranked.ranked()
+        p, r = ranked_port(self)
         # pyre-ignore
         extent = self._send(args, kwargs, port=p)
 
@@ -165,8 +166,9 @@ class Endpoint(ABC, Generic[P, R]):
         This enables processing results from multiple actors incrementally as
         they become available. Returns an async generator of response values.
         """
+        from monarch._src.actor.actor_mesh import port
 
-        p, r = self._port()
+        p, r = port(self)
         # pyre-ignore
         extent = self._send(args, kwargs, port=p)
         for _ in range(extent.nelements):
