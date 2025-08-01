@@ -371,12 +371,13 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 initializer=StaticRemoteAllocInitializer(wrong_host),
                 heartbeat_interval=_100_MILLISECONDS,
             )
-            alloc = await allocator.allocate(spec)
+            alloc = allocator.allocate(spec)
+            await alloc.initialized
 
             with self.assertRaisesRegex(
                 Exception, r"no process has ever been allocated.*"
             ):
-                await ProcMesh.from_alloc(alloc)
+                await ProcMesh.from_alloc(alloc).initialized
 
     async def test_init_failure(self) -> None:
         class FailInitActor(Actor):
