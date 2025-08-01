@@ -34,7 +34,7 @@ from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monar
     AllocConstraints,
     AllocSpec,
 )
-from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
+
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
     ProcMesh as HyProcMesh,
     ProcMeshMonitor,
@@ -146,7 +146,7 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         Because ProcMesh are remote objects, there is no guarentee that the ProcMesh is
         still usable after this completes, only that at some point in the past it was usable.
         """
-        pm = self._proc_mesh
+        pm: Shared[HyProcMesh] = self._proc_mesh
 
         async def task() -> Literal[True]:
             await pm
