@@ -546,7 +546,8 @@ class SendAlot(Actor):
 def test_port_as_argument():
     proc_mesh = local_proc_mesh(gpus=1)
     s = proc_mesh.spawn("send_alot", SendAlot).get()
-    send, recv = PortTuple.create(proc_mesh._mailbox)
+    mb = Future(coro=proc_mesh._proc_mesh.task()).get().client
+    send, recv = PortTuple.create(mb)
 
     s.send.broadcast(send)
 
