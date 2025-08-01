@@ -77,6 +77,7 @@ logger: Logger = logging.getLogger(__name__)
 class Controller(_Controller):
     def __init__(self, workers: "HyProcMesh") -> None:
         super().__init__()
+        self._mailbox: Mailbox = workers.client
         # Buffer for messages unrelated to debugging that are received while a
         # debugger session is active.
         self._non_debugger_pending_messages: deque[
