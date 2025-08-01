@@ -189,6 +189,7 @@ def test_sync_actor_sync_client() -> None:
 def test_proc_mesh_size() -> None:
     proc = local_proc_mesh(gpus=2)
     assert 2 == proc.size("gpus")
+    proc.initialized.get()
 
 
 def test_rank_size_sync() -> None:
