@@ -9,7 +9,7 @@
 import abc
 import logging
 from dataclasses import dataclass
-from typing import Awaitable, Dict, final, Optional, TYPE_CHECKING
+from typing import Dict, final, Literal, Optional, TYPE_CHECKING
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
     Alloc,
@@ -33,6 +33,20 @@ logger: logging.Logger = logging.getLogger(__name__)
 class AllocHandle(DeprecatedNotAFuture):
     _hy_alloc: "Shared[Alloc]"
     _extent: Dict[str, int]
+
+    @property
+    def initialized(self) -> Future[Literal[True]]:
+        """
+        Future completes with 'True' when the alloc has initialized.
+        Because alloc are remote objects, there is no guarentee that the alloc is
+        still usable after this completes, only that at some point in the past it was usable.
+        """
+
+        async def task() -> Literal[True]:
+            await self._hy_alloc
+            return True
+
+        return Future(coro=task())
 
 
 class AllocateMixin(abc.ABC):
