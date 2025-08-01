@@ -34,7 +34,7 @@ from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monar
     AllocConstraints,
     AllocSpec,
 )
-from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
+
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
     ProcMesh as HyProcMesh,
     ProcMeshMonitor,
