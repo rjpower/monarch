@@ -123,9 +123,7 @@ class Endpoint(ABC, Generic[P, R]):
         return r.recv()
 
     def call_one(self, *args: P.args, **kwargs: P.kwargs) -> Future[R]:
-        from monarch._src.actor.actor_mesh import Channel
-
-        p, r = Channel[R].open(once=True)
+        p, r = self._port(once=True)
         # pyre-ignore
         extent = self._send(args, kwargs, port=p, selection="choose")
         if extent.nelements != 1:
