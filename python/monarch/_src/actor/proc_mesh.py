@@ -20,6 +20,7 @@ from typing import (
     cast,
     Dict,
     List,
+    Literal,
     Optional,
     Sequence,
     Type,
@@ -137,6 +138,21 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         self._logging_mesh_client: Optional[LoggingMeshClient] = None
         self._maybe_device_mesh: Optional["DeviceMesh"] = _device_mesh
         self._stopped = False
+
+    @property
+    def initialized(self) -> Future[Literal[True]]:
+        """
+        Future completes with 'True' when the ProcMesh has initialized.
+        Because ProcMesh are remote objects, there is no guarentee that the ProcMesh is
+        still usable after this completes, only that at some point in the past it was usable.
+        """
+        pm = self._proc_mesh
+
+        async def task() -> Literal[True]:
+            await pm
+            return True
+
+        return Future(coro=task())
 
     def _init_manager_actors(self, setup: Callable[[], None] | None = None) -> None:
         self._proc_mesh = PythonTask.from_coroutine(
