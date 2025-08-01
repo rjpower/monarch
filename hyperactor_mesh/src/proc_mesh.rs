@@ -60,6 +60,7 @@ use crate::proc_mesh::mesh_agent::MeshAgent;
 use crate::proc_mesh::mesh_agent::MeshAgentMessageClient;
 use crate::proc_mesh::mesh_agent::StopActorResult;
 use crate::reference::ProcMeshId;
+use crate::shortuuid::ShortUuid;
 
 pub mod mesh_agent;
 
@@ -80,7 +81,7 @@ pub fn global_mailbox() -> Mailbox {
     static GLOBAL_MAILBOX: OnceLock<Mailbox> = OnceLock::new();
     GLOBAL_MAILBOX
         .get_or_init(|| {
-            let world_id = WorldId("root".to_string());
+            let world_id = WorldId(ShortUuid::generate().to_string());
             let client_proc_id = ProcId(world_id.clone(), 0);
             let (client_proc_addr, client_rx) = channel::serve_local();
             let router = DialMailboxRouter::new_with_default(global_router().boxed());

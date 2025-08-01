@@ -178,8 +178,8 @@ async def test_sync_actor():
     assert r == 5
 
 
-def test_sync_actor_sync_client():
-    proc = local_proc_mesh(gpus=2).get()
+def test_sync_actor_sync_client() -> None:
+    proc = local_proc_mesh(gpus=2)
     a = proc.spawn("actor", SyncActor).get()
     c = proc.spawn("counter", Counter, 5).get()
     r = a.sync_endpoint.choose(c).get()
@@ -187,12 +187,12 @@ def test_sync_actor_sync_client():
 
 
 def test_proc_mesh_size() -> None:
-    proc = local_proc_mesh(gpus=2).get()
+    proc = local_proc_mesh(gpus=2)
     assert 2 == proc.size("gpus")
 
 
 def test_rank_size_sync() -> None:
-    proc = local_proc_mesh(gpus=2).get()
+    proc = local_proc_mesh(gpus=2)
     r = proc.spawn("runit", RunIt).get()
 
     acc = Accumulator(r.run, 0, operator.add)
@@ -201,7 +201,7 @@ def test_rank_size_sync() -> None:
 
 
 def test_accumulate_sync() -> None:
-    proc = local_proc_mesh(gpus=2).get()
+    proc = local_proc_mesh(gpus=2)
     counter = proc.spawn("counter", Counter, 1).get()
     counter.incr.broadcast()
     acc = Accumulator(counter.value, 0, operator.add)
@@ -216,7 +216,7 @@ class CastToCounter(Actor):
 
 
 def test_value_mesh() -> None:
-    proc = local_proc_mesh(gpus=2).get()
+    proc = local_proc_mesh(gpus=2)
     counter = proc.spawn("counter", Counter, 0).get()
     counter.slice(hosts=0, gpus=1).incr.broadcast()
     x = counter.value.call().get()
@@ -244,7 +244,7 @@ def test_rust_binding_modules_correct() -> None:
 
 
 def test_proc_mesh_liveness() -> None:
-    mesh = proc_mesh(gpus=2).get()
+    mesh = proc_mesh(gpus=2)
     counter = mesh.spawn("counter", Counter, 1).get()
     del mesh
     # Give some time for the mesh to have been shut down.
@@ -279,7 +279,7 @@ class TLSActor(Actor):
 
 async def test_actor_tls() -> None:
     """Test that thread-local state is respected."""
-    pm = await proc_mesh(gpus=1)
+    pm = proc_mesh(gpus=1)
     am = await pm.spawn("tls", TLSActor)
     await am.increment.call_one()
     await am.increment_async.call_one()
@@ -308,7 +308,7 @@ class TLSActorFullSync(Actor):
 
 async def test_actor_tls_full_sync() -> None:
     """Test that thread-local state is respected."""
-    pm = await proc_mesh(gpus=1)
+    pm = proc_mesh(gpus=1)
     am = await pm.spawn("tls", TLSActorFullSync)
     await am.increment.call_one()
     await am.increment.call_one()
@@ -481,7 +481,7 @@ async def test_actor_log_streaming() -> None:
             sys.stderr = stderr_file
 
             try:
-                pm = await proc_mesh(gpus=2)
+                pm = proc_mesh(gpus=2)
                 am = await pm.spawn("printer", Printer)
 
                 await am.print.call("hello 1")
@@ -544,7 +544,7 @@ class SendAlot(Actor):
 
 
 def test_port_as_argument() -> None:
-    proc_mesh = local_proc_mesh(gpus=1).get()
+    proc_mesh = local_proc_mesh(gpus=1)
     s = proc_mesh.spawn("send_alot", SendAlot).get()
     send, recv = Channel[int].open()
 
@@ -556,7 +556,7 @@ def test_port_as_argument() -> None:
 
 @pytest.mark.timeout(15)
 async def test_same_actor_twice() -> None:
-    pm = await proc_mesh(gpus=1)
+    pm = proc_mesh(gpus=1)
     await pm.spawn("dup", Counter, 0)
 
     # The second spawn with the same name should fail with a specific error
@@ -572,7 +572,7 @@ async def test_same_actor_twice() -> None:
 
 class TestActorMeshStop(unittest.IsolatedAsyncioTestCase):
     async def test_actor_mesh_stop(self) -> None:
-        pm = await proc_mesh(gpus=2)
+        pm = proc_mesh(gpus=2)
         am_1 = await pm.spawn("printer", Printer)
         am_2 = await pm.spawn("printer2", Printer)
         await am_1.print.call("hello 1")
