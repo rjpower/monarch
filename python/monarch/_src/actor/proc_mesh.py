@@ -173,6 +173,14 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         proc_mesh = await proc_mesh_
         # WARNING: it is unsafe to await self._proc_mesh here
         # because self._proc_mesh is the result of this function itself!
+
+        self._logging_mesh_client = await LoggingMeshClient.spawn(proc_mesh=proc_mesh)
+        self._logging_mesh_client.set_mode(
+            stream_to_client=True,
+            aggregate_window_sec=3,
+            level=logging.INFO,
+        )
+
         _rdma_manager = (
             # type: ignore[16]
             await _RdmaManager.create_rdma_manager_nonblocking(proc_mesh)
@@ -396,11 +404,9 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         """
         if level < 0 or level > 255:
             raise ValueError("Invalid logging level: {}".format(level))
+        await self.initialized
 
-        if self._logging_mesh_client is None:
-            self._logging_mesh_client = await LoggingMeshClient.spawn(
-                proc_mesh=await self._proc_mesh_for_asyncio_fixme
-            )
+        assert self._logging_mesh_client is not None
         self._logging_mesh_client.set_mode(
             stream_to_client=stream_to_client,
             aggregate_window_sec=aggregate_window_sec,

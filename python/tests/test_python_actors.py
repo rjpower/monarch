@@ -23,7 +23,8 @@ import pytest
 import torch
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
-from monarch._src.actor.actor_mesh import ActorMeshRef, Channel, Port
+from monarch._src.actor.actor_mesh import ActorMeshRef, Channel, Port, PortTuple
+from monarch._src.actor.future import Future
 
 from monarch.actor import (
     Accumulator,
