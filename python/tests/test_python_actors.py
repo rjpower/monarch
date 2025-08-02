@@ -9,18 +9,19 @@ import asyncio
 import logging
 import operator
 import os
+import re
 import sys
 import tempfile
 import threading
 import time
 import unittest
-from logging import INFO
 from types import ModuleType
 from typing import cast
 
 import pytest
 
 import torch
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
 from monarch._src.actor.actor_mesh import ActorMeshRef, Channel, Port
 
@@ -31,7 +32,6 @@ from monarch.actor import (
     current_rank,
     current_size,
     endpoint,
-    Future,
     local_proc_mesh,
     proc_mesh,
 )
@@ -442,17 +442,22 @@ async def awaitit(f):
 
 
 class Printer(Actor):
-    def __init__(self):
-        self.logger = logging.getLogger()
-        self.logger.setLevel(INFO)
+    def __init__(self) -> None:
+        self._logger: logging.Logger = logging.getLogger()
 
     @endpoint
-    async def print(self, content: str):
-        print(f"{os.getpid()} {content}")
+    async def print(self, content: str) -> None:
+        print(f"{content}", flush=True)
+        sys.stdout.flush()
+        sys.stderr.flush()
 
     @endpoint
-    async def log(self, content: str):
-        self.logger.info(f"{os.getpid()} {content}")
+    async def log(self, content: str) -> None:
+        self._logger.error(f"{content}")
+        for handler in self._logger.handlers:
+            handler.flush()
+        sys.stdout.flush()
+        sys.stderr.flush()
 
 
 async def test_actor_log_streaming() -> None:
@@ -485,16 +490,45 @@ async def test_actor_log_streaming() -> None:
                 pm = proc_mesh(gpus=2)
                 am = await pm.spawn("printer", Printer)
 
-                await am.print.call("hello 1")
-                await am.log.call("hello 2")
+                # Disable streaming logs to client
+                await pm.logging_option(
+                    stream_to_client=False, aggregate_window_sec=None
+                )
+                await asyncio.sleep(1)
 
-                await pm.logging_option(stream_to_client=True)
+                # These should not be streamed to client initially
+                for _ in range(5):
+                    await am.print.call("no print streaming")
+                    await am.log.call("no log streaming")
+                await asyncio.sleep(1)
 
-                await am.print.call("hello 3")
-                await am.log.call("hello 4")
+                # Enable streaming logs to client
+                await pm.logging_option(
+                    stream_to_client=True, aggregate_window_sec=1, level=logging.FATAL
+                )
+                # Give it some time to reflect
+                await asyncio.sleep(1)
 
-                # Give it sometime to send log back
-                time.sleep(5)
+                # These should be streamed to client
+                for _ in range(5):
+                    await am.print.call("has print streaming")
+                    await am.log.call("no log streaming due to level mismatch")
+                await asyncio.sleep(1)
+
+                # Enable streaming logs to client
+                await pm.logging_option(
+                    stream_to_client=True, aggregate_window_sec=1, level=logging.ERROR
+                )
+                # Give it some time to reflect
+                await asyncio.sleep(1)
+
+                # These should be streamed to client
+                for _ in range(5):
+                    await am.print.call("has print streaming too")
+                    await am.log.call("has log streaming as level matched")
+
+                # Give it some time to reflect and aggregate
+                await asyncio.sleep(1)
 
                 # Flush all outputs
                 stdout_file.flush()
@@ -515,16 +549,135 @@ async def test_actor_log_streaming() -> None:
         with open(stdout_path, "r") as f:
             stdout_content = f.read()
 
+        with open(stderr_path, "r") as f:
+            stderr_content = f.read()
+
         # Clean up temp files
         os.unlink(stdout_path)
         os.unlink(stderr_path)
 
-        # TODO: (@jamessun) we need to disable logging forwarder for python logger
-        # assert "hello 1" not in stdout_content
-        assert "hello 2" not in stdout_content
+        # Assertions on the captured output
+        # Has a leading context so we can distinguish between streamed log and
+        # the log directly printed by the child processes as they share the same stdout/stderr
+        assert not re.search(
+            r"processes.*no print streaming", stdout_content
+        ), stdout_content
+        assert not re.search(
+            r"processes.*no print streaming", stderr_content
+        ), stderr_content
+        assert not re.search(
+            r"processes.*no log streaming", stdout_content
+        ), stdout_content
+        assert not re.search(
+            r"processes.*no log streaming", stderr_content
+        ), stderr_content
+        assert not re.search(
+            r"processes.*no log streaming due to level mismatch", stdout_content
+        ), stdout_content
+        assert not re.search(
+            r"processes.*no log streaming due to level mismatch", stderr_content
+        ), stderr_content
 
-        assert "hello 3" in stdout_content
-        # assert "hello 4" in stdout_content
+        assert re.search(
+            r"processes.*has print streaming", stdout_content
+        ), stdout_content
+        assert not re.search(
+            r"processes.*has print streaming", stderr_content
+        ), stderr_content
+        assert re.search(
+            r"processes.*has print streaming too", stdout_content
+        ), stdout_content
+        assert not re.search(
+            r"processes.*has print streaming too", stderr_content
+        ), stderr_content
+        assert not re.search(
+            r"processes.*log streaming as level matched", stdout_content
+        ), stdout_content
+        assert re.search(
+            r"processes.*log streaming as level matched", stderr_content
+        ), stderr_content
+
+    finally:
+        # Ensure file descriptors are restored even if something goes wrong
+        try:
+            os.dup2(original_stdout_fd, 1)
+            os.dup2(original_stderr_fd, 2)
+            os.close(original_stdout_fd)
+            os.close(original_stderr_fd)
+        except OSError:
+            pass
+
+
+async def test_logging_option_defaults() -> None:
+    # Save original file descriptors
+    original_stdout_fd = os.dup(1)  # stdout
+    original_stderr_fd = os.dup(2)  # stderr
+
+    try:
+        # Create temporary files to capture output
+        with tempfile.NamedTemporaryFile(
+            mode="w+", delete=False
+        ) as stdout_file, tempfile.NamedTemporaryFile(
+            mode="w+", delete=False
+        ) as stderr_file:
+            stdout_path = stdout_file.name
+            stderr_path = stderr_file.name
+
+            # Redirect file descriptors to our temp files
+            # This will capture both Python and Rust output
+            os.dup2(stdout_file.fileno(), 1)
+            os.dup2(stderr_file.fileno(), 2)
+
+            # Also redirect Python's sys.stdout/stderr for completeness
+            original_sys_stdout = sys.stdout
+            original_sys_stderr = sys.stderr
+            sys.stdout = stdout_file
+            sys.stderr = stderr_file
+
+            try:
+                pm = await proc_mesh(gpus=2)
+                am = await pm.spawn("printer", Printer)
+
+                for _ in range(5):
+                    await am.print.call("print streaming")
+                    await am.log.call("log streaming")
+                await asyncio.sleep(4)
+
+                # Flush all outputs
+                stdout_file.flush()
+                stderr_file.flush()
+                os.fsync(stdout_file.fileno())
+                os.fsync(stderr_file.fileno())
+
+            finally:
+                # Restore Python's sys.stdout/stderr
+                sys.stdout = original_sys_stdout
+                sys.stderr = original_sys_stderr
+
+        # Restore original file descriptors
+        os.dup2(original_stdout_fd, 1)
+        os.dup2(original_stderr_fd, 2)
+
+        # Read the captured output
+        with open(stdout_path, "r") as f:
+            stdout_content = f.read()
+
+        with open(stderr_path, "r") as f:
+            stderr_content = f.read()
+
+        # Clean up temp files
+        os.unlink(stdout_path)
+        os.unlink(stderr_path)
+
+        # Assertions on the captured output
+        assert re.search(r"processes.*print streaming", stdout_content), stdout_content
+        assert not re.search(
+            r"processes.*print streaming", stderr_content
+        ), stderr_content
+        assert not re.search(
+            r"processes.*log streaming", stdout_content
+        ), stdout_content
+        assert re.search(r"processes.*log streaming", stderr_content), stderr_content
 
     finally:
         # Ensure file descriptors are restored even if something goes wrong
@@ -599,3 +752,16 @@ def test_ported_actor():
     proc_mesh = local_proc_mesh(gpus=1).get()
     a = proc_mesh.spawn("port_actor", PortedActor).get()
     assert 5 == a.add.call_one(2).get()
+
+
+async def _recv():
+    return (7, 2, 3)
+
+
+async def consume():
+    r = await PythonTask.from_coroutine(_recv())
+    assert r == (7, 2, 3)
+
+
+def test_python_task_tuple() -> None:
+    PythonTask.from_coroutine(consume()).block_on()
