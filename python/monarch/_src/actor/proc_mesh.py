@@ -136,6 +136,10 @@ class ProcMesh(MeshTrait):
         self,
         setup: Callable[[], None] | None = None,
     ) -> "ProcMesh":
+        # Initialize default logging options
+        # TODO: @marius move this to host mesh init
+        await self.logging_option()
+
         _rdma_manager = (
             # type: ignore[16]
             await _RdmaManager.create_rdma_manager_nonblocking(self._proc_mesh)
@@ -158,6 +162,7 @@ class ProcMesh(MeshTrait):
             setup_actor = await self._spawn_nonblocking("setup", SetupActor, setup)
             # pyre-ignore
             await setup_actor.setup.call()._status.coro
+
         return self
 
     @property
@@ -306,28 +311,35 @@ class ProcMesh(MeshTrait):
 
     async def logging_option(
         self,
-        stream_to_client: bool = False,
-        aggregate_window_sec: int | None = None,
+        stream_to_client: bool = True,
+        aggregate_window_sec: int | None = 3,
+        level: int = logging.INFO,
     ) -> None:
         """
         Set the logging options for the remote processes
 
         Args:
             stream_to_client (bool): If True, logs from the remote processes will be streamed to the client.
-            Defaults to False.
+            Defaults to True.
             aggregate_window_sec (Optional[int]): If not None, logs from the remote processes will be aggregated
-            and sent to the client every aggregate_window_sec seconds. Defaults to None, meaning no aggregation.
-            aggregate_window_sec will be ignored if stream_to_client is False.
+            and sent to the client every aggregate_window_sec seconds. Defaults to 3 seconds, meaning no aggregation.
+            Error will be thrown if aggregate_window_sec is set and stream_to_client is False.
+            level (int): The logging level of the logger. Defaults to logging.INFO.
 
         Returns:
             None
         """
+        if level < 0 or level > 255:
+            raise ValueError("Invalid logging level: {}".format(level))
+
         if self._logging_mesh_client is None:
             self._logging_mesh_client = await LoggingMeshClient.spawn(
                 proc_mesh=self._proc_mesh
             )
         self._logging_mesh_client.set_mode(
-            stream_to_client, aggregate_window_sec=aggregate_window_sec
+            stream_to_client=stream_to_client,
+            aggregate_window_sec=aggregate_window_sec,
+            level=level,
         )
 
     async def __aenter__(self) -> "ProcMesh":
