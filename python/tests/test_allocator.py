@@ -173,12 +173,11 @@ class TestSetupActorInAllocator(unittest.IsolatedAsyncioTestCase):
         alloc = allocator.allocate(spec)
 
         proc_mesh = ProcMesh.from_alloc(alloc, setup=setup_multiple_env_vars)
-
         try:
             actor = await proc_mesh.spawn("env_check", EnvCheckActor)
 
             for name, expected_value in env_vars.items():
-                actual_value = actor.get_env_var.call_one(name)
+                actual_value = await actor.get_env_var.call_one(name)
                 self.assertEqual(
                     actual_value,
                     expected_value,
