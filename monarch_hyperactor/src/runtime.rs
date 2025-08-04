@@ -65,7 +65,7 @@ pub fn get_tokio_runtime<'l>() -> std::sync::MappedRwLockReadGuard<'l, tokio::ru
 
 pub fn shutdown_tokio_runtime() {
     INSTANCE.write().unwrap().take().map(|x| {
-        x.shutdown_background();
+        x.shutdown_timeout(Duration::from_secs(1));
     });
 }
 
