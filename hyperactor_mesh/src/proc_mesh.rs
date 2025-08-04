@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use dashmap::DashSet;
 use futures::future::join_all;
 use hyperactor::Actor;
 use hyperactor::ActorId;
@@ -37,6 +38,7 @@ use hyperactor::mailbox::MailboxServer;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::PortReceiver;
 use hyperactor::mailbox::Undeliverable;
+use hyperactor::metrics;
 use hyperactor::proc::Proc;
 use hyperactor::reference::ProcId;
 use hyperactor::reference::Reference;
@@ -72,29 +74,25 @@ use std::sync::OnceLock;
 /// This is definitely a "good enough for now" solution; in the future,
 /// we'll likely have some form of truly global registration for meshes,
 /// also benefitting tooling, etc.
-fn global_router() -> &'static MailboxRouter {
+pub(crate) fn global_router() -> &'static MailboxRouter {
     static GLOBAL_ROUTER: OnceLock<MailboxRouter> = OnceLock::new();
     GLOBAL_ROUTER.get_or_init(MailboxRouter::new)
 }
 
+/// Global mailbox used by the root client to send messages.
+/// This mailbox allows us to open ports before we know which proc the
+/// messages will be sent to.
 pub fn global_mailbox() -> Mailbox {
     static GLOBAL_MAILBOX: OnceLock<Mailbox> = OnceLock::new();
     GLOBAL_MAILBOX
         .get_or_init(|| {
             let world_id = WorldId(ShortUuid::generate().to_string());
             let client_proc_id = ProcId(world_id.clone(), 0);
-            let (client_proc_addr, client_rx) = channel::serve_local();
-            let router = DialMailboxRouter::new_with_default(global_router().boxed());
             let client_proc = Proc::new(
                 client_proc_id.clone(),
-                BoxedMailboxSender::new(router.clone()),
+                BoxedMailboxSender::new(global_router().clone()),
             );
-            client_proc
-                .clone()
-                .serve(client_rx, mailbox::monitored_return_handle());
-            router.bind(client_proc_id.clone().into(), client_proc_addr.clone());
-
-            global_router().bind(world_id.clone().into(), router.clone());
+            global_router().bind(world_id.clone().into(), client_proc.clone());
 
             client_proc.attach("client").expect("root mailbox creation")
         })
@@ -330,6 +328,7 @@ impl ProcMesh {
 
         let shape = alloc.shape().clone();
         let world_id = alloc.world_id().clone();
+        metrics::PROC_MESH_ALLOCATION.add(1, hyperactor_telemetry::kv_pairs!());
 
         Ok(Self {
             event_state: Some(EventState {
@@ -389,6 +388,14 @@ impl ProcMesh {
                     }
                 }
                 GspawnResult::Error(error_msg) => {
+                    metrics::PROC_MESH_ACTOR_FAILURES.add(
+                        1,
+                        hyperactor_telemetry::kv_pairs!(
+                            "actor_name" => actor_name.to_string(),
+                            "error" => error_msg.clone(),
+                        ),
+                    );
+
                     anyhow::bail!("gspawn failed: {}", error_msg);
                 }
             }
@@ -569,6 +576,15 @@ impl ProcEvents {
                         continue;
                     };
 
+                    metrics::PROC_MESH_PROC_STOPPED.add(
+                        1,
+                        hyperactor_telemetry::kv_pairs!(
+                            "proc_id" => proc_id.to_string(),
+                            "rank" => rank.to_string(),
+                            "reason" => reason.to_string(),
+                        ),
+                    );
+
                     // Need to send this event to actor meshes to notify them of the proc's death.
                     // TODO(albertli): only send this event to all root actor meshes if any of them use this proc.
                     for entry in self.actor_event_router.iter() {
@@ -603,6 +619,15 @@ impl ProcEvents {
                             tracing::warn!("received supervision event for unregistered actor {}", actor_id);
                         }
                     }
+                    metrics::PROC_MESH_ACTOR_FAILURES.add(
+                        1,
+                        hyperactor_telemetry::kv_pairs!(
+                            "actor_id" => actor_id.to_string(),
+                            "rank" => rank.to_string(),
+                            "status" => actor_status.to_string(),
+                        ),
+                    );
+
                     // Send this event to Python proc mesh to keep its health status up to date.
                     break Some(ProcEvent::Crashed(*rank, actor_status.to_string()))
                 }

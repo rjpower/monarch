@@ -62,10 +62,10 @@ use crate::reference::ProcMeshId;
 pub(crate) fn actor_mesh_cast<A, M>(
     caps: &impl cap::CanSend,
     actor_mesh_id: ActorMeshId,
-    actor_mesh_shape: &Shape,
     sender: &ActorId,
     comm_actor_ref: &ActorRef<CommActor>,
-    selection: Selection,
+    selection_of_root: Selection,
+    root_mesh_shape: &Shape,
     message: M,
 ) -> Result<(), CastError>
 where
@@ -77,18 +77,20 @@ where
         "message_variant" => message.arm().unwrap_or_default(),
     ));
 
-    let slice = actor_mesh_shape.slice().clone();
     let message = CastMessageEnvelope::new::<A, M>(
         actor_mesh_id,
         sender.clone(),
-        actor_mesh_shape.clone(),
+        root_mesh_shape.clone(),
         message,
     )?;
 
     comm_actor_ref.send(
         caps,
         CastMessage {
-            dest: Uslice { slice, selection },
+            dest: Uslice {
+                slice: root_mesh_shape.slice().clone(),
+                selection: selection_of_root,
+            },
             message,
         },
     )?;
@@ -105,34 +107,34 @@ pub(crate) fn cast_to_sliced_mesh<A, M>(
     sel_of_sliced: &Selection,
     message: M,
     sliced_shape: &Shape,
-    base_shape: &Shape,
+    root_mesh_shape: &Shape,
 ) -> Result<(), CastError>
 where
     A: RemoteActor + RemoteHandles<IndexedErasedUnbound<M>>,
     M: Castable + RemoteMessage,
 {
-    let base_slice = base_shape.slice();
+    let root_slice = root_mesh_shape.slice();
 
     // Casting to `*`?
-    let sel_of_base = if selection::normalize(sel_of_sliced) == normal::NormalizedSelection::True {
+    let sel_of_root = if selection::normalize(sel_of_sliced) == normal::NormalizedSelection::True {
         // Reify this view into base.
-        base_slice.reify_view(sliced_shape.slice())?
+        root_slice.reify_view(sliced_shape.slice())?
     } else {
         // No, fall back on `of_ranks`.
         let ranks = sel_of_sliced
             .eval(&EvalOpts::strict(), sliced_shape.slice())?
             .collect::<BTreeSet<_>>();
-        Selection::of_ranks(base_slice, &ranks)?
+        Selection::of_ranks(root_slice, &ranks)?
     };
 
     // Cast.
     actor_mesh_cast::<A, M>(
         caps,
         actor_mesh_id,
-        base_shape,
         sender,
         comm_actor_ref,
-        sel_of_base,
+        sel_of_root,
+        root_mesh_shape,
         message,
     )
 }
@@ -154,10 +156,10 @@ pub trait ActorMesh: Mesh<Id = ActorMeshId> {
         actor_mesh_cast::<Self::Actor, M>(
             self.proc_mesh().client(),            // send capability
             self.id(),                            // actor mesh id (destination mesh)
-            self.shape(),                         // actor mesh shape
             self.proc_mesh().client().actor_id(), // sender
             self.proc_mesh().comm_actor(),        // comm actor
             selection,                            // the selected actors
+            self.shape(),                         // root mesh shape
             message,                              // the message
         )
     }
@@ -603,15 +605,15 @@ pub(crate) mod test_util {
 
     #[async_trait]
     impl Handler<Echo> for ProxyActor {
-        async fn handle(
-            &mut self,
-            _cx: &Context<Self>,
-            message: Echo,
-        ) -> Result<(), anyhow::Error> {
+        async fn handle(&mut self, cx: &Context<Self>, message: Echo) -> Result<(), anyhow::Error> {
             let actor = self.actor_mesh.get(0).unwrap();
 
-            // Have the remote mesh reply directly to the client.
-            actor.send(self.proc_mesh.client(), message).unwrap();
+            // For now, we reply directly to the client.
+            // We will support directly wiring up the meshes later.
+            let (tx, mut rx) = cx.open_port();
+
+            actor.send(cx, Echo(message.0, tx.bind()))?;
+            message.1.send(cx, rx.recv().await.unwrap())?;
 
             Ok(())
         }
@@ -651,13 +653,13 @@ mod tests {
             use super::*;
             use super::test_util::*;
 
-            #[ignore] // Remove in D79478197.
             #[tokio::test]
             async fn test_proxy_mesh() {
                 use super::test_util::*;
                 use $crate::alloc::AllocSpec;
                 use $crate::alloc::Allocator;
 
+                hyperactor_telemetry::initialize_logging(hyperactor::clock::ClockKind::default());
 
                 use ndslice::shape;
 
