@@ -173,12 +173,11 @@ class TestSetupActorInAllocator(unittest.IsolatedAsyncioTestCase):
         alloc = allocator.allocate(spec)
 
         proc_mesh = ProcMesh.from_alloc(alloc, setup=setup_multiple_env_vars)
-
         try:
             actor = await proc_mesh.spawn("env_check", EnvCheckActor)
 
             for name, expected_value in env_vars.items():
-                actual_value = actor.get_env_var.call_one(name)
+                actual_value = await actor.get_env_var.call_one(name)
                 self.assertEqual(
                     actual_value,
                     expected_value,
@@ -308,7 +307,9 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 initializer=empty_initializer,
                 heartbeat_interval=_100_MILLISECONDS,
             )
-            allocator.allocate(AllocSpec(AllocConstraints(), host=1, gpu=1)).initialized
+            await allocator.allocate(
+                AllocSpec(AllocConstraints(), host=1, gpu=1)
+            ).initialized
 
     async def test_allocate_2d_mesh(self) -> None:
         hosts = 2
@@ -375,7 +376,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(
                 Exception, r"no process has ever been allocated.*"
             ):
-                ProcMesh.from_alloc(alloc).initialized
+                await ProcMesh.from_alloc(alloc).initialized
 
     async def test_init_failure(self) -> None:
         class FailInitActor(Actor):
@@ -477,7 +478,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             )
             alloc = allocator.allocate(spec)
             proc_mesh = ProcMesh.from_alloc(alloc, setup=setup_env_vars)
-
+            await proc_mesh.initialized
             try:
                 actor = await proc_mesh.spawn("env_check", EnvCheckActor)
 
@@ -536,7 +537,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 Exception, "no process has ever been allocated on"
             ):
                 alloc = allocator.allocate(spec)
-                ProcMesh.from_alloc(alloc).initialized
+                await ProcMesh.from_alloc(alloc).initialized
 
     async def test_stacked_1d_meshes(self) -> None:
         # create two stacked actor meshes on the same host
@@ -582,7 +583,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 RuntimeError,
                 r"slurm:///123 does not exist or is in a terminal state",
             ):
-                allocator.allocate(
+                await allocator.allocate(
                     AllocSpec(AllocConstraints(), host=1, gpu=1)
                 ).initialized
 
@@ -607,7 +608,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 RuntimeError,
                 r"2 proc meshes in slurm:///123, please specify the mesh name as a match label `procmesh.monarch.meta.com/name`",
             ):
-                allocator.allocate(
+                await allocator.allocate(
                     AllocSpec(AllocConstraints(), host=1, gpu=1)
                 ).initialized
 

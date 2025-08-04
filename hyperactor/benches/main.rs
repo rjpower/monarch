@@ -6,6 +6,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#![allow(clippy::disallowed_methods)] // tokio::time::sleep
+
 use std::time::Duration;
 use std::time::Instant;
 
@@ -31,6 +33,7 @@ use tokio::sync::oneshot;
 #[derive(Debug, Clone, Serialize, Deserialize, Named, PartialEq)]
 struct Message {
     id: u64,
+    #[serde(with = "serde_bytes")]
     payload: Vec<u8>,
 }
 
@@ -63,6 +66,10 @@ fn bench_message_sizes(c: &mut Criterion) {
                 let tt = &transport;
                 b.iter_custom(|iters| async move {
                     let addr = ChannelAddr::any(tt.clone());
+                    if let ChannelAddr::Tcp(socket_addr) = addr {
+                        assert!(!socket_addr.ip().is_loopback());
+                    }
+
                     let (listen_addr, mut rx) = serve::<Message>(addr).await.unwrap();
                     let tx = dial::<Message>(listen_addr).unwrap();
                     let msg = Message::new(0, size);

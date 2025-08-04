@@ -66,6 +66,7 @@ use crate::RemoteMessage;
 use crate::clock::Clock;
 use crate::clock::RealClock;
 use crate::config;
+use crate::metrics;
 
 /// Use to prevent [futures::Stream] objects using the wrong next() method by
 /// accident. Bascially, we want to use [tokio_stream::StreamExt::next] since it
@@ -185,6 +186,7 @@ impl<M: RemoteMessage> NetTx<M> {
         let (sender, receiver) = mpsc::unbounded_channel();
         let dest = link.dest();
         let (notify, status) = watch::channel(TxStatus::Active);
+
         let tx = Self {
             sender,
             dest,
@@ -201,11 +203,6 @@ impl<M: RemoteMessage> NetTx<M> {
         mut receiver: mpsc::UnboundedReceiver<(M, oneshot::Sender<M>, Instant)>,
         notify: watch::Sender<TxStatus>,
     ) {
-        hyperactor_telemetry::declare_static_histogram!(
-            REMOTE_MESSAGE_SEND_SIZE,
-            "channel.remote_message_send_size"
-        );
-
         // If we can't deliver a message within this limit consider
         // `link` broken and return.
 
@@ -295,7 +292,8 @@ impl<M: RemoteMessage> NetTx<M> {
                 let data: Bytes = bincode::serialize(&frame)
                     .map_err(|e| format!("serialization error: {e}"))?
                     .into();
-                REMOTE_MESSAGE_SEND_SIZE.record(data.len() as f64, &[]);
+                metrics::REMOTE_MESSAGE_SEND_SIZE.record(data.len() as f64, &[]);
+
                 self.deque.push_back(QueuedMessage {
                     seq: self.next_seq,
                     data,
@@ -457,7 +455,11 @@ impl<M: RemoteMessage> NetTx<M> {
             /// Channel is running.
             Running(Deliveries<'a, M>),
             /// Message delivery not possible.
-            Closing(Deliveries<'a, M>),
+            Closing {
+                deliveries: Deliveries<'a, M>,
+                /// why closing
+                reason: String,
+            },
         }
 
         impl<'a, M: RemoteMessage> State<'a, M> {
@@ -518,16 +520,29 @@ impl<M: RemoteMessage> NetTx<M> {
                             (running, conn)
                         }
                         Err(err) => {
-                            tracing::error!(
+                            let error_msg = format!(
                                 "session {}.{}: failed to push message to outbox: {}",
                                 link.dest(),
                                 session_id,
                                 err
                             );
-                            (State::Closing(Deliveries { outbox, unacked }), conn)
+                            tracing::error!(error_msg);
+                            (
+                                State::Closing {
+                                    deliveries: Deliveries { outbox, unacked },
+                                    reason: error_msg,
+                                },
+                                conn,
+                            )
                         }
                     },
-                    None => (State::Closing(Deliveries { outbox, unacked }), conn),
+                    None => (
+                        State::Closing {
+                            deliveries: Deliveries { outbox, unacked },
+                            reason: "NetTx is dropped".to_string(),
+                        },
+                        conn,
+                    ),
                 },
                 (
                     State::Running(Deliveries {
@@ -542,13 +557,17 @@ impl<M: RemoteMessage> NetTx<M> {
                     tokio::select! {
                         // If acking message takes too long, consider the link broken.
                         _ = unacked.wait_for_timeout(), if !unacked.is_empty() => {
-                            tracing::error!(
+                            let error_msg = format!(
                                 "session {}.{}: failed to receive ack within timeout {} secs; link is currently connected",
                                 link.dest(),
                                 session_id,
                                 config::global::get(config::MESSAGE_DELIVERY_TIMEOUT).as_secs(),
                             );
-                            (State::Closing(Deliveries{outbox, unacked}), Conn::Connected { sink, stream })
+                            tracing::error!(error_msg);
+                            (State::Closing {
+                                deliveries: Deliveries{outbox, unacked},
+                                reason: error_msg,
+                            }, Conn::Connected { sink, stream })
                         }
                         // tokio_stream::StreamExt::next is cancel safe.
                         ack_result = tokio_stream::StreamExt::next(&mut stream) => {
@@ -560,15 +579,19 @@ impl<M: RemoteMessage> NetTx<M> {
                                             (State::Running(Deliveries { outbox, unacked }), Conn::Connected { sink, stream })
                                         }
                                         Err(len) => {
-                                            tracing::error!(
+                                            let error_msg = format!(
                                                 "session {}.{}: ack message size is not 8 bytes. It is {} bytes",
                                                 link.dest(),
                                                 session_id,
                                                 len,
                                             );
+                                            tracing::error!(error_msg);
                                             // Similar to the message flow, we always close the
                                             // channel when encountering ser/deser errors.
-                                            (State::Closing(Deliveries{outbox, unacked}), Conn::Connected { sink, stream })
+                                            (State::Closing {
+                                                deliveries: Deliveries{outbox, unacked},
+                                                reason: error_msg,
+                                            }, Conn::Connected { sink, stream })
                                         }
                                     }
                                 },
@@ -627,17 +650,24 @@ impl<M: RemoteMessage> NetTx<M> {
                                             (running, Conn::Connected { sink, stream })
                                         }
                                         Err(err) => {
-                                            tracing::error!(
+                                            let error_msg = format!(
                                                 "session {}.{}: failed to push message to outbox: {}",
                                                 link.dest(),
                                                 session_id,
                                                 err
                                             );
-                                            (State::Closing(Deliveries {outbox, unacked}), Conn::Connected { sink, stream })
+                                            tracing::error!(error_msg);
+                                            (State::Closing {
+                                                deliveries: Deliveries {outbox, unacked},
+                                                reason: error_msg,
+                                            }, Conn::Connected { sink, stream })
                                         }
                                     }
                                 }
-                                None => (State::Closing(Deliveries{outbox, unacked}), Conn::Connected { sink, stream }),
+                                None => (State::Closing {
+                                    deliveries: Deliveries{outbox, unacked},
+                                    reason: "NetTx is dropped".to_string(),
+                                }, Conn::Connected { sink, stream }),
                             }
                         },
                     }
@@ -654,24 +684,32 @@ impl<M: RemoteMessage> NetTx<M> {
                     // If delivering this message is taking too long,
                     // consider the link broken.
                     if outbox.is_expired() {
-                        tracing::error!(
+                        let error_msg = format!(
                             "session {}.{}: failed to deliver message within timeout",
                             link.dest(),
                             session_id,
                         );
+                        tracing::error!(error_msg);
                         (
-                            State::Closing(Deliveries { outbox, unacked }),
+                            State::Closing {
+                                deliveries: Deliveries { outbox, unacked },
+                                reason: error_msg,
+                            },
                             Conn::reconnect_with_default(),
                         )
                     } else if unacked.is_expired() {
-                        tracing::error!(
+                        let error_msg = format!(
                             "session {}.{}: failed to receive ack within timeout {} secs; link is currently broken",
                             link.dest(),
                             session_id,
                             config::global::get(config::MESSAGE_DELIVERY_TIMEOUT).as_secs(),
                         );
+                        tracing::error!(error_msg);
                         (
-                            State::Closing(Deliveries { outbox, unacked }),
+                            State::Closing {
+                                deliveries: Deliveries { outbox, unacked },
+                                reason: error_msg,
+                            },
                             Conn::reconnect_with_default(),
                         )
                     } else {
@@ -682,6 +720,15 @@ impl<M: RemoteMessage> NetTx<M> {
                                 let data = bincode::serialize(&Frame::<M>::Init(session_id))
                                     .expect("unexpected serialization error");
                                 let initialized = sink.send(data.into()).await.is_ok();
+
+                                metrics::CHANNEL_RECONNECTIONS.add(
+                                    1,
+                                    hyperactor_telemetry::kv_pairs!(
+                                        "transport" => link.dest().transport().to_string(),
+                                        "reason" => "network_flakiness",
+                                    ),
+                                );
+
                                 // Need to resend unacked after reconnecting.
                                 let largest_acked = unacked.largest_acked;
                                 outbox.requeue_unacked(unacked);
@@ -718,8 +765,8 @@ impl<M: RemoteMessage> NetTx<M> {
                 }
 
                 // The link is no longer viable.
-                (State::Closing(Deliveries { outbox, unacked }), stream) => {
-                    break (State::Closing(Deliveries { outbox, unacked }), stream);
+                (State::Closing { deliveries, reason }, stream) => {
+                    break (State::Closing { deliveries, reason }, stream);
                 }
             };
 
@@ -731,10 +778,15 @@ impl<M: RemoteMessage> NetTx<M> {
         }; // loop
 
         match state {
-            State::Closing(Deliveries {
-                mut outbox,
-                mut unacked,
-            }) => {
+            State::Closing {
+                deliveries:
+                    Deliveries {
+                        mut outbox,
+                        mut unacked,
+                    },
+                // TODO(T233029051): Return reason through return_channel too.
+                reason: _,
+            } => {
                 // Return in order from oldest to newest, messages
                 // either not acknowledged or not sent.
                 unacked
@@ -907,6 +959,14 @@ where
     L::Addr: Sync + Send + fmt::Debug + Into<ChannelAddr>,
     L::Io: Sync + Send + Unpin + fmt::Debug,
 {
+    metrics::CHANNEL_CONNECTIONS.add(
+        1,
+        hyperactor_telemetry::kv_pairs!(
+            "transport" => channel_addr.transport().to_string(),
+            "operation" => "serve"
+        ),
+    );
+
     let (tx, rx) = mpsc::channel::<M>(1024);
     let cancel_token = CancellationToken::new();
     let join_handle = tokio::spawn(listen(
@@ -1033,7 +1093,6 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
                                 ),
                             }
                         }
-
                         Some(Err(err)) => {
                             break (next, Err::<(), anyhow::Error>(err.into()).context(format!("error receiving peer message from {:?}", self.source)))
                         }
@@ -1255,6 +1314,14 @@ where
                 tracing::debug!("listener accepted a new connection to {}", listener_channel_addr);
                 match result {
                     Ok((stream, addr)) => {
+                        metrics::CHANNEL_CONNECTIONS.add(
+                            1,
+                            hyperactor_telemetry::kv_pairs!(
+                                "transport" => listener_channel_addr.transport().to_string(),
+                                "operation" => "accept"
+                            ),
+                        );
+
                         let tx = tx.clone();
                         let child_cancel_token = child_cancel_token.child_token();
                         let source : ChannelAddr = addr.into();
@@ -1272,6 +1339,14 @@ where
                             };
 
                             if let Err(ref err) = res {
+                                metrics::CHANNEL_CONNECTION_ERRORS.add(
+                                    1,
+                                    hyperactor_telemetry::kv_pairs!(
+                                        "transport" => dest.transport().to_string(),
+                                        "error" => err.to_string(),
+                                    ),
+                                );
+
                                 // we don't want the health probe TCP connections to be counted as an error.
                                 match source {
                                     ChannelAddr::Tcp(source_addr) if source_addr.ip().is_loopback() => {},
@@ -1287,6 +1362,15 @@ where
                     });
                     }
                     Err(err) => {
+                        metrics::CHANNEL_CONNECTION_ERRORS.add(
+                            1,
+                            hyperactor_telemetry::kv_pairs!(
+                                "transport" => listener_channel_addr.transport().to_string(),
+                                "operation" => "accept",
+                                "error" => err.to_string(),
+                            ),
+                        );
+
                         tracing::info!("serve {}: accept error: {}", listener_channel_addr, err)
                     }
                 }
@@ -1900,7 +1984,6 @@ pub(crate) mod meta {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
     use std::marker::PhantomData;
     use std::sync::RwLock;
     use std::sync::atomic::AtomicBool;
@@ -2312,6 +2395,15 @@ mod tests {
                             if network_flakiness.should_disconnect(&mut rng, count, &prev_diconnected_at).await {
                                 tracing::debug!("MockLink disconnects");
                                 disconnected_count.fetch_add(1, Ordering::Relaxed);
+
+                                metrics::CHANNEL_RECONNECTIONS.add(
+                                    1,
+                                    hyperactor_telemetry::kv_pairs!(
+                                        "transport" => "mock",
+                                        "reason" => "network_flakiness",
+                                    ),
+                                );
+
                                 let mut w = prev_diconnected_at.write().unwrap();
                                 *w = RealClock.now();
                                 break;
