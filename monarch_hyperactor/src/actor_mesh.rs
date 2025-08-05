@@ -224,6 +224,10 @@ impl PythonActorMesh {
         self.bind()?.slice(kwargs)
     }
 
+    fn new_with_shape(&self, shape: PyShape) -> PyResult<PythonActorMeshRef> {
+        self.bind()?.new_with_shape(shape)
+    }
+
     #[getter]
     pub fn client(&self) -> PyMailbox {
         self.client.clone()
@@ -245,7 +249,7 @@ impl PythonActorMesh {
 
     fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let actor_mesh = self.inner.clone();
-        crate::runtime::future_into_py(py, async move {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let actor_mesh = actor_mesh
                 .take()
                 .await
@@ -356,6 +360,14 @@ impl PythonActorMeshRef {
         Ok(Self { inner: sliced })
     }
 
+    fn new_with_shape(&self, shape: PyShape) -> PyResult<PythonActorMeshRef> {
+        let sliced = self
+            .inner
+            .new_with_shape(shape.get_inner().clone())
+            .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
+        Ok(Self { inner: sliced })
+    }
+
     #[getter]
     fn shape(&self) -> PyShape {
         PyShape::from(self.inner.shape().clone())
@@ -384,9 +396,11 @@ impl PythonActorMeshRef {
 impl Drop for PythonActorMesh {
     fn drop(&mut self) {
         if let Ok(mesh) = self.inner.borrow() {
-            tracing::info!("Dropping PythonActorMesh: {}", mesh.name());
+            tracing::debug!("Dropping PythonActorMesh: {}", mesh.name());
         } else {
-            tracing::info!("Dropping stopped PythonActorMesh");
+            tracing::debug!(
+                "Dropping stopped PythonActorMesh. The underlying mesh is already stopped."
+            );
         }
         self.monitor.abort();
     }

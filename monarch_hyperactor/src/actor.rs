@@ -54,7 +54,6 @@ use crate::proc::InstanceWrapper;
 use crate::proc::PyActorId;
 use crate::proc::PyProc;
 use crate::proc::PySerialized;
-use crate::pytokio::PyPythonTask;
 use crate::pytokio::PythonTask;
 use crate::runtime::signal_safe_block_on;
 use crate::shape::PyShape;
@@ -503,24 +502,26 @@ impl Actor for PythonActor {
 
 /// Create a new TaskLocals with its own asyncio event loop in a dedicated thread.
 fn create_task_locals() -> pyo3_async_runtimes::TaskLocals {
-    Python::with_gil(|py| {
-        let asyncio = Python::import(py, "asyncio").unwrap();
-        let event_loop = asyncio.call_method0("new_event_loop").unwrap();
-        let task_locals = pyo3_async_runtimes::TaskLocals::new(event_loop.clone())
-            .copy_context(py)
-            .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::spawn(move || {
+        Python::with_gil(|py| {
+            let asyncio = Python::import(py, "asyncio").unwrap();
+            let event_loop = asyncio.call_method0("new_event_loop").unwrap();
+            asyncio
+                .call_method1("set_event_loop", (event_loop.clone(),))
+                .unwrap();
 
-        let kwargs = PyDict::new(py);
-        let target = event_loop.getattr("run_forever").unwrap();
-        kwargs.set_item("target", target).unwrap();
-        let thread = py
-            .import("threading")
-            .unwrap()
-            .call_method("Thread", (), Some(&kwargs))
-            .unwrap();
-        thread.call_method0("start").unwrap();
-        task_locals
-    })
+            let task_locals = pyo3_async_runtimes::TaskLocals::new(event_loop.clone())
+                .copy_context(py)
+                .unwrap();
+            tx.send(task_locals).unwrap();
+            if let Err(e) = event_loop.call_method0("run_forever") {
+                eprintln!("Event loop stopped with error: {:?}", e);
+            }
+            let _ = event_loop.call_method0("close");
+        });
+    });
+    rx.recv().unwrap()
 }
 
 // [Panics in async endpoints]
