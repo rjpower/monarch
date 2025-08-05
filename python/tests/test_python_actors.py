@@ -23,8 +23,7 @@ import pytest
 import torch
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
-from monarch._src.actor.actor_mesh import ActorMeshRef, Port, PortTuple
-from monarch._src.actor.future import Future
+from monarch._src.actor.actor_mesh import ActorMeshRef, Channel, Port
 
 from monarch.actor import (
     Accumulator,
@@ -717,11 +716,10 @@ class SendAlot(Actor):
 
 
 @pytest.mark.timeout(60)
-def test_port_as_argument():
+def test_port_as_argument() -> None:
     proc_mesh = local_proc_mesh(gpus=1)
     s = proc_mesh.spawn("send_alot", SendAlot).get()
-    mb = Future(coro=proc_mesh._proc_mesh.task()).get().client
-    send, recv = PortTuple.create(mb)
+    send, recv = Channel[int].open()
 
     s.send.broadcast(send)
 
