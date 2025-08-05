@@ -50,6 +50,7 @@ use tokio::sync::mpsc;
 
 use crate::CommActor;
 use crate::Mesh;
+use crate::actor_mesh::CAST_ACTOR_MESH_ID;
 use crate::actor_mesh::RootActorMesh;
 use crate::alloc::Alloc;
 use crate::alloc::AllocatorError;
@@ -213,7 +214,7 @@ impl ProcMesh {
         }
         router
             .clone()
-            .serve(router_rx, mailbox::monitored_return_handle());
+            .serve(router_rx, mailbox::custom_monitored_return_handle("router"));
 
         // Set up a client proc for the mesh itself, so that we can attach ourselves
         // to it, and communicate with the agents. We wire it into the same router as
@@ -227,9 +228,10 @@ impl ProcMesh {
             client_proc_id.clone(),
             BoxedMailboxSender::new(router.clone()),
         );
-        client_proc
-            .clone()
-            .serve(client_rx, mailbox::monitored_return_handle());
+        client_proc.clone().serve(
+            client_rx,
+            mailbox::custom_monitored_return_handle("client proc"),
+        );
         router.bind(client_proc_id.clone().into(), client_proc_addr.clone());
 
         // Bind this router to the global router, to enable cross-mesh routing.
@@ -593,6 +595,7 @@ impl ProcEvents {
                         let event = ActorSupervisionEvent {
                             actor_id: proc_id.actor_id("any", 0),
                             actor_status: ActorStatus::Failed(format!("proc {} is stopped", proc_id)),
+                            message_headers: None,
                         };
                         if entry.value().send(event).is_err() {
                             tracing::warn!("unable to transmit supervision event to actor {}", entry.key());
@@ -601,8 +604,25 @@ impl ProcEvents {
 
                     break Some(ProcEvent::Stopped(*rank, reason));
                 }
-                Ok(event) = self.event_state.supervision_events.recv() => {
+                Ok(mut event) = self.event_state.supervision_events.recv() => {
                     tracing::debug!("received ProcEvent supervision event: {event:?}");
+                    // Cast message might fail to deliver when it is propagated
+                    // through the comm actor tree. In this case, the event is
+                    // for the actor mesh, not the comm actor. In that case,
+                    // we update the event with the actor mesh id, so it can be
+                    // forwarded to the mesh.
+                    if let Some(headers) = &event.message_headers
+                        && let Some(actor_mesh_id) = headers.get(CAST_ACTOR_MESH_ID)
+                    {
+                        // Make a dummy actor id to represent the mesh in ActorSupervisionEvent.
+                        // TODO(T231868026): find a better way to represent all actors in an actor
+                        // mesh for supervision event
+                        event.actor_id = ActorId(
+                            ProcId(WorldId(actor_mesh_id.0.0.clone()), 0),
+                            actor_mesh_id.1.clone(),
+                            0,
+                        );
+                    };
                     let actor_id = event.actor_id.clone();
                     let actor_status = event.actor_status.clone();
                     let Some(rank) = self.ranks.get(actor_id.proc_id()) else {
