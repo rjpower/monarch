@@ -14,6 +14,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::Range;
+use crate::Shape;
 use crate::Slice;
 use crate::SliceIterator;
 use crate::slice::CartesianIterator;
@@ -100,19 +101,14 @@ impl Extent {
         self.labels().iter().position(|l| l == label)
     }
 
-    /// Returns the number of dimensions in this extent.
-    pub fn num_dim(&self) -> usize {
-        self.labels().len()
-    }
-
     /// Creates a `Point` in this extent with the given coordinates.
     ///
     /// Returns an error if the coordinate dimensionality does not
     /// match.
     pub fn point(&self, coords: Vec<usize>) -> Result<Point, PointError> {
-        if coords.len() != self.num_dim() {
+        if coords.len() != self.len() {
             return Err(PointError::DimMismatch {
-                expected: self.num_dim(),
+                expected: self.len(),
                 actual: coords.len(),
             });
         }
@@ -127,7 +123,7 @@ impl Extent {
 
     /// Returns the point corresponding to the provided rank in this extent.
     pub fn point_of_rank(&self, mut rank: usize) -> Result<Point, PointError> {
-        if rank >= self.len() {
+        if rank >= self.num_ranks() {
             return Err(PointError::OutOfRange {
                 size: self.len(),
                 rank,
@@ -135,7 +131,7 @@ impl Extent {
         }
 
         let mut stride: usize = self.sizes().iter().product();
-        let mut coords = vec![0; self.num_dim()];
+        let mut coords = vec![0; self.len()];
         for (i, size) in self.sizes().iter().enumerate() {
             stride /= size;
             coords[i] = rank / stride;
@@ -148,14 +144,19 @@ impl Extent {
         })
     }
 
-    /// The total size of the extent.
+    /// The number of dimensions in the extent.
     pub fn len(&self) -> usize {
-        self.sizes().iter().product()
+        self.sizes().len()
     }
 
-    /// Whether the extent is empty.
+    /// Whether the extent has zero dimensionbs.
     pub fn is_empty(&self) -> bool {
-        self.sizes().iter().all(|&s| s == 0)
+        self.sizes().is_empty()
+    }
+
+    /// The number of ranks in the extent.
+    pub fn num_ranks(&self) -> usize {
+        self.sizes().iter().product()
     }
 
     /// Convert this extent into its labels and sizes.
@@ -175,7 +176,7 @@ impl Extent {
     pub fn iter(&self) -> ExtentIterator {
         ExtentIterator {
             extent: self,
-            pos: CartesianIterator::new(&self.sizes()),
+            pos: CartesianIterator::new(self.sizes().to_vec()),
         }
     }
 }
@@ -196,7 +197,7 @@ impl std::fmt::Display for Extent {
 /// An iterator for points in an extent.
 pub struct ExtentIterator<'a> {
     extent: &'a Extent,
-    pos: CartesianIterator<'a>,
+    pos: CartesianIterator,
 }
 
 impl<'a> Iterator for ExtentIterator<'a> {
@@ -411,12 +412,12 @@ impl View {
 }
 
 /// The iterator over views.
-pub struct ViewIterator<'a> {
-    extent: Extent,         // Note that `extent` and...
-    pos: SliceIterator<'a>, // ... `pos` share the same `Slice`.
+pub struct ViewIterator {
+    extent: Extent,     // Note that `extent` and...
+    pos: SliceIterator, // ... `pos` share the same `Slice`.
 }
 
-impl<'a> Iterator for ViewIterator<'a> {
+impl Iterator for ViewIterator {
     type Item = (Point, usize);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -489,6 +490,43 @@ pub trait ViewExt: Viewable {
     /// );
     /// ```
     fn range<R: Into<Range>>(&self, dim: &str, range: R) -> Result<View, ViewError>;
+
+    /// Group by view on `dim`. The returned iterator enumerates all groups
+    /// as views in the extent of `dim` to the last dimension of the view.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use ndslice::ViewExt;
+    /// use ndslice::extent;
+    ///
+    /// let ext = extent!(zone = 4, host = 2, gpu = 8);
+    ///
+    /// // We generate one view for each zone.
+    /// assert_eq!(ext.group_by("host").unwrap().count(), 4);
+    ///
+    /// let mut parts = ext.group_by("host").unwrap();
+    ///
+    /// let zone0 = parts.next().unwrap();
+    /// let mut zone0_points = zone0.iter();
+    /// assert_eq!(zone0.extent(), extent!(host = 2, gpu = 8));
+    /// assert_eq!(
+    ///     zone0_points.next().unwrap(),
+    ///     (extent!(host = 2, gpu = 8).point(vec![0, 0]).unwrap(), 0)
+    /// );
+    /// assert_eq!(
+    ///     zone0_points.next().unwrap(),
+    ///     (extent!(host = 2, gpu = 8).point(vec![0, 1]).unwrap(), 1)
+    /// );
+    ///
+    /// let zone1 = parts.next().unwrap();
+    /// assert_eq!(zone1.extent(), extent!(host = 2, gpu = 8));
+    /// assert_eq!(
+    ///     zone1.iter().next().unwrap(),
+    ///     (extent!(host = 2, gpu = 8).point(vec![0, 0]).unwrap(), 16)
+    /// );
+    /// ```
+    fn group_by(&self, dim: &str) -> Result<impl Iterator<Item = View>, ViewError>;
 }
 
 impl<T: Viewable> ViewExt for T {
@@ -519,6 +557,32 @@ impl<T: Viewable> ViewExt for T {
             slice,
         })
     }
+
+    fn group_by(&self, dim: &str) -> Result<impl Iterator<Item = View>, ViewError> {
+        let dim = self
+            .labels()
+            .iter()
+            .position(|l| dim == l)
+            .ok_or_else(|| ViewError::InvalidDim(dim.to_string()))?;
+
+        let (offset, sizes, strides) = self.slice().into_inner();
+        let mut ranks = Slice::new(offset, sizes[..dim].to_vec(), strides[..dim].to_vec())
+            .unwrap()
+            .iter();
+
+        let labels = self.labels()[dim..].to_vec();
+        let sizes = sizes[dim..].to_vec();
+        let strides = strides[dim..].to_vec();
+
+        Ok(std::iter::from_fn(move || {
+            let rank = ranks.next()?;
+            let slice = Slice::new(rank, sizes.clone(), strides.clone()).unwrap();
+            Some(View {
+                labels: labels.clone(),
+                slice,
+            })
+        }))
+    }
 }
 
 /// Construct a new extent with the given set of dimension-size pairs.
@@ -548,6 +612,7 @@ macro_rules! extent {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::shape;
 
     #[test]
     fn test_points_basic() {
@@ -555,7 +620,7 @@ mod test {
         let _p1 = extent.point(vec![1, 2, 3]).unwrap();
         let _p2 = vec![1, 2, 3].in_(&extent).unwrap();
 
-        assert_eq!(extent.len(), 4 * 5 * 6);
+        assert_eq!(extent.num_ranks(), 4 * 5 * 6);
 
         let p3 = extent.point_of_rank(0).unwrap();
         assert_eq!(p3.coords(), &[0, 0, 0]);
@@ -588,9 +653,10 @@ mod test {
 
     macro_rules! assert_view {
         ($view:expr, $extent:expr,  $( $($coord:expr),+ => $rank:expr );* $(;)?) => {
-            assert_eq!($view.extent(), $extent);
+            let view = $view;
+            assert_eq!(view.extent(), $extent);
             let expected: Vec<_> = vec![$(($extent.point(vec![$($coord),+]).unwrap(), $rank)),*];
-            let actual: Vec<_> = $view.iter().collect();
+            let actual: Vec<_> = view.iter().collect();
             assert_eq!(actual, expected);
         };
     }
@@ -727,6 +793,16 @@ mod test {
     }
 
     #[test]
+    fn test_extent_0d() {
+        let e = Extent::new(vec![], vec![]).unwrap();
+        assert_eq!(e.len(), 1);
+        let points: Vec<_> = e.iter().collect();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].coords(), &[]);
+        assert_eq!(points[0].rank(), 0);
+    }
+
+    #[test]
     fn test_point_display() {
         let extent = Extent::new(vec!["x".into(), "y".into(), "z".into()], vec![4, 5, 6]).unwrap();
         let point = extent.point(vec![1, 2, 3]).unwrap();
@@ -737,5 +813,83 @@ mod test {
         let empty_extent = Extent::new(vec![], vec![]).unwrap();
         let empty_point = empty_extent.point(vec![]).unwrap();
         assert_eq!(format!("{}", empty_point), "");
+    }
+
+    #[test]
+    fn test_relative_point() {
+        // Given a rank in the root shape, return the corresponding point in the
+        // provided shape, which is a view of the root shape.
+        pub fn relative_point(rank_on_root_mesh: usize, shape: &Shape) -> anyhow::Result<Point> {
+            let coords = shape.slice().coordinates(rank_on_root_mesh)?;
+            let extent = Extent::new(shape.labels().to_vec(), shape.slice().sizes().to_vec())?;
+            Ok(extent.point(coords)?)
+        }
+
+        let root_shape = shape! { replicas = 4, hosts = 4, gpus = 4 };
+        // rows are `hosts`, cols are gpus
+        // replicas = 0
+        //     0,    1,  2,    3,
+        //     (4),  5,  (6),  7,
+        //     8,    9,  10,   11,
+        //     (12), 13, (14), 15,
+        // replicas = 3, which is [replicas=0] + 48
+        //     48,   49, 50,   51,
+        //     (52), 53, (54), 55,
+        //     56,   57, 58,   59,
+        //     (60), 61, (62), 63,
+        let sliced_shape = root_shape
+            .select("replicas", crate::Range(0, Some(4), 3))
+            .unwrap()
+            .select("hosts", crate::Range(1, Some(4), 2))
+            .unwrap()
+            .select("gpus", crate::Range(0, Some(4), 2))
+            .unwrap();
+        let ranks_on_root_mesh = &[4, 6, 12, 14, 52, 54, 60, 62];
+        assert_eq!(
+            sliced_shape.slice().iter().collect::<Vec<_>>(),
+            ranks_on_root_mesh,
+        );
+
+        let ranks_on_sliced_mesh = ranks_on_root_mesh
+            .iter()
+            .map(|&r| relative_point(r, &sliced_shape).unwrap().rank());
+        assert_eq!(
+            ranks_on_sliced_mesh.collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5, 6, 7]
+        );
+    }
+
+    #[test]
+    fn test_iter_subviews() {
+        let extent = extent!(zone = 4, host = 4, gpu = 8);
+
+        assert_eq!(extent.group_by("gpu").unwrap().count(), 16);
+        assert_eq!(extent.group_by("zone").unwrap().count(), 1);
+
+        let mut parts = extent.group_by("gpu").unwrap();
+        assert_view!(
+            parts.next().unwrap(),
+            extent!(gpu = 8),
+            0 => 0;
+            1 => 1;
+            2 => 2;
+            3 => 3;
+            4 => 4;
+            5 => 5;
+            6 => 6;
+            7 => 7;
+        );
+        assert_view!(
+            parts.next().unwrap(),
+            extent!(gpu = 8),
+            0 => 8;
+            1 => 9;
+            2 => 10;
+            3 => 11;
+            4 => 12;
+            5 => 13;
+            6 => 14;
+            7 => 15;
+        );
     }
 }

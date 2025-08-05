@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use dashmap::DashSet;
 use futures::future::join_all;
 use hyperactor::Actor;
 use hyperactor::ActorId;
@@ -37,6 +38,7 @@ use hyperactor::mailbox::MailboxServer;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::PortReceiver;
 use hyperactor::mailbox::Undeliverable;
+use hyperactor::metrics;
 use hyperactor::proc::Proc;
 use hyperactor::reference::ProcId;
 use hyperactor::reference::Reference;
@@ -48,6 +50,7 @@ use tokio::sync::mpsc;
 
 use crate::CommActor;
 use crate::Mesh;
+use crate::actor_mesh::CAST_ACTOR_MESH_ID;
 use crate::actor_mesh::RootActorMesh;
 use crate::alloc::Alloc;
 use crate::alloc::AllocatorError;
@@ -71,7 +74,7 @@ use std::sync::OnceLock;
 /// This is definitely a "good enough for now" solution; in the future,
 /// we'll likely have some form of truly global registration for meshes,
 /// also benefitting tooling, etc.
-fn global_router() -> &'static MailboxRouter {
+pub(crate) fn global_router() -> &'static MailboxRouter {
     static GLOBAL_ROUTER: OnceLock<MailboxRouter> = OnceLock::new();
     GLOBAL_ROUTER.get_or_init(MailboxRouter::new)
 }
@@ -190,7 +193,7 @@ impl ProcMesh {
         }
         router
             .clone()
-            .serve(router_rx, mailbox::monitored_return_handle());
+            .serve(router_rx, mailbox::custom_monitored_return_handle("router"));
 
         // Set up a client proc for the mesh itself, so that we can attach ourselves
         // to it, and communicate with the agents. We wire it into the same router as
@@ -204,9 +207,10 @@ impl ProcMesh {
             client_proc_id.clone(),
             BoxedMailboxSender::new(router.clone()),
         );
-        client_proc
-            .clone()
-            .serve(client_rx, mailbox::monitored_return_handle());
+        client_proc.clone().serve(
+            client_rx,
+            mailbox::custom_monitored_return_handle("client proc"),
+        );
         router.bind(client_proc_id.clone().into(), client_proc_addr.clone());
 
         // Bind this router to the global router, to enable cross-mesh routing.
@@ -305,6 +309,7 @@ impl ProcMesh {
 
         let shape = alloc.shape().clone();
         let world_id = alloc.world_id().clone();
+        metrics::PROC_MESH_ALLOCATION.add(1, hyperactor_telemetry::kv_pairs!());
 
         Ok(Self {
             event_state: Some(EventState {
@@ -364,6 +369,14 @@ impl ProcMesh {
                     }
                 }
                 GspawnResult::Error(error_msg) => {
+                    metrics::PROC_MESH_ACTOR_FAILURES.add(
+                        1,
+                        hyperactor_telemetry::kv_pairs!(
+                            "actor_name" => actor_name.to_string(),
+                            "error" => error_msg.clone(),
+                        ),
+                    );
+
                     anyhow::bail!("gspawn failed: {}", error_msg);
                 }
             }
@@ -544,6 +557,15 @@ impl ProcEvents {
                         continue;
                     };
 
+                    metrics::PROC_MESH_PROC_STOPPED.add(
+                        1,
+                        hyperactor_telemetry::kv_pairs!(
+                            "proc_id" => proc_id.to_string(),
+                            "rank" => rank.to_string(),
+                            "reason" => reason.to_string(),
+                        ),
+                    );
+
                     // Need to send this event to actor meshes to notify them of the proc's death.
                     // TODO(albertli): only send this event to all root actor meshes if any of them use this proc.
                     for entry in self.actor_event_router.iter() {
@@ -552,6 +574,7 @@ impl ProcEvents {
                         let event = ActorSupervisionEvent {
                             actor_id: proc_id.actor_id("any", 0),
                             actor_status: ActorStatus::Failed(format!("proc {} is stopped", proc_id)),
+                            message_headers: None,
                         };
                         if entry.value().send(event).is_err() {
                             tracing::warn!("unable to transmit supervision event to actor {}", entry.key());
@@ -560,8 +583,25 @@ impl ProcEvents {
 
                     break Some(ProcEvent::Stopped(*rank, reason));
                 }
-                Ok(event) = self.event_state.supervision_events.recv() => {
+                Ok(mut event) = self.event_state.supervision_events.recv() => {
                     tracing::debug!("received ProcEvent supervision event: {event:?}");
+                    // Cast message might fail to deliver when it is propagated
+                    // through the comm actor tree. In this case, the event is
+                    // for the actor mesh, not the comm actor. In that case,
+                    // we update the event with the actor mesh id, so it can be
+                    // forwarded to the mesh.
+                    if let Some(headers) = &event.message_headers
+                        && let Some(actor_mesh_id) = headers.get(CAST_ACTOR_MESH_ID)
+                    {
+                        // Make a dummy actor id to represent the mesh in ActorSupervisionEvent.
+                        // TODO(T231868026): find a better way to represent all actors in an actor
+                        // mesh for supervision event
+                        event.actor_id = ActorId(
+                            ProcId(WorldId(actor_mesh_id.0.0.clone()), 0),
+                            actor_mesh_id.1.clone(),
+                            0,
+                        );
+                    };
                     let actor_id = event.actor_id.clone();
                     let actor_status = event.actor_status.clone();
                     let Some(rank) = self.ranks.get(actor_id.proc_id()) else {
@@ -578,6 +618,15 @@ impl ProcEvents {
                             tracing::warn!("received supervision event for unregistered actor {}", actor_id);
                         }
                     }
+                    metrics::PROC_MESH_ACTOR_FAILURES.add(
+                        1,
+                        hyperactor_telemetry::kv_pairs!(
+                            "actor_id" => actor_id.to_string(),
+                            "rank" => rank.to_string(),
+                            "status" => actor_status.to_string(),
+                        ),
+                    );
+
                     // Send this event to Python proc mesh to keep its health status up to date.
                     break Some(ProcEvent::Crashed(*rank, actor_status.to_string()))
                 }
