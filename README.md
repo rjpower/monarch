@@ -1,3 +1,4 @@
+TEST
 # Monarch 🦋
 
 **Monarch** is a distributed execution engine for PyTorch. Our overall goal is
