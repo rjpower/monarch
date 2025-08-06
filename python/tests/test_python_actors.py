@@ -801,4 +801,4 @@ def test_select_result() -> None:
     a = PythonTask.spawn_blocking(lambda: s(4))
     b = PythonTask.spawn_blocking(lambda: s(0))
     r = PythonTask.select_one([a.task(), b.task()]).block_on()
-    assert r == 0
+    assert r == (0, 1)
