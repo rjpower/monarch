@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from traceback import extract_tb, StackSummary
 from typing import (
     Any,
-    AsyncGenerator,
     Awaitable,
     Callable,
     cast,
@@ -32,7 +31,7 @@ from typing import (
     Iterator,
     List,
     Literal,
-    NamedTuple,
+    NoReturn,
     Optional,
     overload,
     ParamSpec,
@@ -56,6 +55,7 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     PortReceiver as HyPortReceiver,
     PortRef,
 )
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
 if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
@@ -311,10 +311,6 @@ class ActorEndpoint(Endpoint[P, R]):
         self._mailbox = mailbox
         self._explicit_response_port = explicit_response_port
 
-    def _supervise(self, r: HyPortReceiver | OncePortReceiver) -> Any:
-        mesh = self._actor_mesh._actor_mesh
-        return r if mesh is None else mesh.supervise(r)
-
     def _call_name(self) -> Any:
         return self._name
 
@@ -353,11 +349,10 @@ class ActorEndpoint(Endpoint[P, R]):
 
     def _port(self, once: bool = False) -> "Tuple[Port[R], PortReceiver[R]]":
         p, r = super()._port(once=once)
-        if TYPE_CHECKING:
-            assert isinstance(
-                r._receiver, (HyPortReceiver | OncePortReceiver)
-            ), "unexpected receiver type"
-        return (p, PortReceiver(self._mailbox, self._supervise(r._receiver)))
+        mesh = self._actor_mesh._actor_mesh
+        if mesh is not None:
+            r._set_monitor(lambda: mesh.supervision_event())
+        return (p, r)
 
     def _rref(self, args, kwargs):
         self._check_arguments(args, kwargs)
@@ -559,12 +554,17 @@ class PortReceiver(Generic[R]):
         self,
         mailbox: Mailbox,
         receiver: "PortReceiverBase",
+        monitor: "Optional[Callable[[], PythonTask[NoReturn]]]" = None,
     ) -> None:
         self._mailbox: Mailbox = mailbox
+        self._monitor = monitor
         self._receiver = receiver
 
     async def _recv(self) -> R:
-        return self._process(await self._receiver.recv_task())
+        awaitable = self._receiver.recv_task()
+        if self._monitor:
+            awaitable = PythonTask.select_one([self._monitor(), awaitable])
+        return self._process(await awaitable)
 
     def _process(self, msg: PythonMessage) -> R:
         # TODO: Try to do something more structured than a cast here
@@ -581,7 +581,10 @@ class PortReceiver(Generic[R]):
         return Future(coro=self._recv())
 
     def ranked(self) -> "RankedPortReceiver[R]":
-        return RankedPortReceiver[R](self._mailbox, self._receiver)
+        return RankedPortReceiver[R](self._mailbox, self._receiver, self._monitor)
+
+    def _set_monitor(self, monitor: "Callable[[], PythonTask[NoReturn]]"):
+        self._monitor = monitor
 
 
 class RankedPortReceiver(PortReceiver[Tuple[int, R]]):
