@@ -249,11 +249,14 @@ impl CommActor {
 
         // Deliver message here, if necessary.
         if deliver_here {
+            let rank_on_root_mesh = mode.self_rank(cx.self_id());
+            let cast_rank = message.relative_rank(rank_on_root_mesh)?;
+            let cast_shape = message.shape();
             let mut headers = cx.headers().clone();
             set_cast_info_on_headers(
                 &mut headers,
-                mode.self_rank(cx.self_id()),
-                message.shape().clone(),
+                cast_rank,
+                cast_shape.clone(),
                 message.sender().clone(),
             );
             cx.post(
@@ -519,8 +522,8 @@ mod tests {
     use maplit::btreemap;
     use maplit::hashmap;
     use ndslice::Selection;
+    use ndslice::extent;
     use ndslice::selection::test_utils::collect_commactor_routing_tree;
-    use ndslice::shape;
     use test_utils::*;
     use timed_test::async_timed_test;
     use tokio::time::Duration;
@@ -725,10 +728,10 @@ mod tests {
     where
         A: Accumulator<Update = u64, State = u64> + Send + Sync + 'static,
     {
-        let shape = shape! { replica = 4, host = 4, gpu = 4 };
+        let extent = extent!(replica = 4, host = 4, gpu = 4);
         let alloc = LocalAllocator
             .allocate(AllocSpec {
-                shape: shape.clone(),
+                extent: extent.clone(),
                 constraints: Default::default(),
             })
             .await
@@ -766,7 +769,7 @@ mod tests {
         actor_mesh.cast(selection.clone(), message).unwrap();
 
         let mut reply_tos = vec![];
-        for _ in 0..shape.slice().len() {
+        for _ in extent.points() {
             let msg = rx.recv().await.expect("missing");
             match msg {
                 TestMessage::CastAndReply {
@@ -796,7 +799,7 @@ mod tests {
         {
             // Get the paths used in casting
             let sel_paths = PathToLeaves(
-                collect_commactor_routing_tree(&selection, shape.slice())
+                collect_commactor_routing_tree(&selection, &extent.to_slice())
                     .delivered
                     .into_iter()
                     .collect(),
