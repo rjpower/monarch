@@ -55,7 +55,7 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     PortReceiver as HyPortReceiver,
     PortRef,
 )
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 
 if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
@@ -351,7 +351,7 @@ class ActorEndpoint(Endpoint[P, R]):
         p, r = super()._port(once=once)
         mesh = self._actor_mesh._actor_mesh
         if mesh is not None:
-            r._set_monitor(lambda: mesh.supervision_event())
+            r._set_monitor(mesh.supervision_event().spawn())
         return (p, r)
 
     def _rref(self, args, kwargs):
@@ -554,7 +554,7 @@ class PortReceiver(Generic[R]):
         self,
         mailbox: Mailbox,
         receiver: "PortReceiverBase",
-        monitor: "Optional[Callable[[], PythonTask[NoReturn]]]" = None,
+        monitor: "Optional[Shared[NoReturn]]" = None,
     ) -> None:
         self._mailbox: Mailbox = mailbox
         self._monitor = monitor
@@ -563,7 +563,7 @@ class PortReceiver(Generic[R]):
     async def _recv(self) -> R:
         awaitable = self._receiver.recv_task()
         if self._monitor:
-            awaitable = PythonTask.select_one([self._monitor(), awaitable])
+            awaitable = PythonTask.select_one([self._monitor.task(), awaitable])
         return self._process(await awaitable)
 
     def _process(self, msg: PythonMessage) -> R:
@@ -583,7 +583,7 @@ class PortReceiver(Generic[R]):
     def ranked(self) -> "RankedPortReceiver[R]":
         return RankedPortReceiver[R](self._mailbox, self._receiver, self._monitor)
 
-    def _set_monitor(self, monitor: "Callable[[], PythonTask[NoReturn]]"):
+    def _set_monitor(self, monitor: "Shared[NoReturn]"):
         self._monitor = monitor
 
 
