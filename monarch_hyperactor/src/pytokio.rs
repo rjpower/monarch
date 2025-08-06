@@ -257,8 +257,8 @@ impl PyPythonTask {
         }
 
         PyPythonTask::new(async move {
-            let (result, _index, _remaining) = futures::future::select_all(futures).await;
-            result
+            let (result, index, _remaining) = futures::future::select_all(futures).await;
+            result.map(|r| (r, index))
         })
     }
 }

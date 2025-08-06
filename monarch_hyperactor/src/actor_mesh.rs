@@ -119,9 +119,9 @@ impl PythonActorMesh {
     }
 
     fn try_inner(&self) -> PyResult<SharedCellRef<RootActorMesh<'static, PythonActor>>> {
-        self.inner
-            .borrow()
-            .map_err(|_| PyRuntimeError::new_err("`PythonActorMesh` has already been stopped"))
+        self.inner.borrow().map_err(|_| {
+            SupervisionError::new_err("`PythonActorMesh` has already been stopped".to_string())
+        })
     }
 
     fn pickling_err(&self) -> PyErr {
@@ -144,13 +144,13 @@ impl PythonActorMesh {
         match &*unhealthy_event {
             Unhealthy::SoFarSoGood => (),
             Unhealthy::Crashed(event) => {
-                return Err(PyRuntimeError::new_err(format!(
+                return Err(SupervisionError::new_err(format!(
                     "actor mesh is unhealthy with reason: {:?}",
                     event
                 )));
             }
             Unhealthy::StreamClosed => {
-                return Err(PyRuntimeError::new_err(
+                return Err(SupervisionError::new_err(
                     "actor mesh is stopped due to proc mesh shutdown".to_string(),
                 ));
             }
@@ -198,7 +198,7 @@ impl PythonActorMesh {
         let mut receiver = self.user_monitor_sender.subscribe();
         PyPythonTask::new(async move {
             let event = receiver.recv().await;
-            Ok(match event {
+            let event = match event {
                 Ok(Some(event)) => PyActorSupervisionEvent::from(event.clone()),
                 Ok(None) | Err(_) => PyActorSupervisionEvent {
                     // Dummy actor as placeholder to indicate the whole mesh is stopped
@@ -206,7 +206,11 @@ impl PythonActorMesh {
                     actor_id: id!(default[0].actor[0]).into(),
                     actor_status: "actor mesh is stopped due to proc mesh shutdown".to_string(),
                 },
-            })
+            };
+            Ok(PyErr::new::<SupervisionError, _>(format!(
+                "supervision error: {:?}",
+                event
+            )))
         })
     }
 
@@ -240,7 +244,7 @@ impl PythonActorMesh {
 
     fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let actor_mesh = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::runtime::future_into_py(py, async move {
             let actor_mesh = actor_mesh
                 .take()
                 .await

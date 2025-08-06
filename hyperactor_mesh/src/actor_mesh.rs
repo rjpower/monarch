@@ -75,6 +75,7 @@ pub(crate) fn actor_mesh_cast<A, M>(
     comm_actor_ref: &ActorRef<CommActor>,
     selection_of_root: Selection,
     root_mesh_shape: &Shape,
+    cast_mesh_shape: &Shape,
     message: M,
 ) -> Result<(), CastError>
 where
@@ -89,10 +90,13 @@ where
     let message = CastMessageEnvelope::new::<A, M>(
         actor_mesh_id.clone(),
         sender.clone(),
-        root_mesh_shape.clone(),
+        cast_mesh_shape.clone(),
         message,
     )?;
     let cast_message = CastMessage {
+        // Note: `dest` is on the root mesh' shape, which could be different
+        // from the cast mesh's shape if the cast is on a view, e.g. a sliced
+        // mesh.
         dest: Uslice {
             slice: root_mesh_shape.slice().clone(),
             selection: selection_of_root,
@@ -147,6 +151,7 @@ where
         comm_actor_ref,
         sel_of_root,
         root_mesh_shape,
+        sliced_shape,
         message,
     )
 }
@@ -172,6 +177,7 @@ pub trait ActorMesh: Mesh<Id = ActorMeshId> {
             self.proc_mesh().comm_actor(),        // comm actor
             selection,                            // the selected actors
             self.shape(),                         // root mesh shape
+            self.shape(),                         // cast mesh shape
             message,                              // the message
         )
     }
@@ -419,7 +425,7 @@ impl<A: RemoteActor> ActorMesh for SlicedActorMesh<'_, A> {
             /*sel_of_sliced=*/ &sel,
             /*message=*/ message,
             /*sliced_shape=*/ self.shape(),
-            /*base_shape=*/ self.0.shape(),
+            /*root_mesh_shape=*/ self.0.shape(),
         )
     }
 }
@@ -461,6 +467,7 @@ pub(crate) mod test_util {
     use hyperactor::Context;
     use hyperactor::Handler;
     use hyperactor::PortRef;
+    use ndslice::extent;
 
     use super::*;
     use crate::comm::multicast::CastInfo;
@@ -590,8 +597,6 @@ pub(crate) mod test_util {
             // The actor creates a mesh.
             use std::sync::Arc;
 
-            use ndslice::shape;
-
             use crate::alloc::AllocSpec;
             use crate::alloc::Allocator;
             use crate::alloc::LocalAllocator;
@@ -599,7 +604,7 @@ pub(crate) mod test_util {
             let mut allocator = LocalAllocator;
             let alloc = allocator
                 .allocate(AllocSpec {
-                    shape: shape! { replica = 1 },
+                    extent: extent! { replica = 1 },
                     constraints: Default::default(),
                 })
                 .await
@@ -652,7 +657,7 @@ mod tests {
         ($allocator:expr_2021) => {
             use std::assert_matches::assert_matches;
 
-            use ndslice::shape;
+            use ndslice::extent;
             use $crate::alloc::AllocSpec;
             use $crate::alloc::Allocator;
             use $crate::assign::Ranks;
@@ -674,11 +679,11 @@ mod tests {
 
                 hyperactor_telemetry::initialize_logging(hyperactor::clock::ClockKind::default());
 
-                use ndslice::shape;
+                use ndslice::extent;
 
                 let alloc = $allocator
                     .allocate(AllocSpec {
-                        shape: shape! { replica = 1 },
+                        extent: extent! { replica = 1 },
                         constraints: Default::default(),
                     })
                     .await
@@ -695,7 +700,7 @@ mod tests {
             async fn test_basic() {
                 let alloc = $allocator
                     .allocate(AllocSpec {
-                        shape: shape! { replica = 4 },
+                        extent: extent!(replica = 4),
                         constraints: Default::default(),
                     })
                     .await
@@ -720,7 +725,7 @@ mod tests {
 
                 let alloc = $allocator
                     .allocate(AllocSpec {
-                        shape: shape! { replica = 2  },
+                        extent: extent!(replica = 2),
                         constraints: Default::default(),
                     })
                     .await
@@ -755,7 +760,7 @@ mod tests {
                 const Z: usize = 3;
                 let alloc = $allocator
                     .allocate(AllocSpec {
-                        shape: shape! { x = X, y = Y, z = Z },
+                        extent: extent!(x = X, y = Y, z = Z),
                         constraints: Default::default(),
                     })
                     .await
@@ -798,7 +803,7 @@ mod tests {
             async fn test_cast() {
                 let alloc = $allocator
                     .allocate(AllocSpec {
-                        shape: shape! { replica = 2, host = 2, gpu = 8 },
+                        extent: extent!(replica = 2, host = 2, gpu = 8),
                         constraints: Default::default(),
                     })
                     .await
@@ -838,7 +843,7 @@ mod tests {
                         // Sizes intentionally small to keep the time
                         // required for this test in the process case
                         // reasonable (< 60s).
-                        shape: shape! { replica = 2, host = 2, gpu = 8 },
+                        extent: extent!(replica = 2, host = 2, gpu = 8),
                         constraints: Default::default(),
                     })
                     .await
@@ -868,7 +873,7 @@ mod tests {
                 for _ in 0..2 {
                     let alloc = $allocator
                         .allocate(AllocSpec {
-                            shape: shape! { replica = 1 },
+                            extent: extent!(replica = 1),
                             constraints: Default::default(),
                         })
                         .await
@@ -911,11 +916,11 @@ mod tests {
                 use $crate::comm::test_utils::TestActorParams as CastTestActorParams;
                 use $crate::comm::test_utils::TestMessage as CastTestMessage;
 
-                let shape = shape! {replica = 4, host = 4, gpu = 4 };
-                let num_actors = shape.slice().len();
+                let extent = extent!(replica = 4, host = 4, gpu = 4);
+                let num_actors = extent.len();
                 let alloc = $allocator
                     .allocate(AllocSpec {
-                        shape,
+                        extent,
                         constraints: Default::default(),
                     })
                     .await
@@ -938,7 +943,7 @@ mod tests {
             async fn test_delivery_failure() {
                 let alloc = $allocator
                     .allocate(AllocSpec {
-                        shape: shape! { replica = 1  },
+                        extent: extent!(replica = 1 ),
                         constraints: Default::default(),
                     })
                     .await
@@ -966,7 +971,7 @@ mod tests {
             async fn test_send_with_headers() {
                 let alloc = $allocator
                     .allocate(AllocSpec {
-                        shape: shape! { replica = 1  },
+                        extent: extent!(replica = 1 ),
                         constraints: Default::default(),
                     })
                     .await
@@ -1025,7 +1030,7 @@ mod tests {
 
             let alloc = LocalAllocator
                 .allocate(AllocSpec {
-                    shape: shape! { replica = 2  },
+                    extent: extent!(replica = 2),
                     constraints: Default::default(),
                 })
                 .await
@@ -1092,7 +1097,7 @@ mod tests {
 
             let alloc = LocalAllocator
                 .allocate(AllocSpec {
-                    shape: shape! { replica = 1  },
+                    extent: extent!(replica = 1),
                     constraints: Default::default(),
                 })
                 .await
@@ -1158,7 +1163,7 @@ mod tests {
 
             let alloc = LocalAllocator
                 .allocate(AllocSpec {
-                    shape: shape! { replica = 2  },
+                    extent: extent!(replica = 2),
                     constraints: Default::default(),
                 })
                 .await
@@ -1241,10 +1246,10 @@ mod tests {
             // One rank is enough for this test, because the timeout failure
             // occurred in the `client->1st comm actor` channel, and thus will
             // not be sent further to the rest of the network.
-            let shape = shape! {replica = 1 };
+            let extent = extent! {replica = 1 };
             let alloc = process_allocator()
                 .allocate(AllocSpec {
-                    shape,
+                    extent,
                     constraints: Default::default(),
                 })
                 .await

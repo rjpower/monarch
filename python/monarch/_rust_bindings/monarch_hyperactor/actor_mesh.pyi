@@ -97,7 +97,7 @@ class PythonActorMesh:
         """
         ...
 
-    def supervision_event(self) -> PythonTask[NoReturn]:
+    def supervision_event(self) -> PythonTask[Exception]:
         """
         Completes with an exception when there is a supervision error.
         """

@@ -28,8 +28,7 @@ use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAlloc;
 use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAllocHost;
 use hyperactor_mesh::alloc::remoteprocess::RemoteProcessAllocInitializer;
 use hyperactor_mesh::alloc::sim::SimAllocator;
-use hyperactor_mesh::shape::Shape;
-use ndslice::Slice;
+use ndslice::Extent;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -88,8 +87,8 @@ impl Alloc for PyAllocWrapper {
         self.inner.next().await
     }
 
-    fn shape(&self) -> &Shape {
-        self.inner.shape()
+    fn extent(&self) -> &Extent {
+        self.inner.extent()
     }
 
     fn world_id(&self) -> &WorldId {
@@ -145,31 +144,29 @@ impl PyAllocSpec {
                 "Shape must have at least one dimension",
             ));
         };
-        let shape_dict = kwargs.downcast::<PyDict>()?;
+        let extent_dict = kwargs.downcast::<PyDict>()?;
 
         let mut keys = Vec::new();
         let mut values = Vec::new();
-        for (key, value) in shape_dict {
+        for (key, value) in extent_dict {
             keys.push(key.clone());
             values.push(value.clone());
         }
 
-        let shape = Shape::new(
+        let extent = Extent::new(
             keys.into_iter()
                 .map(|key| key.extract::<String>())
                 .collect::<PyResult<Vec<String>>>()?,
-            Slice::new_row_major(
-                values
-                    .into_iter()
-                    .map(|key| key.extract::<usize>())
-                    .collect::<PyResult<Vec<usize>>>()?,
-            ),
+            values
+                .into_iter()
+                .map(|key| key.extract::<usize>())
+                .collect::<PyResult<Vec<usize>>>()?,
         )
-        .map_err(|e| PyValueError::new_err(format!("Invalid shape: {:?}", e)))?;
+        .map_err(|e| PyValueError::new_err(format!("Invalid extent: {:?}", e)))?;
 
         Ok(Self {
             inner: AllocSpec {
-                shape,
+                extent,
                 constraints: constraints.inner.clone(),
             },
         })
@@ -177,13 +174,7 @@ impl PyAllocSpec {
     #[getter]
     fn extent<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
-        for (name, size) in self
-            .inner
-            .shape
-            .labels()
-            .iter()
-            .zip(self.inner.shape.slice().sizes().iter())
-        {
+        for (name, size) in self.inner.extent.iter() {
             d.set_item(name, size)?;
         }
         Ok(d)
@@ -318,17 +309,17 @@ impl PyRemoteProcessAllocInitializer {
                 .call_method1("initialize_alloc", args)
                 .map(|x| x.unbind())
         })?;
-        get_tokio_runtime()
-            .spawn_blocking(move || -> PyResult<Vec<String>> {
-                // call the function as implemented in python
-                Python::with_gil(|py| {
-                    let asyncio = py.import("asyncio").unwrap();
-                    let addrs = asyncio.call_method1("run", (coro,))?;
-                    let addrs: PyResult<Vec<String>> = addrs.extract();
-                    addrs
-                })
+        let r = get_tokio_runtime().spawn_blocking(move || -> PyResult<Vec<String>> {
+            // call the function as implemented in python
+            Python::with_gil(|py| {
+                let asyncio = py.import("asyncio").unwrap();
+                let addrs = asyncio.call_method1("run", (coro,))?;
+                let addrs: PyResult<Vec<String>> = addrs.extract();
+                addrs
             })
-            .await
+        });
+
+        r.await
             .map_err(|err| PyRuntimeError::new_err(err.to_string()))?
     }
 

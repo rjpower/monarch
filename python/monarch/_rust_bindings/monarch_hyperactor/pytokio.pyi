@@ -16,6 +16,7 @@ from typing import (
     Generic,
     NoReturn,
     Sequence,
+    Tuple,
     TypeVar,
 )
 
@@ -74,10 +75,10 @@ class PythonTask(Generic[T], Awaitable[T]):
 
     @staticmethod
     def select_one(
-        tasks: "Sequence[PythonTask[T]| PythonTask[NoReturn]]",
-    ) -> "PythonTask[T]":
+        tasks: "Sequence[PythonTask[T]]",
+    ) -> "PythonTask[Tuple[T, int]]":
         """
-        Run the tasks concurrently and return the first one to finish.
+        Run the tasks concurrently and return the first one to finish along with the index of which task it was.
         """
         ...
 
