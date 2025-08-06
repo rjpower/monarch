@@ -68,7 +68,6 @@ def main() -> None:
 
     # Execute the command
     subprocess.check_call(pip_command)
-    execute_pip_command(pip_args)
     print("Installation completed successfully!")
     print("Installed packages:")
     print(f"  - torchmonarch-nightly=={torchmonarch_version}")
