@@ -36,6 +36,20 @@ pub struct ActorSupervisionEvent {
     pub caused_by: Option<Box<ActorSupervisionEvent>>,
 }
 
+impl ActorSupervisionEvent {
+    /// Compute an actor status from this event, ensuring that "caused-by"
+    /// events are included in failure states. This should be used as the
+    /// actor status when reporting events to users.
+    pub fn status(&self) -> ActorStatus {
+        match &self.actor_status {
+            ActorStatus::Failed(msg) => {
+                ActorStatus::Failed(format!("{}: {}", self.to_string(), msg))
+            }
+            status => status.clone(),
+        }
+    }
+}
+
 impl std::error::Error for ActorSupervisionEvent {}
 
 impl fmt::Display for ActorSupervisionEvent {
