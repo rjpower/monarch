@@ -6,10 +6,12 @@
 
 # pyre-unsafe
 import asyncio
+import importlib.resources
 import logging
 import operator
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -713,6 +715,34 @@ async def test_logging_option_defaults() -> None:
             pass
 
 
+# oss_skip: importlib not pulling resource correctly in git CI, needs to be revisited
+@pytest.mark.oss_skip
+async def test_flush_logs_fast_exit() -> None:
+    # We use a subprocess to run the test so we can handle the flushed logs at the end.
+    # Otherwise, it is hard to restore the original stdout/stderr.
+
+    test_bin = importlib.resources.files(str(__package__)).joinpath("test_bin")
+
+    # Run the binary in a separate process and capture stdout and stderr
+    cmd = [str(test_bin), "flush-logs"]
+    process = subprocess.run(cmd, capture_output=True, timeout=60, text=True)
+
+    # Check if the process ended without error
+    if process.returncode != 0:
+        raise RuntimeError(f"{cmd} ended with error code {process.returncode}. ")
+
+    # Assertions on the captured output
+    assert (
+        len(
+            re.findall(
+                r"similar.*has print streaming",
+                process.stdout,
+            )
+        )
+        == 1
+    ), process.stdout
+
+
 class SendAlot(Actor):
     @endpoint
     async def send(self, port: Port[int]):
@@ -791,3 +821,14 @@ async def consume():
 @pytest.mark.timeout(60)
 def test_python_task_tuple() -> None:
     PythonTask.from_coroutine(consume()).block_on()
+
+
+def test_select_result() -> None:
+    def s(t):
+        time.sleep(t)
+        return t
+
+    a = PythonTask.spawn_blocking(lambda: s(4))
+    b = PythonTask.spawn_blocking(lambda: s(0))
+    r = PythonTask.select_one([a.task(), b.task()]).block_on()
+    assert r == (0, 1)
