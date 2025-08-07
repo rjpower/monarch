@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-unsafe
+
 import asyncio
 import ctypes
-import sys
 
 import click
 from monarch._rust_bindings.monarch_extension.blocking import blocking_function
@@ -158,8 +159,9 @@ def error_endpoint(num_procs, sync_test_impl, sync_endpoint, endpoint_name):
 @main.command("error-bootstrap")
 def error_bootstrap():
     print("Started function error_bootstrap", flush=True)
-
-    proc_mesh(gpus=4, env={"MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING": "1"}).get()
+    proc_mesh(
+        gpus=4, env={"MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING": "1"}
+    ).initialized.get()
 
 
 async def _error_unmonitored():
