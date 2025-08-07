@@ -8,6 +8,7 @@
 
 //! Messages used in supervision.
 
+use std::fmt;
 use std::fmt::Debug;
 
 use derivative::Derivative;
