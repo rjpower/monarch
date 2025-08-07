@@ -175,7 +175,11 @@ impl ControllerActor {
     ) -> Result<(ActorHandle<ProcActor>, ActorRef<ControllerActor>), anyhow::Error> {
         let bootstrap = ProcActor::bootstrap(
             controller_id.proc_id().clone(),
-            controller_id.proc_id().world_id().clone(), // REFACTOR(marius): make world_id a parameter of ControllerActor::bootstrap
+            controller_id
+                .proc_id()
+                .world_id()
+                .expect("multiprocess supports only ranked procs")
+                .clone(), // REFACTOR(marius): make world_id a parameter of ControllerActor::bootstrap
             listen_addr,
             bootstrap_addr.clone(),
             supervision_update_interval,
