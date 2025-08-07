@@ -670,16 +670,14 @@ impl Slice {
     ///
     /// let base = Slice::new(0, vec![4, 4], vec![4, 1]).unwrap();
     /// let view = base.subview(&[1, 1], &[2, 2]).unwrap();
-    ///
     /// assert_eq!(view.enforce_embedding(&base).unwrap().len(), 4);
     ///
     /// let small = Slice::new(0, vec![2, 2], vec![2, 1]).unwrap();
     /// assert!(view.enforce_embedding(&small).is_err());
     ///  ```
     pub fn enforce_embedding<'a>(&'a self, other: &'_ Slice) -> Result<&'a Slice, SliceError> {
-        for loc in self.iter() {
-            let _ = other.coordinates(loc)?;
-        }
+        self.iter()
+            .try_for_each(|loc| other.coordinates(loc).map(|_| ()))?;
         Ok(self)
     }
 }
