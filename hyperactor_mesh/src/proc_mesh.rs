@@ -214,9 +214,7 @@ impl ProcMesh {
                     .clone(),
             );
         }
-        router
-            .clone()
-            .serve(router_rx, mailbox::custom_monitored_return_handle("router"));
+        router.clone().serve(router_rx);
 
         // Set up a client proc for the mesh itself, so that we can attach ourselves
         // to it, and communicate with the agents. We wire it into the same router as
@@ -231,10 +229,7 @@ impl ProcMesh {
             client_proc_id.clone(),
             BoxedMailboxSender::new(router.clone()),
         );
-        client_proc.clone().serve(
-            client_rx,
-            mailbox::custom_monitored_return_handle("client proc"),
-        );
+        client_proc.clone().serve(client_rx);
         router.bind(client_proc_id.clone().into(), client_proc_addr.clone());
 
         // Bind this router to the global router, to enable cross-mesh routing.

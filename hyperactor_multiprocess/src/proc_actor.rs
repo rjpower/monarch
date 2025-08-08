@@ -44,7 +44,6 @@ use hyperactor::mailbox::MailboxAdminMessageHandler;
 use hyperactor::mailbox::MailboxClient;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::mailbox::MailboxServerHandle;
-use hyperactor::mailbox::monitored_return_handle;
 use hyperactor::mailbox::open_port;
 use hyperactor::proc::ActorLedgerSnapshot;
 use hyperactor::proc::Proc;
@@ -419,7 +418,7 @@ impl ProcActor {
         lifecycle_mode: ProcLifecycleMode,
     ) -> Result<BootstrappedProc, anyhow::Error> {
         let (local_addr, rx) = channel::serve(listen_addr).await?;
-        let mailbox_handle = proc.clone().serve(rx, monitored_return_handle());
+        let mailbox_handle = proc.clone().serve(rx);
         let (state_tx, mut state_rx) = watch::channel(ProcState::AwaitingJoin);
 
         let handle = match proc
@@ -1605,7 +1604,7 @@ mod tests {
 
         // Ping gets Pong's address
         let expected_1 = r#"UpdateAddress {
-    proc_id: ProcId::Ranked(
+    proc_id: Ranked(
         WorldId(
             "world",
         ),
@@ -1615,7 +1614,7 @@ mod tests {
 
         // Pong gets Ping's address
         let expected_2 = r#"UpdateAddress {
-    proc_id: ProcId::Ranked(
+    proc_id: Ranked(
         WorldId(
             "world",
         ),
@@ -1625,7 +1624,7 @@ mod tests {
 
         // Ping gets "user"'s address
         let expected_3 = r#"UpdateAddress {
-    proc_id: ProcId::Ranked(
+    proc_id: Ranked(
         WorldId(
             "user",
         ),"#;
