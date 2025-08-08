@@ -1888,9 +1888,7 @@ mod tests {
                 .unwrap();
         let local_proc_mbox = Mailbox::new_detached(local_proc_id.actor_id("test".to_string(), 0));
         let (local_proc_message_port, local_proc_message_receiver) = local_proc_mbox.open_port();
-        let _local_proc_serve_handle = local_proc_mbox
-            .clone()
-            .serve(local_proc_rx, monitored_return_handle());
+        let _local_proc_serve_handle = local_proc_mbox.clone().serve(local_proc_rx);
         MockHostActor {
             local_proc_id,
             local_proc_addr,
@@ -1922,9 +1920,7 @@ mod tests {
         let local_proc_actor_id = local_proc_id.actor_id("proc", 0);
         let local_proc_mbox = Mailbox::new_detached(local_proc_actor_id);
         let (local_proc_message_port, local_proc_message_receiver) = local_proc_mbox.open_port();
-        let _local_proc_serve_handle = local_proc_mbox
-            .clone()
-            .serve(local_proc_rx, monitored_return_handle());
+        let _local_proc_serve_handle = local_proc_mbox.clone().serve(local_proc_rx);
         (
             world_id,
             local_proc_id,
@@ -2951,7 +2947,7 @@ mod tests {
             panic!("Expected sim address");
         };
 
-        assert_eq!(addr.src().clone().unwrap().to_string(), "unix!@src");
-        assert_eq!(addr.addr().to_string(), "unix!@dst");
+        assert_eq!(addr.src().clone().unwrap().to_string(), "unix:@src");
+        assert_eq!(addr.addr().to_string(), "unix:@dst");
     }
 }
