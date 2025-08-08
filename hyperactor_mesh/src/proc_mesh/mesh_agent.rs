@@ -37,14 +37,12 @@ use hyperactor::channel::ChannelAddr;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
 use hyperactor::mailbox::BoxedMailboxSender;
-use hyperactor::mailbox::DeliveryError;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::IntoBoxedMailboxSender;
 use hyperactor::mailbox::MailboxClient;
 use hyperactor::mailbox::MailboxSender;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::Undeliverable;
-use hyperactor::mailbox::UndeliverableMessageError;
 use hyperactor::proc::Proc;
 use hyperactor::supervision::ActorSupervisionEvent;
 use serde::Deserialize;
@@ -162,30 +160,6 @@ impl Actor for MeshAgent {
         self.proc.set_supervision_coordinator(this.port())?;
         Ok(())
     }
-
-    // This is an override of the default actor behavior.
-    async fn handle_undeliverable_message(
-        &mut self,
-        cx: &Instance<Self>,
-        undelivered: Undeliverable<MessageEnvelope>,
-    ) -> Result<(), anyhow::Error> {
-        let Undeliverable(ref envelope) = undelivered;
-        tracing::debug!("took charge of a message not delivered: {}", envelope);
-
-        let sender = envelope.sender().clone();
-        if cx.self_id() == &sender {
-            anyhow::bail!(UndeliverableMessageError::delivery_failure(envelope));
-        }
-
-        let mut envelope = envelope.clone();
-        let return_port = PortRef::attest_message_port(&sender);
-        return_port.send(cx, undelivered).map_err(|err| {
-            envelope.try_set_error(DeliveryError::BrokenLink(format!("send failure: {err}")));
-            UndeliverableMessageError::return_failure(&envelope)
-        })?;
-
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -208,8 +182,17 @@ impl MeshAgentMessageHandler for MeshAgent {
         // Wire up the local proc to the global (process) router. This ensures that child
         // meshes are reachable from any actor created by this mesh.
         let client = MailboxClient::new(channel::dial(forwarder)?);
-        let default = super::global_router().fallback(client.into_boxed());
-        let router = DialMailboxRouter::new_with_default(default.into_boxed());
+
+        // `HYPERACTOR_MESH_ROUTER_CONFIG_NO_GLOBAL_FALLBACK` may be
+        // set as a means of failure injection in the testing of
+        // supervision codepaths.
+        let router = if std::env::var("HYPERACTOR_MESH_ROUTER_NO_GLOBAL_FALLBACK").is_err() {
+            let default = super::global_router().fallback(client.into_boxed());
+            DialMailboxRouter::new_with_default(default.into_boxed())
+        } else {
+            DialMailboxRouter::new_with_default(client.into_boxed())
+        };
+
         for (proc_id, addr) in address_book {
             router.bind(proc_id.into(), addr);
         }
