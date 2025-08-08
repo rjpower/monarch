@@ -2,10 +2,10 @@
 # Run me as:
 # curl https://raw.githubusercontent.com/meta-pytorch/monarch/refs/heads/main/scripts/install-nightly.py | python
 
-import sys
-import subprocess
-import urllib.request
 import json
+import subprocess
+import sys
+import urllib.request
 
 
 def get_latest_version(package_name: str) -> str:
