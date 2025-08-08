@@ -13,12 +13,10 @@ use std::ops::Deref;
 
 use async_trait::async_trait;
 use hyperactor::Actor;
-use hyperactor::ActorId;
 use hyperactor::ActorRef;
 use hyperactor::Bind;
 use hyperactor::GangId;
 use hyperactor::GangRef;
-use hyperactor::Mailbox;
 use hyperactor::Message;
 use hyperactor::Named;
 use hyperactor::PortHandle;

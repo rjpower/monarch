@@ -71,7 +71,6 @@ use std::fmt;
 use std::fmt::Debug;
 use std::future::Future;
 use std::ops::Bound::Excluded;
-use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -1449,7 +1448,7 @@ impl cap::sealed::CanSend for &Mailbox {
         cap::sealed::CanSend::post(*self, dest, headers, data)
     }
     fn actor_id(&self) -> &ActorId {
-        self.deref().actor_id()
+        (**self).actor_id()
     }
 }
 
