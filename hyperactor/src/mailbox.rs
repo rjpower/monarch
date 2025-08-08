@@ -71,6 +71,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::future::Future;
 use std::ops::Bound::Excluded;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -1439,10 +1440,16 @@ impl cap::sealed::CanSend for Mailbox {
         let envelope = MessageEnvelope::new(self.actor_id().clone(), dest, data, headers);
         MailboxSender::post(self, envelope, return_handle);
     }
+    fn actor_id(&self) -> &ActorId {
+        self.actor_id()
+    }
 }
 impl cap::sealed::CanSend for &Mailbox {
     fn post(&self, dest: PortId, headers: Attrs, data: Serialized) {
         cap::sealed::CanSend::post(*self, dest, headers, data)
+    }
+    fn actor_id(&self) -> &ActorId {
+        self.deref().actor_id()
     }
 }
 
