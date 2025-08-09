@@ -736,7 +736,7 @@ mod tests {
                 let actor_mesh: RootActorMesh<TestActor> = proc_mesh.spawn("echo", &()).await.unwrap();
                 let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
                 actor_mesh
-                    .cast(sel!(*), Echo("Hello".to_string(), reply_handle.bind()))
+                    .cast(proc_mesh.client(), sel!(*), Echo("Hello".to_string(), reply_handle.bind()))
                     .unwrap();
                 for _ in 0..4 {
                     assert_eq!(&reply_receiver.recv().await.unwrap(), "Hello");
@@ -840,7 +840,7 @@ mod tests {
                 let dont_simulate_error = true;
                 let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
                 actor_mesh
-                    .cast(sel!(*), GetRank(dont_simulate_error, reply_handle.bind()))
+                    .cast(proc_mesh.client(), sel!(*), GetRank(dont_simulate_error, reply_handle.bind()))
                     .unwrap();
                 let mut ranks = Ranks::new(actor_mesh.shape().slice().len());
                 while !ranks.is_full() {
@@ -851,6 +851,7 @@ mod tests {
                 let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
                 actor_mesh
                     .cast(
+                        proc_mesh.client(),
                         sel_from_shape!(actor_mesh.shape(), replica = 0, host = 0),
                         GetRank(dont_simulate_error, reply_handle.bind()),
                     )
@@ -958,7 +959,7 @@ mod tests {
                 let params = CastTestActorParams{ forward_port: tx.bind() };
                 let actor_mesh: RootActorMesh<CastTestActor> = proc_mesh.spawn("actor", &params).await.unwrap();
 
-                actor_mesh.cast(sel!(*), CastTestMessage::Forward("abc".to_string())).unwrap();
+                actor_mesh.cast(proc_mesh.client(), sel!(*), CastTestMessage::Forward("abc".to_string())).unwrap();
 
                 for _ in 0..num_actors {
                     assert_eq!(rx.recv().await.unwrap(), CastTestMessage::Forward("abc".to_string()));
@@ -1148,7 +1149,7 @@ mod tests {
             // replying with rank.
             let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
             actor_mesh
-                .cast(sel!(*), GetRank(false, reply_handle.bind()))
+                .cast(mesh.client(), sel!(*), GetRank(false, reply_handle.bind()))
                 .unwrap();
             let rank = reply_receiver.recv().await.unwrap();
             assert_eq!(rank, 0);
@@ -1162,7 +1163,7 @@ mod tests {
             // Cast the message.
             let (reply_handle, _) = actor_mesh.open_port();
             actor_mesh
-                .cast(sel!(*), GetRank(false, reply_handle.bind()))
+                .cast(mesh.client(), sel!(*), GetRank(false, reply_handle.bind()))
                 .unwrap();
 
             // The message will be returned!
@@ -1297,7 +1298,11 @@ mod tests {
             // the message will fail to send.
             assert!(payload.len() > max_frame_length);
             actor_mesh
-                .cast(sel!(*), Echo(payload, reply_handle.bind()))
+                .cast(
+                    proc_mesh.client(),
+                    sel!(*),
+                    Echo(payload, reply_handle.bind()),
+                )
                 .unwrap();
 
             // The undeliverable message will be turned into a proc event.
