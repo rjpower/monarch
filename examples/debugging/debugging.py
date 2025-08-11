@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
+
 from monarch.actor import Actor, current_rank, debug_client, endpoint, proc_mesh
 
 
