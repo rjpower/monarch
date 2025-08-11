@@ -7,6 +7,7 @@
 # pyre-unsafe
 from monarch.actor import Actor, current_rank, debug_client, endpoint, proc_mesh
 
+
 def _bad_rank():
     raise ValueError("bad rank")
 
