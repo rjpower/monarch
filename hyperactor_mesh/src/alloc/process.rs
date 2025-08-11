@@ -339,12 +339,18 @@ impl ProcessAlloc {
 
     fn index(&self, proc_id: &ProcId) -> Result<usize, anyhow::Error> {
         anyhow::ensure!(
-            proc_id.world_name().parse::<ShortUuid>()? == self.name,
+            proc_id
+                .world_name()
+                .expect("proc must be ranked for allocation index")
+                .parse::<ShortUuid>()?
+                == self.name,
             "proc {} does not belong to alloc {}",
             proc_id,
             self.name
         );
-        Ok(proc_id.rank())
+        Ok(proc_id
+            .rank()
+            .expect("proc must be ranked for allocation index"))
     }
 
     #[hyperactor::instrument_infallible]
@@ -365,8 +371,9 @@ impl ProcessAlloc {
         cmd.env(bootstrap::BOOTSTRAP_LOG_CHANNEL, log_channel.to_string());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
-        let proc_id = ProcId(WorldId(self.name.to_string()), index);
+        let proc_id = ProcId::Ranked(WorldId(self.name.to_string()), index);
         tracing::debug!("Spawning process {:?}", cmd);
         match cmd.spawn() {
             Err(err) => {
@@ -446,7 +453,7 @@ impl Alloc for ProcessAlloc {
                             }
 
                             child.post(Allocator2Process::StartProc(
-                                ProcId(WorldId(self.name.to_string()), index),
+                                ProcId::Ranked(WorldId(self.name.to_string()), index),
                                 transport,
                             ));
                         }
@@ -466,6 +473,8 @@ impl Alloc for ProcessAlloc {
 
                 Some(Ok((index, mut reason))) = self.children.join_next() => {
                     let stderr_content = if let Some(Child { stdout, stderr, ..} ) = self.remove(index) {
+                        stdout.abort();
+                        stderr.abort();
                         let (_stdout, _) = stdout.join().await;
                         let (stderr_lines, _) = stderr.join().await;
                         stderr_lines.join("\n")
@@ -480,7 +489,7 @@ impl Alloc for ProcessAlloc {
                     tracing::info!("child stopped with ProcStopReason::{:?}", reason);
 
                     break Some(ProcState::Stopped {
-                        proc_id: ProcId(WorldId(self.name.to_string()), index),
+                        proc_id: ProcId::Ranked(WorldId(self.name.to_string()), index),
                         reason
                     });
                 },
@@ -564,7 +573,11 @@ mod tests {
             }
         };
 
-        if let Some(child) = alloc.active.get(&proc_id.rank()) {
+        if let Some(child) = alloc.active.get(
+            &proc_id
+                .rank()
+                .expect("proc must be ranked for allocation lookup"),
+        ) {
             child.fail_group();
         }
 
