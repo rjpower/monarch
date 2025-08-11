@@ -87,7 +87,7 @@ pub fn global_mailbox() -> Mailbox {
     GLOBAL_MAILBOX
         .get_or_init(|| {
             let world_id = WorldId(ShortUuid::generate().to_string());
-            let client_proc_id = ProcId(world_id.clone(), 0);
+            let client_proc_id = ProcId::Ranked(world_id.clone(), 0);
             let client_proc = Proc::new(
                 client_proc_id.clone(),
                 BoxedMailboxSender::new(global_router().clone()),
@@ -207,14 +207,20 @@ impl ProcMesh {
             let proc_id = proc_ids.get(rank).unwrap().clone();
             router.bind(Reference::Proc(proc_id.clone()), addr.clone());
             // Work around for Allocs that have more than one world.
-            world_ids.insert(proc_id.world_id().clone());
+            world_ids.insert(
+                proc_id
+                    .world_id()
+                    .expect("proc in running state must be ranked")
+                    .clone(),
+            );
         }
         router.clone().serve(router_rx);
 
         // Set up a client proc for the mesh itself, so that we can attach ourselves
         // to it, and communicate with the agents. We wire it into the same router as
         // everything else, so now the whole mesh should be able to communicate.
-        let client_proc_id = ProcId(WorldId(format!("{}_manager", alloc.world_id().name())), 0);
+        let client_proc_id =
+            ProcId::Ranked(WorldId(format!("{}_manager", alloc.world_id().name())), 0);
         let (client_proc_addr, client_rx) = channel::serve(ChannelAddr::any(alloc.transport()))
             .await
             .map_err(|err| AllocatorError::Other(err.into()))?;
@@ -229,7 +235,7 @@ impl ProcMesh {
         // Bind this router to the global router, to enable cross-mesh routing.
         // TODO: unbind this when we incorporate mesh destruction too.
         for world_id in world_ids {
-            global_router().bind(world_id.clone().into(), router.clone());
+            global_router().bind(world_id.into(), router.clone());
         }
         global_router().bind(alloc.world_id().clone().into(), router.clone());
         global_router().bind(client_proc_id.into(), router.clone());
@@ -588,6 +594,7 @@ impl ProcEvents {
                             actor_id: proc_id.actor_id("any", 0),
                             actor_status: ActorStatus::Failed(format!("proc {} is stopped", proc_id)),
                             message_headers: None,
+                            caused_by: None,
                         };
                         if entry.value().send(event).is_err() {
                             tracing::warn!("unable to transmit supervision event to actor {}", entry.key());
@@ -610,13 +617,14 @@ impl ProcEvents {
                         // TODO(T231868026): find a better way to represent all actors in an actor
                         // mesh for supervision event
                         event.actor_id = ActorId(
-                            ProcId(WorldId(actor_mesh_id.0.0.clone()), 0),
+                            ProcId::Ranked(WorldId(actor_mesh_id.0.0.clone()), 0),
                             actor_mesh_id.1.clone(),
                             0,
                         );
                     };
                     let actor_id = event.actor_id.clone();
                     let actor_status = event.actor_status.clone();
+                    let reason = event.to_string();
                     let Some(rank) = self.ranks.get(actor_id.proc_id()) else {
                         tracing::warn!("received supervision event for unmapped actor {}", actor_id);
                         continue;
@@ -641,7 +649,7 @@ impl ProcEvents {
                     );
 
                     // Send this event to Python proc mesh to keep its health status up to date.
-                    break Some(ProcEvent::Crashed(*rank, actor_status.to_string()))
+                    break Some(ProcEvent::Crashed(*rank, reason))
                 }
             }
         }
@@ -797,7 +805,7 @@ mod tests {
         let name = alloc.name().to_string();
         let mesh = ProcMesh::allocate(alloc).await.unwrap();
 
-        assert_eq!(mesh.get(0).unwrap().world_name(), &name);
+        assert_eq!(mesh.get(0).unwrap().world_name(), Some(name.as_str()));
     }
 
     #[tokio::test]
