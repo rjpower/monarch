@@ -319,8 +319,8 @@ impl Encoded {
     /// Computes the 32bit crc of the encoded data
     pub fn crc(&self) -> u32 {
         match &self {
-            Encoded::Bincode(data) => crc32fast::hash(&data),
-            Encoded::Json(data) => crc32fast::hash(&data),
+            Encoded::Bincode(data) => crc32fast::hash(data),
+            Encoded::Json(data) => crc32fast::hash(data),
         }
     }
 }
@@ -384,8 +384,8 @@ impl Serialized {
     /// Deserialize a value to the provided type T.
     pub fn deserialized<T: DeserializeOwned>(&self) -> Result<T, anyhow::Error> {
         match &self.encoded {
-            Encoded::Bincode(data) => bincode::deserialize(&data).map_err(anyhow::Error::from),
-            Encoded::Json(data) => serde_json::from_slice(&data).map_err(anyhow::Error::from),
+            Encoded::Bincode(data) => bincode::deserialize(data).map_err(anyhow::Error::from),
+            Encoded::Json(data) => serde_json::from_slice(data).map_err(anyhow::Error::from),
         }
     }
 
@@ -424,7 +424,7 @@ impl Serialized {
                 };
                 typeinfo.dump(self.clone())
             }
-            Encoded::Json(data) => serde_json::from_slice(&data).map_err(anyhow::Error::from),
+            Encoded::Json(data) => serde_json::from_slice(data).map_err(anyhow::Error::from),
         }
     }
 
@@ -445,7 +445,7 @@ impl Serialized {
     // serialization, and generalize it to other codecs as well.
     pub fn prefix<T: DeserializeOwned>(&self) -> Result<T, anyhow::Error> {
         match &self.encoded {
-            Encoded::Bincode(data) => bincode::deserialize(&data).map_err(anyhow::Error::from),
+            Encoded::Bincode(data) => bincode::deserialize(data).map_err(anyhow::Error::from),
             _ => anyhow::bail!("only bincode supports prefix emplacement"),
         }
     }
