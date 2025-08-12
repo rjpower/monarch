@@ -8,6 +8,7 @@
 
 use std::error::Error;
 use std::future::Future;
+use std::ops::Deref;
 use std::pin::Pin;
 
 use hyperactor::clock::Clock;
@@ -119,7 +120,7 @@ where
 }
 
 impl PyPythonTask {
-    fn take_task(
+    pub(crate) fn take_task(
         &mut self,
     ) -> PyResult<Pin<Box<dyn Future<Output = Result<Py<PyAny>, PyErr>> + Send + 'static>>> {
         self.inner
@@ -158,7 +159,7 @@ impl PyPythonTask {
         signal_safe_block_on(py, task)?
     }
 
-    fn spawn(&mut self) -> PyResult<PyShared> {
+    pub(crate) fn spawn(&mut self) -> PyResult<PyShared> {
         let (tx, rx) = watch::channel(None);
         let task = self.take_task()?;
         get_tokio_runtime().spawn(async move {
@@ -277,7 +278,7 @@ pub struct PyShared {
 }
 #[pymethods]
 impl PyShared {
-    fn task(&mut self) -> PyResult<PyPythonTask> {
+    pub(crate) fn task(&mut self) -> PyResult<PyPythonTask> {
         // watch channels start unchanged, and when a value is sent to them signal
         // the receivers `changed` future.
         // By cloning the rx before awaiting it,
