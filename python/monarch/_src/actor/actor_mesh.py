@@ -867,6 +867,7 @@ class _Actor:
         self.instance: object | None = None
         # TODO: (@pzhang) remove this with T229200522
         self._saved_error: ActorError | None = None
+        self._ctx: Optional[MonarchContext] = None
 
     async def handle(
         self,
@@ -883,9 +884,15 @@ class _Actor:
         # response_port can be None. If so, then sending to port will drop the response,
         # and raise any exceptions to the caller.
         try:
-            ctx: MonarchContext = MonarchContext(
-                mailbox, mailbox.actor_id.proc_id, Point(rank, shape), (None, 0)
-            )
+            ctx = self._ctx
+            if ctx is None:
+                # we reuse ctx across the actor so that send_queue is preserved between calls.
+                ctx = self._ctx = MonarchContext(
+                    mailbox, mailbox.actor_id.proc_id, Point(rank, shape), (None, 0)
+                )
+            ctx.mailbox = mailbox
+            ctx.proc_id = mailbox.actor_id.proc_id
+            ctx.point = Point(rank, shape)
             _context.set(ctx)
 
             DebugContext.set(DebugContext())
@@ -940,7 +947,7 @@ class _Actor:
                     enter_span(
                         module,
                         method_name,
-                        str(ctx.mailbox.actor_id),
+                        str(mailbox.actor_id),
                     )
                     try:
                         result = await the_method(*args, **kwargs)
@@ -956,7 +963,7 @@ class _Actor:
 
                 result = await instrumented()
             else:
-                enter_span(module, method_name, str(ctx.mailbox.actor_id))
+                enter_span(module, method_name, str(mailbox.actor_id))
                 with fake_sync_state():
                     result = the_method(*args, **kwargs)
                 self._maybe_exit_debugger()
