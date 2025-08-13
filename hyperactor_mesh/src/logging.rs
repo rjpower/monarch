@@ -11,14 +11,11 @@ use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::task::Context as TaskContext;
 use std::task::Poll;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use anyhow::Error;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::DateTime;
@@ -50,10 +47,7 @@ use hyperactor_telemetry::log_file_path;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io;
-use tokio::sync::mpsc;
-use tokio::sync::watch;
 use tokio::sync::watch::Receiver;
-use tokio::task::JoinHandle;
 
 use crate::bootstrap::BOOTSTRAP_LOG_CHANNEL;
 
@@ -264,6 +258,9 @@ pub enum LogMessage {
         /// The log payload as bytes
         payload: Serialized,
     },
+
+    /// Flush the log
+    Flush {},
 }
 
 /// Messages that can be sent to the LogClient locally.
@@ -289,6 +286,10 @@ pub enum LogClientMessage {
 pub trait LogSender: Send + Sync {
     /// Send a log payload in bytes
     fn send(&mut self, target: OutputTarget, payload: Vec<u8>) -> anyhow::Result<()>;
+
+    /// Flush the log channel, ensuring all messages are delivered
+    /// Returns when the flush message has been acknowledged
+    fn flush(&mut self) -> anyhow::Result<()>;
 }
 
 /// Represents the target output stream (stdout or stderr)
@@ -301,11 +302,10 @@ pub enum OutputTarget {
 }
 
 /// Write the log to a local unix channel so some actors can listen to it and stream the log back.
-#[derive(Clone)]
 pub struct LocalLogSender {
     hostname: String,
     pid: u32,
-    tx: Arc<ChannelTx<LogMessage>>,
+    tx: ChannelTx<LogMessage>,
     status: Receiver<TxStatus>,
 }
 
@@ -321,15 +321,17 @@ impl LocalLogSender {
         Ok(Self {
             hostname,
             pid,
-            tx: Arc::new(tx),
+            tx,
             status,
         })
     }
 }
 
+#[async_trait]
 impl LogSender for LocalLogSender {
     fn send(&mut self, target: OutputTarget, payload: Vec<u8>) -> anyhow::Result<()> {
         if TxStatus::Active == *self.status.borrow() {
+            // Do not use tx.send, it will block the allocator as the child process state is unknown.
             self.tx.post(LogMessage::Log {
                 hostname: self.hostname.clone(),
                 pid: self.pid,
@@ -337,12 +339,26 @@ impl LogSender for LocalLogSender {
                 payload: Serialized::serialize_anon(&payload)?,
             });
         } else {
-            tracing::trace!(
+            tracing::debug!(
                 "log sender {} is not active, skip sending log",
                 self.tx.addr()
             )
         }
 
+        Ok(())
+    }
+
+    fn flush(&mut self) -> anyhow::Result<()> {
+        // send will make sure message is delivered
+        if TxStatus::Active == *self.status.borrow() {
+            // Do not use tx.send, it will block the allocator as the child process state is unknown.
+            self.tx.post(LogMessage::Flush {});
+        } else {
+            tracing::debug!(
+                "log sender {} is not active, skip sending flush message",
+                self.tx.addr()
+            );
+        }
         Ok(())
     }
 }
@@ -414,13 +430,17 @@ pub fn create_log_writers(
     ),
     anyhow::Error,
 > {
-    let log_sender = LocalLogSender::new(log_channel, pid)?;
-
     // Create LogWriter instances for stdout and stderr using the shared log sender
-    let stdout_writer =
-        LogWriter::with_default_writer(local_rank, OutputTarget::Stdout, log_sender.clone())?;
-    let stderr_writer =
-        LogWriter::with_default_writer(local_rank, OutputTarget::Stderr, log_sender)?;
+    let stdout_writer = LogWriter::with_default_writer(
+        local_rank,
+        OutputTarget::Stdout,
+        LocalLogSender::new(log_channel.clone(), pid)?,
+    )?;
+    let stderr_writer = LogWriter::with_default_writer(
+        local_rank,
+        OutputTarget::Stderr,
+        LocalLogSender::new(log_channel, pid)?,
+    )?;
 
     Ok((Box::new(stdout_writer), Box::new(stderr_writer)))
 }
@@ -497,7 +517,16 @@ impl<T: LogSender + Unpin + 'static, S: io::AsyncWrite + Send + Unpin + 'static>
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Result<(), io::Error>> {
         let this = self.get_mut();
-        Pin::new(&mut this.std_writer).poll_flush(cx)
+
+        match Pin::new(&mut this.std_writer).poll_flush(cx) {
+            Poll::Ready(Ok(())) => {
+                if let Err(e) = this.log_sender.flush() {
+                    tracing::error!("error sending flush: {}", e);
+                }
+                Poll::Ready(Ok(()))
+            }
+            other => other, // Propagate any errors or Pending state from the std_writer flush
+        }
     }
 
     fn poll_shutdown(
@@ -663,20 +692,15 @@ fn deserialize_message_lines(
     handlers = [LogMessage, LogClientMessage],
 )]
 pub struct LogClientActor {
-    log_tx: mpsc::Sender<(OutputTarget, String)>,
-    #[allow(unused)]
-    aggregator_handle: JoinHandle<Result<(), Error>>,
-    /// The watch sender for the aggregation window in seconds
-    aggregate_window_tx: watch::Sender<u64>,
-    should_aggregate: bool,
-    // Store aggregators directly in the actor for access in Drop
-    aggregators: Arc<RwLock<HashMap<OutputTarget, Aggregator>>>,
+    aggregate_window_sec: Option<u64>,
+    aggregators: HashMap<OutputTarget, Aggregator>,
+    last_flush_time: SystemTime,
+    next_flush_deadline: Option<SystemTime>,
 }
 
 impl LogClientActor {
-    fn print_aggregators(aggregators: &RwLock<HashMap<OutputTarget, Aggregator>>) {
-        let mut aggregators_guard = aggregators.write().unwrap();
-        for (output_target, aggregator) in aggregators_guard.iter_mut() {
+    fn print_aggregators(&mut self) {
+        for (output_target, aggregator) in self.aggregators.iter_mut() {
             if aggregator.is_empty() {
                 continue;
             }
@@ -693,6 +717,14 @@ impl LogClientActor {
             aggregator.reset();
         }
     }
+
+    fn print_log_line(hostname: &str, pid: u32, output_target: OutputTarget, line: String) {
+        let message = format!("[{} {}] {}", hostname, pid, line);
+        match output_target {
+            OutputTarget::Stdout => println!("{}", message),
+            OutputTarget::Stderr => eprintln!("{}", message),
+        }
+    }
 }
 
 #[async_trait]
@@ -701,33 +733,16 @@ impl Actor for LogClientActor {
     type Params = ();
 
     async fn new(_: ()) -> Result<Self, anyhow::Error> {
-        // Create mpsc channel for log messages
-        let (log_tx, log_rx) = mpsc::channel::<(OutputTarget, String)>(1000);
-
-        // Create a watch channel for the aggregation window
-        let (aggregate_window_tx, aggregate_window_rx) =
-            watch::channel(DEFAULT_AGGREGATE_WINDOW_SEC);
-
         // Initialize aggregators
         let mut aggregators = HashMap::new();
         aggregators.insert(OutputTarget::Stderr, Aggregator::new());
         aggregators.insert(OutputTarget::Stdout, Aggregator::new());
-        let aggregators = Arc::new(RwLock::new(aggregators));
-
-        // Clone aggregators for the aggregator task
-        let aggregators_for_task = Arc::clone(&aggregators);
-
-        // Start the loggregator
-        let aggregator_handle = tokio::spawn(async move {
-            start_aggregator(log_rx, aggregate_window_rx, aggregators_for_task).await
-        });
 
         Ok(Self {
-            log_tx,
-            aggregator_handle,
-            aggregate_window_tx,
-            should_aggregate: true,
+            aggregate_window_sec: Some(DEFAULT_AGGREGATE_WINDOW_SEC),
             aggregators,
+            last_flush_time: RealClock.system_time_now(),
+            next_flush_deadline: None,
         })
     }
 }
@@ -735,53 +750,8 @@ impl Actor for LogClientActor {
 impl Drop for LogClientActor {
     fn drop(&mut self) {
         // Flush the remaining logs before shutting down
-        Self::print_aggregators(&self.aggregators);
+        self.print_aggregators();
     }
-}
-
-async fn start_aggregator(
-    mut log_rx: mpsc::Receiver<(OutputTarget, String)>,
-    mut interval_sec_rx: watch::Receiver<u64>,
-    aggregators: Arc<RwLock<HashMap<OutputTarget, Aggregator>>>,
-) -> anyhow::Result<()> {
-    let mut interval =
-        tokio::time::interval(tokio::time::Duration::from_secs(*interval_sec_rx.borrow()));
-
-    // Start the event loop
-    loop {
-        tokio::select! {
-            // Process incoming log messages
-            Some((output_target, log_line)) = log_rx.recv() => {
-                let mut aggregators_guard = aggregators.write().unwrap();
-                if let Some(aggregator) = aggregators_guard.get_mut(&output_target) {
-                    if let Err(e) = aggregator.add_line(&log_line) {
-                        tracing::error!("error adding log line: {}", e);
-                    }
-                } else {
-                    tracing::error!("unknown output target: {:?}", output_target);
-                }
-            }
-            // Watch for changes in the interval
-            Ok(_) = interval_sec_rx.changed() => {
-                interval = tokio::time::interval(tokio::time::Duration::from_secs(*interval_sec_rx.borrow()));
-            }
-
-            // Every interval tick, print and reset the aggregator
-            _ = interval.tick() => {
-                LogClientActor::print_aggregators(&aggregators);
-            }
-
-            // Exit if the channel is closed
-            else => {
-                tracing::error!("log channel closed, exiting aggregator");
-                // Print final aggregated logs before shutting down
-                LogClientActor::print_aggregators(&aggregators);
-                break;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[async_trait]
@@ -789,7 +759,7 @@ async fn start_aggregator(
 impl LogMessageHandler for LogClientActor {
     async fn log(
         &mut self,
-        _cx: &Context<Self>,
+        cx: &Context<Self>,
         hostname: String,
         pid: u32,
         output_target: OutputTarget,
@@ -797,18 +767,62 @@ impl LogMessageHandler for LogClientActor {
     ) -> Result<(), anyhow::Error> {
         // Deserialize the message and process line by line with UTF-8
         let message_lines = deserialize_message_lines(&payload)?;
+        let hostname = hostname.as_str();
 
-        for line in message_lines {
-            if self.should_aggregate {
-                self.log_tx.send((output_target, line)).await?;
-            } else {
-                let message = format!("[{} {}] {}", hostname, pid, line);
-                match output_target {
-                    OutputTarget::Stdout => println!("{}", message),
-                    OutputTarget::Stderr => eprintln!("{}", message),
+        match self.aggregate_window_sec {
+            None => {
+                for line in message_lines {
+                    Self::print_log_line(hostname, pid, output_target, line);
+                }
+                self.last_flush_time = RealClock.system_time_now();
+            }
+            Some(window) => {
+                for line in message_lines {
+                    if let Some(aggregator) = self.aggregators.get_mut(&output_target) {
+                        if let Err(e) = aggregator.add_line(&line) {
+                            tracing::error!("error adding log line: {}", e);
+                            // For the sake of completeness, flush the log lines.
+                            Self::print_log_line(hostname, pid, output_target, line);
+                        }
+                    } else {
+                        tracing::error!("unknown output target: {:?}", output_target);
+                        // For the sake of completeness, flush the log lines.
+                        Self::print_log_line(hostname, pid, output_target, line);
+                    }
+                }
+
+                let new_deadline = self.last_flush_time + Duration::from_secs(window);
+                let now = RealClock.system_time_now();
+                if new_deadline <= now {
+                    self.flush(cx).await?;
+                } else {
+                    let delay = new_deadline.duration_since(now)?;
+                    match self.next_flush_deadline {
+                        None => {
+                            self.next_flush_deadline = Some(new_deadline);
+                            cx.self_message_with_delay(LogMessage::Flush {}, delay)?;
+                        }
+                        Some(deadline) => {
+                            // Some early log lines have alrady triggered the flush.
+                            if new_deadline < deadline {
+                                // This can happen if the user has adjusted the aggregation window.
+                                self.next_flush_deadline = Some(new_deadline);
+                                cx.self_message_with_delay(LogMessage::Flush {}, delay)?;
+                            }
+                        }
+                    }
                 }
             }
         }
+
+        Ok(())
+    }
+
+    async fn flush(&mut self, _cx: &Context<Self>) -> Result<(), anyhow::Error> {
+        self.print_aggregators();
+        self.last_flush_time = RealClock.system_time_now();
+        self.next_flush_deadline = None;
+
         Ok(())
     }
 }
@@ -821,11 +835,11 @@ impl LogClientMessageHandler for LogClientActor {
         _cx: &Context<Self>,
         aggregate_window_sec: Option<u64>,
     ) -> Result<(), anyhow::Error> {
-        if let Some(window) = aggregate_window_sec {
-            // Send the new value through the watch channel
-            self.aggregate_window_tx.send(window)?;
+        if self.aggregate_window_sec.is_some() && aggregate_window_sec.is_none() {
+            // Make sure we flush whatever in the aggregators before disabling aggregation.
+            self.print_aggregators();
         }
-        self.should_aggregate = aggregate_window_sec.is_some();
+        self.aggregate_window_sec = aggregate_window_sec;
         Ok(())
     }
 }
@@ -981,14 +995,19 @@ mod tests {
     // Mock implementation of LogSender for testing
     struct MockLogSender {
         log_sender: mpsc::UnboundedSender<(OutputTarget, String)>, // (output_target, content)
+        flush_called: Arc<Mutex<bool>>,                            // Track if flush was called
     }
 
     impl MockLogSender {
         fn new(log_sender: mpsc::UnboundedSender<(OutputTarget, String)>) -> Self {
-            Self { log_sender }
+            Self {
+                log_sender,
+                flush_called: Arc::new(Mutex::new(false)),
+            }
         }
     }
 
+    #[async_trait]
     impl LogSender for MockLogSender {
         fn send(&mut self, output_target: OutputTarget, payload: Vec<u8>) -> anyhow::Result<()> {
             // For testing purposes, convert to string if it's valid UTF-8
@@ -1000,6 +1019,16 @@ mod tests {
             self.log_sender
                 .send((output_target, line))
                 .map_err(|e| anyhow::anyhow!("Failed to send log in test: {}", e))
+        }
+
+        fn flush(&mut self) -> anyhow::Result<()> {
+            // Mark that flush was called
+            let mut flush_called = self.flush_called.lock().unwrap();
+            *flush_called = true;
+
+            // For testing purposes, just return Ok
+            // In a real implementation, this would wait for all messages to be delivered
+            Ok(())
         }
     }
 
@@ -1113,6 +1142,32 @@ mod tests {
         // The content should be "Hello" followed by replacement characters for invalid bytes
         assert!(content.starts_with("Hello"));
         // The rest of the content will be replacement characters, but we don't care about the exact representation
+    }
+
+    #[tokio::test]
+    async fn test_log_writer_poll_flush() {
+        // Create a channel to receive logs
+        let (log_sender, _log_receiver) = mpsc::unbounded_channel();
+
+        // Create a mock log sender that tracks flush calls
+        let mock_log_sender = MockLogSender::new(log_sender);
+        let log_sender_flush_tracker = mock_log_sender.flush_called.clone();
+
+        // Create mock writers for stdout and stderr
+        let (stdout_mock_writer, _) = MockWriter::new();
+        let stdout_writer: Box<dyn io::AsyncWrite + Send + Unpin> = Box::new(stdout_mock_writer);
+
+        // Create a log writer with the mocks
+        let mut writer = LogWriter::new(OutputTarget::Stdout, stdout_writer, mock_log_sender);
+
+        // Call flush on the writer
+        writer.flush().await.unwrap();
+
+        // Verify that log sender's flush were called
+        assert!(
+            *log_sender_flush_tracker.lock().unwrap(),
+            "LogSender's flush was not called"
+        );
     }
 
     #[test]

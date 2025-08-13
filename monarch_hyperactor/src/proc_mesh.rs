@@ -277,7 +277,6 @@ impl PyProcMesh {
         &self,
         name: String,
         actor: &Bound<'py, PyType>,
-        emulated: bool,
     ) -> PyResult<PyObject> {
         let unhealthy_event = Arc::clone(&self.unhealthy_event);
         let pickled_type = PickledPyObject::pickle(actor.as_any())?;
