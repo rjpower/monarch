@@ -294,15 +294,8 @@ impl PyProcMesh {
                 actor_events,
             ))
         };
-        if emulated {
-            // we give up on doing mesh spawn async for the emulated old version
-            // it is too complicated to make both work.
-            let r = get_tokio_runtime().block_on(meshimpl)?;
-            Python::with_gil(|py| r.into_py_any(py))
-        } else {
-            let r = PythonActorMesh::new(meshimpl);
-            Python::with_gil(|py| r.into_py_any(py))
-        }
+        let r = PythonActorMesh::new(meshimpl);
+        Python::with_gil(|py| r.into_py_any(py))
     }
 
     #[staticmethod]
