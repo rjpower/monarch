@@ -30,10 +30,8 @@ def config_from_cli_args(args: argparse.Namespace) -> Config:
 
     if args.scheduler_args:
         with torchx_runner() as runner:
-            opts = runner.scheduler_run_opts(config.scheduler)
-            for cfg_str in args.scheduler_args:
-                parsed_cfg = opts.cfg_from_str(cfg_str)
-                config.scheduler_args.update(parsed_cfg)
+            parsed_cfg = runner.cfg_from_str(args.scheduler, *args.scheduler_args)
+            config.scheduler_args.update(parsed_cfg)
 
     config.dryrun = args.dryrun
     return config
