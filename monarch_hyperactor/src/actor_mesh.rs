@@ -33,14 +33,10 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use pyo3::types::PyDict;
-use pyo3::types::PySlice;
 use serde::Deserialize;
 use serde::Serialize;
-use tokio::pin;
-use tokio::sync::mpsc::Sender;
-use tokio::sync::mpsc::channel;
-use tokio::sync::oneshot;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::unbounded_channel;
 
 use crate::actor::PythonActor;
 use crate::actor::PythonMessage;
@@ -423,7 +419,7 @@ impl Clone for ClonePyErr {
 type ActorMeshResult = Result<Arc<dyn ActorMeshProtocol>, ClonePyErr>;
 struct AsyncActorMesh {
     mesh: Shared<Pin<Box<dyn Future<Output = ActorMeshResult> + Send>>>,
-    queue: Sender<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
+    queue: UnboundedSender<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
     supervised: bool,
 }
 
@@ -432,7 +428,7 @@ impl AsyncActorMesh {
     where
         F: Future<Output = PyResult<Box<dyn ActorMeshProtocol>>> + Send + 'static,
     {
-        let (queue, mut recv) = channel(128);
+        let (queue, mut recv) = unbounded_channel();
 
         get_tokio_runtime().spawn(async move {
             loop {
@@ -447,7 +443,7 @@ impl AsyncActorMesh {
         AsyncActorMesh::new(queue, true, f)
     }
     fn new<F>(
-        queue: Sender<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
+        queue: UnboundedSender<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
         supervised: bool,
         f: F,
     ) -> AsyncActorMesh
@@ -466,7 +462,7 @@ impl AsyncActorMesh {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.queue.blocking_send(f.boxed()).unwrap();
+        self.queue.send(f.boxed()).unwrap();
     }
 }
 
