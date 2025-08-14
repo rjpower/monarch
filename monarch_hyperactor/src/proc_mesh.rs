@@ -277,7 +277,7 @@ impl PyProcMesh {
         &self,
         name: String,
         actor: &Bound<'py, PyType>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<PyPythonTask> {
         let unhealthy_event = Arc::clone(&self.unhealthy_event);
         let pickled_type = PickledPyObject::pickle(actor.as_any())?;
         let proc_mesh = self.try_inner()?;
@@ -287,15 +287,15 @@ impl PyProcMesh {
             let mailbox = proc_mesh.client().clone();
             let actor_mesh = proc_mesh.spawn(&name, &pickled_type).await?;
             let actor_events = actor_mesh.with_mut(|a| a.events()).await.unwrap().unwrap();
-            Ok(PythonActorMeshImpl::new(
+            let im = PythonActorMeshImpl::new(
                 actor_mesh,
                 PyMailbox { inner: mailbox },
                 keepalive,
                 actor_events,
-            ))
+            );
+            Ok(PythonActorMesh::from_impl(im))
         };
-        let r = PythonActorMesh::new(meshimpl);
-        Python::with_gil(|py| r.into_py_any(py))
+        PyPythonTask::new(meshimpl)
     }
 
     #[staticmethod]

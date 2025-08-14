@@ -106,6 +106,11 @@ impl PythonActorMesh {
             })),
         }
     }
+    pub(crate) fn from_impl(im: PythonActorMeshImpl) -> Self {
+        PythonActorMesh {
+            inner: Box::new(im),
+        }
+    }
 }
 
 fn to_hy_sel(selection: &str) -> PyResult<Selection> {
