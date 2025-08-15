@@ -6,13 +6,13 @@
 
 # pyre-unsafe
 import asyncio
+import functools
 import inspect
 import logging
 import os
 import sys
 from dataclasses import dataclass
 from typing import cast, Dict, Generator, List, Optional, Tuple, Union
-import functools
 
 from monarch._src.actor.actor_mesh import Actor, DebugContext, MonarchContext
 from monarch._src.actor.endpoint import endpoint
