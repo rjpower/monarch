@@ -22,11 +22,6 @@ pub use pytree::PyTree;
 /// # Arguments
 /// * `$fn_name` - Name of the Rust function to generate
 /// * `$python_path` - Path to the Python object as a string (e.g., "module.submodule.function")
-///
-/// # Example
-/// ```rust
-/// py_global!(sys_modules, "sys.modules");
-/// ```
 #[macro_export]
 macro_rules! py_global {
     ($fn_name:ident, $python_module:literal, $python_class:literal) => {

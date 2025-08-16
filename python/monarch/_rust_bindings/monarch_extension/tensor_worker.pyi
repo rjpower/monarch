@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Callable, final, Optional, Sequence, Tuple
+from typing import Callable, final, Optional, Sequence, TYPE_CHECKING
 
-import torch
+if TYPE_CHECKING:
+    import torch
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._rust_bindings.monarch_hyperactor.shape import Slice
 
@@ -80,11 +81,11 @@ class TensorFactory:
         *,
         size: Sequence[int],
         # pyre-ignore
-        dtype: torch.dtype,
+        dtype: "torch.dtype",
         # pyre-ignore
-        layout: torch.layout,
+        layout: "torch.layout",
         # pyre-ignore
-        device: torch.device,
+        device: "torch.device",
     ) -> None: ...
     @property
     def size(self) -> tuple[int, ...]:
@@ -92,12 +93,12 @@ class TensorFactory:
         ...
 
     @property
-    def dtype(self) -> torch.dtype:
+    def dtype(self) -> "torch.dtype":
         """The data type of the tensor."""
         ...
 
     @property
-    def layout(self) -> torch.layout:
+    def layout(self) -> "torch.layout":
         """The layout of the tensor."""
         ...
 
