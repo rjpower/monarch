@@ -580,11 +580,9 @@ impl<M: RemoteMessage> NetTx<M> {
                                 }
                             }
                         },
-                        // It does matter whether `fn send_message` is cancel safe or not. Since
-                        // `fn send_message` does not remove the message from outbox, when it is
-                        // canceled, the message will not be dropped. In the worst case, the same
-                        // message would get sent multiple times. But that is okay. The seq order is
-                        // still preserved.
+
+                        // We have to be careful to manage outgoing write states, so that we never write
+                        // partial frames in the presence cancellation.
                         send_result = write_state.send() => {
                             match send_result {
                                 Ok(()) => {
@@ -1125,8 +1123,8 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
                         ),
                     }
                 }
-                // It does matter whether send_ack is cancel safe. If it is not,
-                // the same seq might get acked multiple times. But that is okay.
+                // We have to be careful to manage the ack write state here, so that we do not
+                // write partial acks in the presence of cancellation.
                 ack_result = self.write_state.send() => {
                     match ack_result {
                         Ok(acked_seq) => {
@@ -2022,7 +2020,7 @@ mod tests {
 
     #[cfg(target_os = "linux")] // uses abstract names
     use anyhow::Result;
-    use futures::Sink;
+    
     use futures::SinkExt;
     use futures::stream::SplitSink;
     use futures::stream::SplitStream;
@@ -2031,8 +2029,8 @@ mod tests {
     use rand::distributions::Alphanumeric;
     use timed_test::async_timed_test;
     use tokio::io::DuplexStream;
-    use tokio_util::codec::Decoder;
-    use tokio_util::codec::Encoder;
+    
+    
     use tokio_util::codec::Framed;
 
     use super::*;

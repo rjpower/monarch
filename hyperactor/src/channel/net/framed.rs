@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
 //! This module implements a cancellation-safe zero-copy framer for network channels.
 
 use std::io;
@@ -12,7 +20,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 
-/// A FrameReader reads frames from an underlying [ AsyncRead ].
+/// A FrameReader reads frames from an underlying [`AsyncRead`].
 pub struct FrameReader<R> {
     reader: R,
     max_frame_length: usize,
