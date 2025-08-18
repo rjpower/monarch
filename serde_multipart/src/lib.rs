@@ -99,7 +99,7 @@ impl Message {
     /// Efficiently frames a message containing the body and all of its parts
     /// using a simple frame-length encoding:
     ///
-    /// ```
+    /// ```text
     /// +--------------------+-------------------+--------------------+-------------------+   ...   +
     /// | body_len (u64 BE)  |   body bytes      | part1_len (u64 BE) |   part1 bytes     |         |
     /// +--------------------+-------------------+--------------------+-------------------+         +

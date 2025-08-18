@@ -2647,11 +2647,6 @@ mod tests {
 
         {
             let (handle, mut framed, mut rx, _cancel_token) = serve(&manager).await;
-            let handle = tokio::spawn(async move {
-                let result = handle.await.unwrap();
-                result
-            });
-
             write_stream(
                 &mut framed,
                 session_id,
