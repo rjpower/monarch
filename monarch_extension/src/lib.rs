@@ -36,12 +36,6 @@ fn has_tensor_engine() -> bool {
     cfg!(feature = "tensor_engine")
 }
 
-py_global!(
-    add_extension_methods,
-    "monarch._src.actor.python_extension_methods",
-    "add_extension_methods"
-);
-
 fn get_or_add_new_module<'py>(
     module: &Bound<'py, PyModule>,
     module_name: &str,
