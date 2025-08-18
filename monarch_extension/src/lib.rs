@@ -267,7 +267,9 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // this should be called last. otherwise cross references in pyi files will not have been
     // added to sys.modules yet.
-    add_extension_methods(module.py()).call1((module,))?;
-
+    let maybe_module = module.py().import("monarch._src");
+    if maybe_module.is_ok() {
+        add_extension_methods(module.py()).call1((module,))?;
+    }
     Ok(())
 }
