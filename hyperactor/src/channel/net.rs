@@ -2020,7 +2020,6 @@ mod tests {
 
     #[cfg(target_os = "linux")] // uses abstract names
     use anyhow::Result;
-    
     use futures::SinkExt;
     use futures::stream::SplitSink;
     use futures::stream::SplitStream;
@@ -2029,8 +2028,6 @@ mod tests {
     use rand::distributions::Alphanumeric;
     use timed_test::async_timed_test;
     use tokio::io::DuplexStream;
-    
-    
     use tokio_util::codec::Framed;
 
     use super::*;
