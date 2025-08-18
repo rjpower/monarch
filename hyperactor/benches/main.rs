@@ -222,16 +222,9 @@ async fn channel_ping_pong(
         tokio::spawn(async move {
             let server_tx = channel::dial(server_addr)?;
             let message = Bytes::from(vec![0u8; message_size]);
-            if false && num_iter > 1 {
-                loop {
-                    server_tx.post(message.clone() /*cheap */);
-                    client_rx.recv().await?;
-                }
-            } else {
-                for _ in 0..num_iter {
-                    server_tx.post(message.clone() /*cheap */);
-                    client_rx.recv().await?;
-                }
+            for _ in 0..num_iter {
+                server_tx.post(message.clone() /*cheap */);
+                client_rx.recv().await?;
             }
             Ok(())
         });
