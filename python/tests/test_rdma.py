@@ -68,6 +68,7 @@ class ParameterClient(Actor):
 async def test_proc_mesh_rdma():
     proc = await proc_mesh(gpus=1)
     server = await proc.spawn("server", ParameterServer)
+    await proc.logging_option(aggregate_window_sec=None)
 
     # --- CPU TESTS ---
     client_cpu = await proc.spawn(

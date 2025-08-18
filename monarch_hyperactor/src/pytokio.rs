@@ -8,7 +8,6 @@
 
 use std::error::Error;
 use std::future::Future;
-use std::ops::Deref;
 use std::pin::Pin;
 
 use hyperactor::clock::Clock;
@@ -182,8 +181,17 @@ impl PyPythonTask {
     }
 
     #[staticmethod]
-    fn from_coroutine(coro: PyObject) -> PyResult<PyPythonTask> {
-        PyPythonTask::new(async {
+    fn from_coroutine(py: Python<'_>, coro: PyObject) -> PyResult<PyPythonTask> {
+        // MonarchContext.get() used inside a PythonTask should inherit the value of
+        // MonarchContext from the context in which the PythonTask was constructed.
+        // We need to do this manually because the value of the contextvar isn't
+        // maintained inside the tokio runtime.
+        let monarch_context = py
+            .import("monarch._src.actor.actor_mesh")?
+            .getattr("MonarchContext")?
+            .call_method0("get")?
+            .unbind();
+        PyPythonTask::new(async move {
             let (coroutine_iterator, none) = Python::with_gil(|py| {
                 coro.into_bound(py)
                     .call_method0("__await__")
@@ -196,6 +204,11 @@ impl PyPythonTask {
             }
             loop {
                 let action: PyResult<Action> = Python::with_gil(|py| {
+                    // We may be executing in a new thread at this point, so we need to set the value
+                    // of MonarchContext.
+                    py.import("monarch._src.actor.actor_mesh")?
+                        .getattr("_context")?
+                        .call_method1("set", (monarch_context.clone_ref(py),))?;
                     let result = match last {
                         Ok(value) => coroutine_iterator.bind(py).call_method1("send", (value,)),
                         Err(pyerr) => coroutine_iterator

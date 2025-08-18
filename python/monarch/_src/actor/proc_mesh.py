@@ -34,7 +34,6 @@ from typing import (
 from weakref import WeakValueDictionary
 
 from monarch._rust_bindings.monarch_extension.logging import LoggingMeshClient
-from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monarch/monarch_extension:monarch_extension
     Alloc,
     AllocConstraints,
@@ -133,11 +132,11 @@ def _use_standin_mesh() -> bool:
 
 # Ultra-hack to allow actors to identify proc meshes but with no real functionality.
 class ProcMeshRef:
-    def __init__(self, proc_mesh_id: str) -> None:
+    def __init__(self, proc_mesh_id: int) -> None:
         self._proc_mesh_id = proc_mesh_id
 
     @classmethod
-    def _fake_proc_mesh(cls, proc_mesh_id: str) -> "ProcMesh":
+    def _fake_proc_mesh(cls, proc_mesh_id: int) -> "ProcMesh":
         return cast(ProcMesh, cls(proc_mesh_id))
 
     def __getattr__(self, attr: str) -> Any:
@@ -155,7 +154,13 @@ class ProcMeshRef:
             return False
         return self._proc_mesh_id == other._proc_mesh_id
 
+    @property
+    def _proc_mesh(self) -> Shared["HyProcMesh"]:
+        return _deref_proc_mesh(self)._proc_mesh
 
+
+_proc_mesh_lock: threading.Lock = threading.Lock()
+_proc_mesh_key: int = 0
 _proc_mesh_registry: WeakValueDictionary[ProcMeshRef, "ProcMesh"] = (
     WeakValueDictionary()
 )
@@ -177,6 +182,10 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         _device_mesh: Optional["DeviceMesh"] = None,
     ) -> None:
         self._proc_mesh = hy_proc_mesh
+        global _proc_mesh_lock, _proc_mesh_key
+        with _proc_mesh_lock:
+            self._proc_mesh_id: int = _proc_mesh_key
+            _proc_mesh_key += 1
         self._shape = shape
         # until we have real slicing support keep track
         # of whether this is a slice of a real proc_meshg
@@ -509,9 +518,8 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         # where the real proc mesh exists, the client can look it up in the proc mesh registry
         # and do something with it.
         global _proc_mesh_registry
-        proc_mesh_id = self._proc_mesh.block_on().client.actor_id.world_name
-        _proc_mesh_registry[ProcMeshRef(proc_mesh_id)] = self
-        return (ProcMeshRef._fake_proc_mesh, (proc_mesh_id,))
+        _proc_mesh_registry[ProcMeshRef(self._proc_mesh_id)] = self
+        return (ProcMeshRef._fake_proc_mesh, (self._proc_mesh_id,))
 
     @staticmethod
     def _from_ref(proc_mesh_ref: ProcMeshRef) -> "ProcMesh":
