@@ -17,6 +17,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from types import ModuleType
 from typing import cast
 
@@ -958,13 +959,15 @@ class LsActor(Actor):
         return os.listdir(self.workspace)
 
 
+# oss_skip: there are address assignment issues in git CI, needs to be revisited
+@pytest.mark.oss_skip
 async def test_sync_workspace() -> None:
-    pm = await proc_mesh(gpus=1)
-
     # create two workspaces: one for local and one for remote
     with tempfile.TemporaryDirectory() as workspace_src, tempfile.TemporaryDirectory() as workspace_dst, unittest.mock.patch.dict(
         os.environ, {"WORKSPACE_DIR": workspace_dst}
     ):
+        pm = await proc_mesh(gpus=1)
+
         os.environ["WORKSPACE_DIR"] = workspace_dst
         config = defaults.config("slurm", workspace_src)
         await pm.sync_workspace(
