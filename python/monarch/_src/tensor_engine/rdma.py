@@ -15,7 +15,7 @@ try:
 except ImportError as e:
     logging.error("RDMA is not available: {}".format(e))
     raise e
-from monarch._src.actor.actor_mesh import MonarchContext
+from monarch._src.actor.actor_mesh import context
 from monarch._src.actor.future import Future
 
 
@@ -76,12 +76,12 @@ class RDMABuffer:
             storage = data.untyped_storage()
             addr: int = storage.data_ptr()
             size = storage.element_size() * data.numel()
-            ctx = MonarchContext.get()
+            ctx = context()
             self._buffer: _RdmaBuffer = _RdmaBuffer.create_rdma_buffer_blocking(
                 addr=addr,
                 size=size,
-                proc_id=ctx.proc_id,
-                client=ctx.mailbox,
+                proc_id=ctx.actor_instance.proc_id,
+                client=ctx.actor_instance._mailbox,
             )
         # TODO - specific exception
         except Exception as e:
@@ -120,8 +120,8 @@ class RDMABuffer:
                 f"offset + size ({offset + size}) must be <= dst.numel() ({dst.numel()})"
             )
 
-        local_proc_id = MonarchContext.get().proc_id
-        client = MonarchContext.get().mailbox
+        local_proc_id = context().actor_instance.proc_id
+        client = context().actor_instance._mailbox
 
         async def read_into_nonblocking() -> Optional[int]:
             res = await self._buffer.read_into(
@@ -167,8 +167,8 @@ class RDMABuffer:
                 f"size + offset ({size + offset}) must be <= src.numel() ({src.numel()})"
             )
 
-        local_proc_id = MonarchContext.get().proc_id
-        client = MonarchContext.get().mailbox
+        local_proc_id = context().actor_instance.proc_id
+        client = context().actor_instance._mailbox
 
         async def write_from_nonblocking() -> None:
             res = await self._buffer.write_from(

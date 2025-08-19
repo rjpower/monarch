@@ -16,7 +16,6 @@ import os
 import random
 import traceback
 from abc import ABC, abstractmethod
-
 from dataclasses import dataclass
 from traceback import TracebackException
 from typing import (
@@ -85,6 +84,8 @@ from monarch._src.actor.pdb_wrapper import PdbWrapper
 
 from monarch._src.actor.pickle import flatten, unflatten
 
+from monarch._src.actor.python_extension_methods import rust_struct
+
 from monarch._src.actor.shape import MeshTrait, NDSlice
 from monarch._src.actor.sync_state import fake_sync_state
 
@@ -121,26 +122,79 @@ class Point(HyPoint, collections.abc.Mapping):
     pass
 
 
-@dataclass
-class MonarchContext:
-    mailbox: Mailbox
-    proc_id: str
-    point: Point
+@rust_struct("monarch_hyperactor::mailbox::Instance")
+class Instance:
+    @property
+    def _mailbox(self) -> Mailbox:
+        """
+        This can be removed once we fix all the uses of mailbox to just use context instead.
+        """
+        ...
+
+    @property
+    def proc_id(self) -> str:
+        """
+        The proc_id of the current actor.
+        """
+        ...
+
+    @property
+    def actor_id(self) -> ActorId:
+        """
+        The actor_id of the current actor.
+        """
+        ...
+
+    @property
+    def rank(self) -> Point:
+        """
+        Every actor is spawned over some mesh of processes. This identifies the point in that mesh where
+        the current actor was spawned. In other words, it is the `monarch.current_rank()` of
+        The actors __init__ message.
+        """
+        raise NotImplementedError("NYI: complete for release 0.0")
+
+    @property
+    def proc(self) -> "ProcMesh":
+        raise NotImplementedError("NYI: compelte for release 0.0")
+
+
+@rust_struct("monarch_hyperactor::mailbox::Context")
+class Context:
+    @property
+    def actor_instance(self) -> Instance:
+        """
+        Information about the actor currently running in this context.
+        """
+        ...
+
+    @property
+    def message_rank(self) -> Point:
+        """
+        Every message is sent as some broadcast of messages. This call identifies the
+        point in this space where the current actor is participating.
+
+        This is not the same self.actor_instance.rank: if the message was sent to some slice of
+        actors this identifies where the actor appears in the slice and not the identity of the actor.
+
+        These Point objects always exist. For singletons it will have 0 dimensions.
+        """
+        ...
 
     @staticmethod
-    def get() -> "MonarchContext":
-        c = _context.get(None)
-        if c is None:
-            mb = Mailbox.root_client_mailbox()
-            proc_id = mb.actor_id.proc_id
-            c = MonarchContext(mb, proc_id, Point(0, singleton_shape))
-            _context.set(c)
-        return c
+    def _root_client_context() -> "Context": ...
 
 
-_context: contextvars.ContextVar[MonarchContext] = contextvars.ContextVar(
+_context: contextvars.ContextVar[Context] = contextvars.ContextVar(
     "monarch.actor_mesh._context"
 )
+
+
+def context() -> Context:
+    c = _context.get(None)
+    if c is None:
+        c = Context._root_client_context()
+    return c
 
 
 @dataclass
@@ -587,7 +641,7 @@ T = TypeVar("T")
 class Channel(Generic[R]):
     @staticmethod
     def open(once: bool = False) -> Tuple["Port[R]", "PortReceiver[R]"]:
-        mailbox = MonarchContext.get().mailbox
+        mailbox = context().actor_instance._mailbox
         handle, receiver = mailbox.open_once_port() if once else mailbox.open_port()
         port_ref = handle.bind()
         return (
@@ -689,9 +743,7 @@ class _Actor:
 
     async def handle(
         self,
-        mailbox: Mailbox,
-        rank: int,
-        shape: Shape,
+        ctx: Context,
         method: MethodSpecifier,
         message: bytes,
         panic_flag: PanicFlag,
@@ -702,7 +754,6 @@ class _Actor:
         # response_port can be None. If so, then sending to port will drop the response,
         # and raise any exceptions to the caller.
         try:
-            ctx = MonarchContext(mailbox, mailbox.actor_id.proc_id, Point(rank, shape))
             _context.set(ctx)
 
             DebugContext.set(DebugContext())
@@ -738,7 +789,8 @@ class _Actor:
                 #    should never happen. It indicates either a bug in the
                 #    message delivery mechanism, or the framework accidentally
                 #    mixed the usage of cast and direct send.
-                error_message = f"Actor object is missing when executing method {method_name} on actor {mailbox.actor_id}."
+
+                error_message = f"Actor object is missing when executing method {method_name} on actor {ctx.actor_instance.actor_id}."
                 if self._saved_error is not None:
                     error_message += (
                         f" This is likely due to an earlier error: {self._saved_error}"
@@ -757,7 +809,7 @@ class _Actor:
                     enter_span(
                         module,
                         method_name,
-                        str(mailbox.actor_id),
+                        str(ctx.actor_instance.actor_id),
                     )
                     try:
                         result = await the_method(*args, **kwargs)
@@ -773,7 +825,7 @@ class _Actor:
 
                 result = await instrumented()
             else:
-                enter_span(module, method_name, str(mailbox.actor_id))
+                enter_span(module, method_name, str(ctx.actor_instance.actor_id))
                 with fake_sync_state():
                     result = the_method(*args, **kwargs)
                 self._maybe_exit_debugger()
@@ -809,11 +861,12 @@ class _Actor:
 
         if (pdb_wrapper := DebugContext.get().pdb_wrapper) is not None:
             with fake_sync_state():
-                ctx = MonarchContext.get()
+                ctx = context()
+                rank = ctx.message_rank.rank
                 pdb_wrapper = PdbWrapper(
-                    ctx.point.rank,
-                    ctx.point.shape.coordinates(ctx.point.rank),
-                    ctx.mailbox.actor_id,
+                    rank,
+                    ctx.message_rank.shape.coordinates(rank),
+                    ctx.actor_instance.actor_id,
                     DebugManager.ref().get_debug_client.call_one().get(),
                 )
                 DebugContext.set(DebugContext(pdb_wrapper))
@@ -1034,14 +1087,13 @@ class ActorError(Exception):
 
 
 def current_actor_name() -> str:
-    return str(MonarchContext.get().mailbox.actor_id)
+    return str(context().actor_instance.actor_id)
 
 
 def current_rank() -> Point:
-    ctx = MonarchContext.get()
-    return ctx.point
+    return context().message_rank
 
 
 def current_size() -> Dict[str, int]:
-    ctx = MonarchContext.get()
-    return dict(zip(ctx.point.shape.labels, ctx.point.shape.ndslice.sizes))
+    r = context().message_rank
+    return dict(zip(r.shape.labels, r.shape.ndslice.sizes))

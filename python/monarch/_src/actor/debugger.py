@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import cast, Dict, Generator, List, Optional, Tuple, Union
 
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
-from monarch._src.actor.actor_mesh import Actor, ActorMesh, DebugContext, MonarchContext
+from monarch._src.actor.actor_mesh import Actor, ActorMesh, context, DebugContext
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.pdb_wrapper import DebuggerWrite, PdbWrapper
 from monarch._src.actor.sync_state import fake_sync_state
@@ -567,13 +567,15 @@ class DebugManager(Actor):
     @staticmethod
     @functools.cache
     def ref() -> "DebugManager":
-        ctx = MonarchContext.get()
+        instance = context().actor_instance
         return cast(
             DebugManager,
             ActorMesh.from_actor_id(
                 DebugManager,
-                ActorId.from_string(f"{ctx.proc_id}.{_DEBUG_MANAGER_ACTOR_NAME}[0]"),
-                ctx.mailbox,
+                ActorId.from_string(
+                    f"{instance.proc_id}.{_DEBUG_MANAGER_ACTOR_NAME}[0]"
+                ),
+                instance._mailbox,
             ),
         )
 
@@ -585,7 +587,7 @@ class DebugManager(Actor):
         return self._debug_client
 
 
-def remote_breakpointhook():
+def remote_breakpointhook() -> None:
     frame = inspect.currentframe()
     assert frame is not None
     frame = frame.f_back
@@ -604,11 +606,12 @@ def remote_breakpointhook():
 
     with fake_sync_state():
         manager = DebugManager.ref().get_debug_client.call_one().get()
-    ctx = MonarchContext.get()
+    ctx = context()
+    rank = ctx.message_rank
     pdb_wrapper = PdbWrapper(
-        ctx.point.rank,
-        ctx.point.shape.coordinates(ctx.point.rank),
-        ctx.mailbox.actor_id,
+        rank.rank,
+        rank.shape.coordinates(rank.rank),
+        ctx.actor_instance.actor_id,
         manager,
     )
     DebugContext.set(DebugContext(pdb_wrapper))

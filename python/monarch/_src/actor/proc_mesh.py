@@ -45,7 +45,7 @@ from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
 )
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
-from monarch._src.actor.actor_mesh import _Actor, Actor, ActorMesh, MonarchContext
+from monarch._src.actor.actor_mesh import _Actor, Actor, ActorMesh, context
 
 from monarch._src.actor.allocator import (
     AllocateMixin,
@@ -343,7 +343,7 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         service = ActorMesh._create(
             Class,
             actor_mesh,
-            MonarchContext.get().mailbox,
+            context().actor_instance._mailbox,
             self._shape,
             self,
             *args,
