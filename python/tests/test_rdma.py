@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-unsafe
 import pytest
 
 import torch
@@ -68,7 +69,6 @@ class ParameterClient(Actor):
 async def test_proc_mesh_rdma():
     proc = await proc_mesh(gpus=1)
     server = await proc.spawn("server", ParameterServer)
-    await proc.logging_option(aggregate_window_sec=None)
 
     # --- CPU TESTS ---
     client_cpu = await proc.spawn(

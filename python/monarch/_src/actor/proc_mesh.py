@@ -303,7 +303,9 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         pm = ProcMesh(hy_proc_mesh, shape)
 
         async def task(
-            pm: "ProcMesh", hy_proc_mesh_task: "Shared[HyProcMesh]"
+            pm: "ProcMesh",
+            hy_proc_mesh_task: "Shared[HyProcMesh]",
+            setup_actor: Optional[SetupActor],
         ) -> HyProcMesh:
             hy_proc_mesh = await hy_proc_mesh_task
 
@@ -316,21 +318,26 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
                 level=logging.INFO,
             )
 
-            if setup is not None:
-                # If the user has passed the setup lambda, we need to call
-                # it here before any of the other actors are spawned so that
-                # the environment variables are set up before cuda init.
-                setup_actor = pm._spawn_nonblocking_on(
-                    hy_proc_mesh_task, "setup", SetupActor, setup
-                )
+            if setup_actor is not None:
                 await setup_actor.setup.call()
 
             return hy_proc_mesh
 
-        pm._proc_mesh = PythonTask.from_coroutine(task(pm, hy_proc_mesh)).spawn()
-
         if _attach_controller_controller:
             pm._controller_controller = _get_controller_controller()
+
+        setup_actor = None
+        if setup is not None:
+            # If the user has passed the setup lambda, we need to call
+            # it here before any of the other actors are spawned so that
+            # the environment variables are set up before cuda init.
+            setup_actor = pm._spawn_nonblocking_on(
+                hy_proc_mesh, "setup", SetupActor, setup
+            )
+
+        pm._proc_mesh = PythonTask.from_coroutine(
+            task(pm, hy_proc_mesh, setup_actor)
+        ).spawn()
 
         return pm
 
@@ -433,9 +440,15 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         # If `conda` is set, also sync the currently activated conda env.
         conda_prefix = conda_utils.active_env_dir()
         if conda and conda_prefix is not None:
+            conda_prefix = Path(conda_prefix)
+
+            # Resolve top-level symlinks for rsync/conda-sync.
+            while conda_prefix.is_symlink():
+                conda_prefix = conda_prefix.parent / conda_prefix.readlink()
+
             workspaces.append(
                 WorkspaceConfig(
-                    local=Path(conda_prefix),
+                    local=conda_prefix,
                     remote=RemoteWorkspace(
                         location=WorkspaceLocation.FromEnvVar("CONDA_PREFIX"),
                         shape=WorkspaceShape.shared("gpus"),
@@ -662,6 +675,19 @@ def _get_controller_controller() -> "_ControllerController":
 def get_or_spawn_controller(
     name: str, Class: Type["_ActorType"], *args: Any, **kwargs: Any
 ) -> Future["_ActorType"]:
+    """
+    Creates a singleton actor (controller) indexed by name, or if it already exists, returns the
+    existing actor.
+
+    Args:
+        name (str): The unique name of the actor, used as a key for retrieval.
+        Class (Type): The class of the actor to spawn. Must be a subclass of Actor.
+        *args (Any): Positional arguments to pass to the actor constructor.
+        **kwargs (Any): Keyword arguments to pass to the actor constructor.
+
+    Returns:
+        A Future that resolves to a reference to the actor.
+    """
     return _get_controller_controller().get_or_spawn.call_one(
         name, Class, *args, **kwargs
     )
