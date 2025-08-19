@@ -126,7 +126,6 @@ class MonarchContext:
     mailbox: Mailbox
     proc_id: str
     point: Point
-    send_queue: Tuple[Optional["Shared[Any]"], int]
 
     @staticmethod
     def get() -> "MonarchContext":
@@ -134,7 +133,7 @@ class MonarchContext:
         if c is None:
             mb = Mailbox.root_client_mailbox()
             proc_id = mb.actor_id.proc_id
-            c = MonarchContext(mb, proc_id, Point(0, singleton_shape), (None, 0))
+            c = MonarchContext(mb, proc_id, Point(0, singleton_shape))
             _context.set(c)
         return c
 
@@ -349,76 +348,6 @@ class _ActorMeshRefImpl:
             pass
 
         return PythonTask.from_coroutine(task())
-
-
-class SharedProtocolAdapter:
-    def __init__(self, inner: "Shared[ActorMeshProtocol]", supervise: bool):
-        self._inner = inner
-        self._supervise = supervise
-
-    def cast(
-        self,
-        message: PythonMessage,
-        selection: str,
-        mailbox: Mailbox,
-    ) -> None:
-        ctx = MonarchContext.get()
-        last, count = ctx.send_queue
-
-        async def task():
-            if last is not None:
-                await last
-            try:
-                self._inner.__await__()
-                inner = await self._inner
-                inner.cast(message, selection, mailbox)
-            except Exception as e:
-                match message.kind:
-                    case CallMethod(response_port=port) if port is not None:
-                        Port(port, mailbox, 0).exception(e)
-
-        ctx.send_queue = (PythonTask.from_coroutine(task()).spawn(), count + 1)
-
-    def new_with_shape(self, shape: Shape) -> "SharedProtocolAdapter":
-        async def task():
-            inner = await self._inner
-            return inner.new_with_shape(shape)
-
-        return SharedProtocolAdapter(PythonTask.from_coroutine(task()).spawn(), False)
-
-    def supervision_event(self) -> "Optional[Shared[Exception]]":
-        if not self._supervise:
-            return None
-
-        async def task():
-            inner = await self._inner
-            return await inner.supervision_event()
-
-        return PythonTask.from_coroutine(task()).spawn()
-
-    def stop(self) -> "PythonTask[None]":
-        async def task():
-            await (await self._inner).stop()
-
-        return PythonTask.from_coroutine(task())
-
-    @staticmethod
-    def _restore(inner: "ActorMeshProtocol") -> "ActorMeshProtocol":
-        return inner
-
-    def __reduce_ex__(self, protocol):
-        # blocking here means that we cannot send messages that contain actor
-        # references from the tokio event loop
-        if is_tokio_thread():
-            raise NotImplementedError(
-                "Cannot send actor references from a coroutine on the tokio event loop."
-                "To fix this we have to either make it psosible for pickling to defer this work,"
-                "or resolve the actor id without blocking."
-            )
-        return SharedProtocolAdapter._restore, (self._inner.block_on(),)
-
-    async def initialized(self):
-        await self._inner
 
 
 class ActorEndpoint(Endpoint[P, R]):
@@ -757,7 +686,6 @@ class _Actor:
         self.instance: object | None = None
         # TODO: (@pzhang) remove this with T229200522
         self._saved_error: ActorError | None = None
-        self._ctx: Optional[MonarchContext] = None
 
     async def handle(
         self,
@@ -774,15 +702,7 @@ class _Actor:
         # response_port can be None. If so, then sending to port will drop the response,
         # and raise any exceptions to the caller.
         try:
-            ctx = self._ctx
-            if ctx is None:
-                # we reuse ctx across the actor so that send_queue is preserved between calls.
-                ctx = self._ctx = MonarchContext(
-                    mailbox, mailbox.actor_id.proc_id, Point(rank, shape), (None, 0)
-                )
-            ctx.mailbox = mailbox
-            ctx.proc_id = mailbox.actor_id.proc_id
-            ctx.point = Point(rank, shape)
+            ctx = MonarchContext(mailbox, mailbox.actor_id.proc_id, Point(rank, shape))
             _context.set(ctx)
 
             DebugContext.set(DebugContext())
