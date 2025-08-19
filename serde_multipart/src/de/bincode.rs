@@ -48,7 +48,7 @@ where
 }
 
 // Passthrough to the underlying bincode deserializer; we only override through specialization.
-impl<'de, 'a, R, O> Deserializer<R, O>
+impl<'de, R, O> Deserializer<R, O>
 where
     R: BincodeRead<'de>,
     O: Options,
@@ -264,9 +264,7 @@ where
             len: usize,
         }
 
-        impl<'de, 'a, 'b: 'a, R: BincodeRead<'de> + 'b, O: Options> serde::de::SeqAccess<'de>
-            for Access<'a, R, O>
-        {
+        impl<'de, 'a, R: BincodeRead<'de>, O: Options> serde::de::SeqAccess<'de> for Access<'a, R, O> {
             type Error = Error;
 
             fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Error>
@@ -334,25 +332,6 @@ where
     where
         V: serde::de::Visitor<'de>,
     {
-        impl<'de, 'a, R: 'a, O> serde::de::EnumAccess<'de> for &'a mut Deserializer<R, O>
-        where
-            R: BincodeRead<'de>,
-            O: Options,
-        {
-            type Error = Error;
-            type Variant = Self;
-
-            fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Error>
-            where
-                V: serde::de::DeserializeSeed<'de>,
-            {
-                let idx: u32 = serde::de::Deserialize::deserialize(&mut *self)?;
-                let val: Result<_, Error> =
-                    seed.deserialize(IntoDeserializer::into_deserializer(idx));
-                Ok((val?, self))
-            }
-        }
-
         visitor.visit_enum(self)
     }
 
@@ -405,5 +384,23 @@ where
         V: serde::de::Visitor<'de>,
     {
         serde::de::Deserializer::deserialize_tuple(self, fields.len(), visitor)
+    }
+}
+
+impl<'de, 'a, R: 'a, O> serde::de::EnumAccess<'de> for &'a mut Deserializer<R, O>
+where
+    R: BincodeRead<'de>,
+    O: Options,
+{
+    type Error = Error;
+    type Variant = Self;
+
+    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Error>
+    where
+        V: serde::de::DeserializeSeed<'de>,
+    {
+        let idx: u32 = serde::de::Deserialize::deserialize(&mut *self)?;
+        let val: Result<_, Error> = seed.deserialize(IntoDeserializer::into_deserializer(idx));
+        Ok((val?, self))
     }
 }
