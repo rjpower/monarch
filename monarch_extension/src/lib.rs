@@ -27,6 +27,7 @@ mod tensor_worker;
 
 mod blocking;
 mod panic;
+mod trace;
 
 use monarch_types::py_global;
 use pyo3::prelude::*;
@@ -67,6 +68,7 @@ fn get_or_add_new_module<'py>(
 #[pymodule]
 #[pyo3(name = "_rust_bindings")]
 pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    hyperactor_telemetry::trace::get_or_create_trace_id();
     monarch_hyperactor::runtime::initialize(module.py())?;
     let runtime = monarch_hyperactor::runtime::get_tokio_runtime();
     ::hyperactor::initialize_with_log_prefix(
@@ -205,6 +207,11 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::logging::register_python_bindings(&get_or_add_new_module(
         module,
         "monarch_extension.logging",
+    )?)?;
+
+    crate::trace::register_python_bindings(&get_or_add_new_module(
+        module,
+        "monarch_extension.trace",
     )?)?;
 
     #[cfg(fbcode_build)]
