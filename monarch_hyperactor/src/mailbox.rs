@@ -725,8 +725,9 @@ impl Instance {
         self.actor_id.clone().into()
     }
 }
-impl Instance {
-    fn from_hyperactor<A: hyperactor::Actor>(ins: &hyperactor::proc::Instance<A>) -> Instance {
+
+impl<A: hyperactor::Actor> From<&hyperactor::proc::Instance<A>> for Instance {
+    fn from(ins: &hyperactor::proc::Instance<A>) -> Self {
         Instance {
             mailbox: ins.mailbox_for_py().clone(),
             actor_id: ins.self_id().clone(),
@@ -758,12 +759,9 @@ impl Context {
     }
     #[staticmethod]
     fn _root_client_context(py: Python<'_>) -> Context {
-        let instance = global_root_client();
+        let instance: Instance = global_root_client().into();
         Context {
-            instance: Instance::from_hyperactor(instance)
-                .into_pyobject(py)
-                .unwrap()
-                .into(),
+            instance: instance.into_pyobject(py).unwrap().into(),
             rank: 0,
             shape: Shape::unity(),
         }
@@ -775,8 +773,7 @@ impl Context {
         py: Python<'_>,
         cx: &hyperactor::proc::Context<T>,
     ) -> Context {
-        let ins = cx.deref();
-        let instance = Instance::from_hyperactor(ins);
+        let instance: Instance = cx.deref().into();
         let (rank, shape) = cx.cast_info();
         Context {
             instance: instance.into_pyobject(py).unwrap().into(),
