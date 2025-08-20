@@ -629,7 +629,7 @@ impl Handler<PythonMessage> for PythonActor {
                 py,
                 "handle",
                 (
-                    crate::mailbox::Context::new(cx),
+                    crate::mailbox::Context::new(py, cx),
                     resolved.method,
                     resolved.bytes,
                     PanicFlag {

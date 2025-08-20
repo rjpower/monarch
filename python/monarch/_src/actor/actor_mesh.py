@@ -12,10 +12,8 @@ import functools
 import inspect
 import itertools
 import logging
-import os
 import random
 import traceback
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from traceback import TracebackException
 from typing import (
@@ -99,7 +97,7 @@ if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
     from monarch._rust_bindings.monarch_hyperactor.actor_mesh import ActorMeshProtocol
     from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiverBase
-    from monarch._src.actor.proc_mesh import ProcMesh
+    from monarch._src.actor.proc_mesh import _ControllerController, ProcMesh
 
 CallMethod = PythonMessageKind.CallMethod
 
@@ -155,8 +153,16 @@ class Instance:
         raise NotImplementedError("NYI: complete for release 0.0")
 
     @property
-    def proc(self) -> "ProcMesh":
-        raise NotImplementedError("NYI: compelte for release 0.0")
+    def proc_mesh(self) -> "ProcMesh": ...
+
+    @proc_mesh.setter
+    def proc_mesh(self, value: "ProcMesh") -> None: ...
+
+    @property
+    def _controller_controller(self) -> "_ControllerController": ...
+
+    @_controller_controller.setter
+    def _controller_controller(self, value: "_ControllerController") -> None: ...
 
 
 @rust_struct("monarch_hyperactor::mailbox::Context")
@@ -194,6 +200,10 @@ def context() -> Context:
     c = _context.get(None)
     if c is None:
         c = Context._root_client_context()
+        _context.set(c)
+        from monarch._src.actor.proc_mesh import _get_controller_controller
+
+        c.actor_instance._controller_controller = _get_controller_controller()
     return c
 
 
@@ -740,6 +750,8 @@ class _Actor:
         self.instance: object | None = None
         # TODO: (@pzhang) remove this with T229200522
         self._saved_error: ActorError | None = None
+        self._proc_mesh: Optional[ProcMesh] = None
+        self._controller_controller: Optional["_ControllerController"] = None
 
     async def handle(
         self,
@@ -762,7 +774,7 @@ class _Actor:
 
             match method:
                 case MethodSpecifier.Init():
-                    Class, *args = args
+                    Class, self._proc_mesh, self._controller_controller, *args = args
                     try:
                         self.instance = Class(*args, **kwargs)
                     except Exception as e:
@@ -796,6 +808,10 @@ class _Actor:
                         f" This is likely due to an earlier error: {self._saved_error}"
                     )
                 raise AssertionError(error_message)
+            assert self._controller_controller is not None
+            ctx.actor_instance._controller_controller = self._controller_controller
+            assert self._proc_mesh is not None
+            ctx.actor_instance.proc_mesh = self._proc_mesh
             the_method = getattr(self.instance, method_name)
             if isinstance(the_method, EndpointProperty):
                 module = the_method._method.__module__
@@ -857,7 +873,7 @@ class _Actor:
         DebugContext.set(DebugContext())
 
     def _post_mortem_debug(self, exc_tb) -> None:
-        from monarch._src.actor.debugger import DebugManager
+        from monarch._src.actor.debugger import debug_controller
 
         if (pdb_wrapper := DebugContext.get().pdb_wrapper) is not None:
             with fake_sync_state():
@@ -867,7 +883,7 @@ class _Actor:
                     rank,
                     ctx.message_rank.shape.coordinates(rank),
                     ctx.actor_instance.actor_id,
-                    DebugManager.ref().get_debug_client.call_one().get(),
+                    debug_controller(),
                 )
                 DebugContext.set(DebugContext(pdb_wrapper))
                 pdb_wrapper.post_mortem(exc_tb)
@@ -988,6 +1004,7 @@ class ActorMesh(MeshTrait, Generic[T], DeprecatedNotAFuture):
         mailbox: Mailbox,
         shape: Shape,
         proc_mesh: "ProcMesh",
+        controller_controller: Optional["_ControllerController"],
         # args and kwargs are passed to the __init__ method of the user defined
         # python actor object.
         *args: Any,
@@ -1011,7 +1028,7 @@ class ActorMesh(MeshTrait, Generic[T], DeprecatedNotAFuture):
             None,
             False,
         )
-        send(ep, (mesh._class, *args), kwargs)
+        send(ep, (mesh._class, proc_mesh, controller_controller, *args), kwargs)
 
         return mesh
 

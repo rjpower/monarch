@@ -703,11 +703,14 @@ inventory::submit! {
     }
 }
 
-#[derive(Clone)]
 #[pyclass(name = "Instance", module = "monarch._src.actor.actor_mesh")]
 struct Instance {
     mailbox: Mailbox,
     actor_id: ActorId,
+    #[pyo3(get, set)]
+    proc_mesh: Option<PyObject>,
+    #[pyo3(get, set, name = "_controller_controller")]
+    controller_controller: Option<PyObject>,
 }
 #[pymethods]
 impl Instance {
@@ -722,10 +725,20 @@ impl Instance {
         self.actor_id.clone().into()
     }
 }
+impl Instance {
+    fn from_hyperactor<A: hyperactor::Actor>(ins: &hyperactor::proc::Instance<A>) -> Instance {
+        Instance {
+            mailbox: ins.mailbox_for_py().clone(),
+            actor_id: ins.self_id().clone(),
+            proc_mesh: None,
+            controller_controller: None,
+        }
+    }
+}
 
 #[pyclass(name = "Context", module = "monarch._src.actor.actor_mesh")]
 pub(crate) struct Context {
-    instance: Instance,
+    instance: Py<Instance>,
     rank: usize,
     shape: Shape,
 }
@@ -735,8 +748,8 @@ py_global!(point, "monarch._src.actor.actor_mesh", "Point");
 #[pymethods]
 impl Context {
     #[getter]
-    fn actor_instance(&self) -> Instance {
-        self.instance.clone()
+    fn actor_instance(&self) -> &Py<Instance> {
+        &self.instance
     }
     #[getter]
     fn message_rank<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -744,14 +757,13 @@ impl Context {
         point(py).call1((self.rank, shape.into_pyobject(py).unwrap().unbind()))
     }
     #[staticmethod]
-    fn _root_client_context() -> Context {
+    fn _root_client_context(py: Python<'_>) -> Context {
         let instance = global_root_client();
-        let instance = Instance {
-            mailbox: instance.mailbox_for_py().clone(),
-            actor_id: instance.self_id().clone(),
-        };
         Context {
-            instance,
+            instance: Instance::from_hyperactor(instance)
+                .into_pyobject(py)
+                .unwrap()
+                .into(),
             rank: 0,
             shape: Shape::unity(),
         }
@@ -759,15 +771,15 @@ impl Context {
 }
 
 impl Context {
-    pub(crate) fn new<T: hyperactor::actor::Actor>(cx: &hyperactor::proc::Context<T>) -> Context {
+    pub(crate) fn new<T: hyperactor::actor::Actor>(
+        py: Python<'_>,
+        cx: &hyperactor::proc::Context<T>,
+    ) -> Context {
         let ins = cx.deref();
-        let instance = Instance {
-            mailbox: ins.mailbox_for_py().clone(),
-            actor_id: ins.self_id().clone(),
-        };
+        let instance = Instance::from_hyperactor(ins);
         let (rank, shape) = cx.cast_info();
         Context {
-            instance,
+            instance: instance.into_pyobject(py).unwrap().into(),
             rank,
             shape,
         }

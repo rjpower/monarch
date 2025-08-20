@@ -14,17 +14,15 @@ import sys
 from dataclasses import dataclass
 from typing import cast, Dict, Generator, List, Optional, Tuple, Union
 
-from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
-from monarch._src.actor.actor_mesh import Actor, ActorMesh, context, DebugContext
+from monarch._src.actor.actor_mesh import Actor, context, DebugContext
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.pdb_wrapper import DebuggerWrite, PdbWrapper
+from monarch._src.actor.proc_mesh import get_or_spawn_controller
 from monarch._src.actor.sync_state import fake_sync_state
 from tabulate import tabulate
 
 
 logger = logging.getLogger(__name__)
-
-_DEBUG_MANAGER_ACTOR_NAME = "debug_manager"
 
 
 async def _debugger_input(prompt=""):
@@ -424,7 +422,7 @@ class Cast(DebugCommand):
     command: str
 
 
-class DebugClient(Actor):
+class DebugController(Actor):
     """
     Single actor for both remote debuggers and users to talk to.
 
@@ -563,28 +561,12 @@ class DebugClient(Actor):
         await self.sessions.get(actor_name, rank).debugger_write(write)
 
 
-class DebugManager(Actor):
-    @staticmethod
-    @functools.cache
-    def ref() -> "DebugManager":
-        instance = context().actor_instance
-        return cast(
-            DebugManager,
-            ActorMesh.from_actor_id(
-                DebugManager,
-                ActorId.from_string(
-                    f"{instance.proc_id}.{_DEBUG_MANAGER_ACTOR_NAME}[0]"
-                ),
-                instance._mailbox,
-            ),
-        )
-
-    def __init__(self, debug_client: DebugClient) -> None:
-        self._debug_client = debug_client
-
-    @endpoint
-    def get_debug_client(self) -> DebugClient:
-        return self._debug_client
+# Cached so that we don't have to call out to the root client every time,
+# which may be on a different host.
+@functools.cache
+def debug_controller() -> DebugController:
+    with fake_sync_state():
+        return get_or_spawn_controller("debug_controller", DebugController).get()
 
 
 def remote_breakpointhook() -> None:
@@ -604,15 +586,13 @@ def remote_breakpointhook() -> None:
             "exists on both your client and worker processes."
         )
 
-    with fake_sync_state():
-        manager = DebugManager.ref().get_debug_client.call_one().get()
     ctx = context()
     rank = ctx.message_rank
     pdb_wrapper = PdbWrapper(
         rank.rank,
         rank.shape.coordinates(rank.rank),
         ctx.actor_instance.actor_id,
-        manager,
+        debug_controller(),
     )
     DebugContext.set(DebugContext(pdb_wrapper))
     pdb_wrapper.set_trace(frame)
