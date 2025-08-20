@@ -153,10 +153,22 @@ class Instance:
         raise NotImplementedError("NYI: complete for release 0.0")
 
     @property
-    def proc_mesh(self) -> "ProcMesh": ...
+    def proc_mesh(self) -> "ProcMesh":
+        """
+        The proce mesh over which all actors in this meash were launched.
+        """
+        ...
 
     @proc_mesh.setter
     def proc_mesh(self, value: "ProcMesh") -> None: ...
+
+    @property
+    def proc(self) -> "ProcMesh":
+        """
+        The singleton proc mesh that corresponds to just this actor.
+        """
+
+        return self.proc_mesh.slice(**self.rank)
 
     @property
     def _controller_controller(self) -> "_ControllerController": ...
@@ -201,9 +213,13 @@ def context() -> Context:
     if c is None:
         c = Context._root_client_context()
         _context.set(c)
+        from monarch._src.actor.host_mesh import _create_local_host_mesh
         from monarch._src.actor.proc_mesh import _get_controller_controller
 
-        c.actor_instance._controller_controller = _get_controller_controller()
+        c.actor_instance.proc_mesh, c.actor_instance._controller_controller = (
+            _get_controller_controller()
+        )
+        c.actor_instance.proc_mesh._host_mesh = _create_local_host_mesh()
     return c
 
 

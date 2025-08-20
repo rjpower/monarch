@@ -25,6 +25,8 @@ from monarch._src.actor.actor_mesh import (
 from monarch._src.actor.debugger import debug_controller
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
+
+from monarch._src.actor.host_mesh import HostMesh, localhost
 from monarch._src.actor.proc_mesh import (
     get_or_spawn_controller,
     local_proc_mesh,
@@ -53,4 +55,6 @@ __all__ = [
     "ValueMesh",
     "debug_controller",
     "get_or_spawn_controller",
+    "localhost",
+    "HostMesh",
 ]

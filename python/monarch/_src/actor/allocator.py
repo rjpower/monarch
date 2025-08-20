@@ -34,6 +34,13 @@ class AllocHandle(DeprecatedNotAFuture):
     _hy_alloc: "Shared[Alloc]"
     _extent: Dict[str, int]
 
+    def reshape(self, extent: Dict[str, int]) -> "AllocHandle":
+        async def task() -> Alloc:
+            alloc = await self._hy_alloc
+            return alloc.reshape(extent)
+
+        return AllocHandle(PythonTask.from_coroutine(task()).spawn(), extent)
+
     @property
     def initialized(self) -> Future[Literal[True]]:
         """
