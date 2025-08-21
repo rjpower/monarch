@@ -9,6 +9,22 @@
 //! This module contains core traits and implementation to manage remote data
 //! types in Hyperactor.
 
+use std::any::TypeId;
+use std::collections::HashMap;
+use std::fmt;
+use std::io::Cursor;
+use std::str::FromStr;
+use std::sync::LazyLock;
+
+use enum_as_inner::EnumAsInner;
+use serde::Deserialize;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+// use strum::EnumIter;
+use crate as hyperactor;
+use crate::config;
+
 /// A [`Named`] type is a type that has a globally unique name.
 pub trait Named: Sized + 'static {
     /// The globally unique type name for the type.
@@ -132,21 +148,7 @@ macro_rules! intern_typename {
         }
     };
 }
-use std::any::TypeId;
-use std::collections::HashMap;
-use std::fmt;
-use std::io::Cursor;
-use std::str::FromStr;
-use std::sync::LazyLock;
-
-use enum_as_inner::EnumAsInner;
 pub use intern_typename;
-use serde::Deserialize;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-
-use crate as hyperactor;
-use crate::config;
 
 macro_rules! tuple_format_string {
     ($a:ident,) => { "{}" };
@@ -311,47 +313,21 @@ macro_rules! register_type {
     Deserialize,
     PartialEq,
     Eq,
-    crate::Named
+    crate::Named,
+    strum::EnumIter,
+    strum::Display,
+    strum::EnumString
 )]
 pub enum Encoding {
     /// Serde bincode encoding.
+    #[strum(to_string = "bincode")]
     Bincode,
     /// Serde JSON encoding.
+    #[strum(to_string = "serde_json")]
     Json,
     /// Serde multipart encoding.
+    #[strum(to_string = "serde_multipart")]
     Multipart,
-}
-
-impl Encoding {
-    /// Return all available encodings.
-    #[cfg(test)]
-    fn all() -> &'static [Encoding] {
-        static ALL: &[Encoding] = &[Encoding::Bincode, Encoding::Json, Encoding::Multipart];
-        ALL
-    }
-}
-
-impl fmt::Display for Encoding {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Encoding::Bincode => write!(f, "bincode"),
-            Encoding::Json => write!(f, "serde_json"),
-            Encoding::Multipart => write!(f, "serde_multipart"),
-        }
-    }
-}
-
-impl FromStr for Encoding {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "bincode" => Ok(Encoding::Bincode),
-            "serde_json" => Ok(Encoding::Json),
-            "serde_multipart" => Ok(Encoding::Multipart),
-            invalid => Err(Error::InvalidEncoding(invalid.to_string())),
-        }
-    }
 }
 
 /// The encoding used for a serialized value.
@@ -705,6 +681,7 @@ mod tests {
     use serde::Deserialize;
     use serde::Serialize;
     use serde_multipart::Part;
+    use strum::IntoEnumIterator;
 
     use super::*;
     use crate as hyperactor; // for macros
@@ -773,7 +750,10 @@ mod tests {
         let json_string =
             String::from_utf8(serialized_json.encoded.as_json().unwrap().to_vec().clone()).unwrap();
         // The serialized data for JSON is just the (compact) JSON string.
-        assert_eq!(json_string, "{\"a\":\"hello\",\"b\":1234,\"c\":5678}");
+        assert_eq!(
+            json_string,
+            "{\"a\":\"hello\",\"b\":1234,\"c\":5678,\"d\":null}"
+        );
 
         for serialized in [serialized, serialized_json] {
             // Note, at this point, serialized has no knowledge other than its embedded typehash.
@@ -790,12 +770,13 @@ mod tests {
                     "a": "hello",
                     "b": 1234,
                     "c": 5678,
+                    "d": null,
                 })
             );
 
             assert_eq!(
                 format!("{}", serialized),
-                "TestDumpStruct{\"a\":\"hello\",\"b\":1234,\"c\":5678}",
+                "TestDumpStruct{\"a\":\"hello\",\"b\":1234,\"c\":5678,\"d\":null}",
             );
         }
     }
@@ -933,9 +914,9 @@ mod tests {
             c: Some(321),
             d: Some(Part::from("hello, world, again")),
         };
-        for enc in Encoding::all() {
-            let ser = Serialized::serialize_with_encoding(*enc, &value).unwrap();
-            assert_eq!(ser.encoding(), *enc);
+        for enc in Encoding::iter() {
+            let ser = Serialized::serialize_with_encoding(enc, &value).unwrap();
+            assert_eq!(ser.encoding(), enc);
             assert_eq!(ser.deserialized::<TestDumpStruct>().unwrap(), value);
         }
     }
