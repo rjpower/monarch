@@ -201,9 +201,9 @@ impl Frame {
 
     /// **DO NOT USE THIS**
     pub fn illegal_unipart_frame(body: Bytes) -> Self {
-        return Self {
+        Self {
             buffers: vec![body].into(),
-        };
+        }
     }
 }
 

@@ -10,7 +10,7 @@
 
 use std::io;
 use std::io::IoSlice;
-use std::mem::replace;
+
 use std::mem::take;
 
 use bytes::Buf;

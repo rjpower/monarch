@@ -11,14 +11,18 @@
 //! **big-endian** length prefix (u64), followed by exactly that many
 //! bytes of payload.
 //!
-//! Message frames are serialized with `bincode`; ack frames are
-//! represented directly as an 8-byte big-endian sequence number.
+//! Message frames carry a `serde_multipart::Message` (not raw
+//! bincode). In compat mode (current default), this is encoded as a
+//! sentinel `u64::MAX` followed by a single bincode payload. Ack
+//! frames are represented directly as an 8-byte big-endian sequence
+//! number.
 //!
-//! Message frame (example):
+//! Message frame (compat/unipart) example:
 //! ```text
-//! +------------------ len: u64 (BE) ------------------+--------------------- data -------------+
-//! | \x00\x00\x00\x00\x00\x00\x00\x0B                  | 11 bytes of bincode-serialized message |
-//! +---------------------------------------------------+----------------------------------------+
+//! +------------------ len: u64 (BE) ------------------+----------------------- data -----------------------+
+//! | \x00\x00\x00\x00\x00\x00\x00\x10                  | \xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF | <bincode bytes> |
+//! |                       16                          |           u64::MAX             |                   |
+//! +---------------------------------------------------+-----------------------------------------------------+
 //! ```
 //!
 //! ACK frame (wire format):
