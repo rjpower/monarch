@@ -1844,7 +1844,7 @@ pub(crate) mod meta {
     use super::*;
     use crate::RemoteMessage;
 
-    const THRIFT_TLS_SRV_CA_PATH_: &str = "THRIFT_TLS_SRV_CA_PATH";
+    const THRIFT_TLS_SRV_CA_PATH_ENV: &str = "THRIFT_TLS_SRV_CA_PATH";
     const DEFAULT_SRV_CA_PATH: &str = "/var/facebook/rootcanal/ca.pem";
     const THRIFT_TLS_CL_CERT_PATH_ENV: &str = "THRIFT_TLS_CL_CERT_PATH";
     const THRIFT_TLS_CL_KEY_PATH_ENV: &str = "THRIFT_TLS_CL_KEY_PATH";
