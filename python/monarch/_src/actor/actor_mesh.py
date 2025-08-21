@@ -134,7 +134,7 @@ class Instance:
         """
         The proc_id of the current actor.
         """
-        ...
+        return self.actor_id.proc_id
 
     @property
     def actor_id(self) -> ActorId:
@@ -775,6 +775,18 @@ class _Actor:
             match method:
                 case MethodSpecifier.Init():
                     Class, self._proc_mesh, self._controller_controller, *args = args
+                    # Happens when initializing the _ControllerController singleton
+                    if self._controller_controller is None:
+                        from monarch._src.actor.proc_mesh import (
+                            _get_controller_controller,
+                        )
+
+                        self._controller_controller = _get_controller_controller()
+                    ctx.actor_instance._controller_controller = (
+                        self._controller_controller
+                    )
+                    assert self._proc_mesh is not None
+                    ctx.actor_instance.proc_mesh = self._proc_mesh
                     try:
                         self.instance = Class(*args, **kwargs)
                     except Exception as e:
