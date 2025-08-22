@@ -333,8 +333,8 @@ pub enum Encoding {
 /// The encoding used for a serialized value.
 #[derive(Clone, Serialize, Deserialize, PartialEq, EnumAsInner)]
 enum Encoded {
-    Bincode(serde_bytes::ByteBuf),
-    Json(serde_bytes::ByteBuf),
+    Bincode(bytes::Bytes),
+    Json(bytes::Bytes),
     Multipart(serde_multipart::Message),
 }
 
@@ -386,8 +386,8 @@ impl Encoded {
 impl std::fmt::Debug for Encoded {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Encoded::Bincode(data) => write!(f, "Encoded::Bincode({})", HexFmt(data.as_slice())),
-            Encoded::Json(data) => write!(f, "Encoded::Json({})", HexFmt(data.as_slice())),
+            Encoded::Bincode(data) => write!(f, "Encoded::Bincode({})", HexFmt(data)),
+            Encoded::Json(data) => write!(f, "Encoded::Json({})", HexFmt(data)),
             Encoded::Multipart(message) => {
                 write!(f, "Encoded::Multipart(body={}", HexFmt(message.body()))?;
                 for (index, part) in message.parts().iter().enumerate() {
