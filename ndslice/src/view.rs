@@ -837,7 +837,7 @@ mod test {
     #[test]
     fn test_extent_display() {
         let extent = Extent::new(vec!["x".into(), "y".into(), "z".into()], vec![4, 5, 6]).unwrap();
-        assert_eq!(format!("{}", extent), "x=4,y=5,z=6");
+        assert_eq!(format!("{}", extent), "{'x': 4, 'y': 5, 'z': 6}");
 
         let empty_extent = Extent::new(vec![], vec![]).unwrap();
         assert_eq!(format!("{}", empty_extent), "");
