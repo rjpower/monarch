@@ -183,7 +183,7 @@ async def test_rank_size():
 
 @pytest.mark.timeout(60)
 async def test_rank_string():
-    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
+    proc = fake_in_process_host().spawn_procs(per_host={"hosts": 1, "gpus": 2})
     r = proc.spawn("runit", RunIt)
     vm = r.return_current_rank_str.call().get()
     r0 = vm.flatten("r").slice(r=0).item()
@@ -250,7 +250,7 @@ class CastToCounter(Actor):
 
 @pytest.mark.timeout(60)
 def test_value_mesh() -> None:
-    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
+    proc = fake_in_process_host().spawn_procs(per_host={"hosts": 1, "gpus": 2})
     counter = proc.spawn("counter", Counter, 0).get()
     counter.slice(hosts=0, gpus=1).incr.broadcast()
     x = counter.value.call().get()

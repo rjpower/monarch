@@ -19,10 +19,10 @@ from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monar
     RemoteAllocatorBase,
     SimAllocatorBase,
 )
+
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 from monarch._src.actor.future import DeprecatedNotAFuture, Future
 
-if TYPE_CHECKING:
-    from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 
 ALLOC_LABEL_PROC_MESH_NAME = "procmesh.monarch.meta.com/name"
 

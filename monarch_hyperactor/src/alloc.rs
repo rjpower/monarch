@@ -101,7 +101,16 @@ impl PyAlloc {
     pub fn take(&mut self) -> Option<Box<dyn Alloc + Sync + Send>> {
         self.inner.take()
     }
+}
 
+#[pymethods]
+impl PyAlloc {
+    fn __repr__(&self) -> PyResult<String> {
+        match &self.inner {
+            None => Ok("Alloc(None)".to_string()),
+            Some(wrapper) => Ok(format!("Alloc({})", wrapper.shape())),
+        }
+    }
     pub fn reshape(&mut self, shape: &Bound<'_, PyDict>) -> PyResult<Option<PyAlloc>> {
         let alloc = self.take();
         alloc
@@ -125,16 +134,6 @@ impl PyAlloc {
                 })))
             })
             .transpose()
-    }
-}
-
-#[pymethods]
-impl PyAlloc {
-    fn __repr__(&self) -> PyResult<String> {
-        match &self.inner {
-            None => Ok("Alloc(None)".to_string()),
-            Some(wrapper) => Ok(format!("Alloc({})", wrapper.shape())),
-        }
     }
 }
 

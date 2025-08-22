@@ -158,7 +158,7 @@ class Instance:
     @property
     def proc_mesh(self) -> "ProcMesh":
         """
-        The proce mesh over which all actors in this meash were launched.
+        The proc mesh over which all actors in this mesh were launched.
         """
         ...
 

@@ -23,7 +23,7 @@ def this_host() -> "HostMesh":
 
     This is just shorthand for looking it up via the context
     """
-    return context().actor_instance.proc_mesh.host_mesh
+    return context().actor_instance.proc.host_mesh
 
 
 def this_proc() -> "ProcMesh":
@@ -78,7 +78,7 @@ class HostMesh(MeshTrait):
 
         new_extent = dict(zip(self._labels, self._ndslice.sizes))
         new_extent.update(per_host)
-        return ProcMesh.from_alloc(alloc_handle, bootstrap)
+        return ProcMesh.from_alloc(alloc_handle.reshape(new_extent), bootstrap)
 
     @property
     def _ndslice(self) -> NDSlice:
