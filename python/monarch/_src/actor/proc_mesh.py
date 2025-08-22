@@ -562,7 +562,7 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
 
 def local_proc_mesh(*, gpus: Optional[int] = None, hosts: int = 1) -> ProcMesh:
     warnings.warn(
-        "Use monarch._src.actor.host_mesh.fake_in_process_host().spawn_procs for testing. For launch an actor in the current process use context().actor_instance.proc.spawn_procs()",
+        "Use monarch._src.actor.host_mesh.fake_in_process_host().spawn_procs for testing. For launching an actor in the current process use this_proc().spawn_procs()",
         DeprecationWarning,
         stacklevel=2,
     )
@@ -642,7 +642,7 @@ def proc_mesh(
     setup: Callable[[], None] | None = None,
 ) -> ProcMesh:
     warnings.warn(
-        "use monarch.actor.localhost().spawn_proc(per_host = {{'hosts': 2, 'gpus': 3}}) instead of monarch.actor.proc_mesh(hosts=2, gpus=3)",
+        "use this_host().spawn_proc(per_host = {'hosts': 2, 'gpus': 3}) instead of monarch.actor.proc_mesh(hosts=2, gpus=3)",
         DeprecationWarning,
         stacklevel=2,
     )
