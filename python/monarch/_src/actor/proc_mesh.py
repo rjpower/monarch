@@ -570,8 +570,26 @@ def local_proc_mesh(*, gpus: Optional[int] = None, hosts: int = 1) -> ProcMesh:
     return _proc_mesh_from_allocator(allocator=LocalAllocator(), gpus=gpus, hosts=hosts)
 
 
-def sim_proc_mesh(*, gpus: Optional[int] = None, hosts: int = 1) -> ProcMesh:
-    return _proc_mesh_from_allocator(allocator=SimAllocator(), gpus=gpus, hosts=hosts)
+def sim_proc_mesh(
+    *,
+    gpus: int = 1,
+    hosts: int = 1,
+    racks: int = 1,
+    zones: int = 1,
+    dcs: int = 1,
+    regions: int = 1,
+) -> ProcMesh:
+    spec: AllocSpec = AllocSpec(
+        AllocConstraints(),
+        hosts=hosts,
+        gpus=gpus,
+        racks=racks,
+        zones=zones,
+        dcs=dcs,
+        regions=regions,
+    )
+    alloc = SimAllocator().allocate(spec)
+    return ProcMesh.from_alloc(alloc, None, True)
 
 
 _BOOTSTRAP_MAIN = "monarch._src.actor.bootstrap_main"
@@ -681,11 +699,9 @@ def _get_controller_controller() -> "Tuple[ProcMesh, _ControllerController]":
     global _controller_controller, _cc_proc_mesh
     with _cc_init:
         if _controller_controller is None:
-            _cc_proc_mesh = _proc_mesh_from_allocator(
-                gpus=1,
-                hosts=1,
-                allocator=LocalAllocator(),
-                _attach_controller_controller=False,
+            alloc = LocalAllocator().allocate(AllocSpec(AllocConstraints()))
+            _cc_proc_mesh = ProcMesh.from_alloc(
+                alloc, _attach_controller_controller=False
             )
             _controller_controller = _cc_proc_mesh.spawn(
                 "controller_controller", _ControllerController

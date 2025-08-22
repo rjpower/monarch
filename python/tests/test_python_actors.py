@@ -36,7 +36,8 @@ from monarch.actor import (
     current_rank,
     current_size,
     endpoint,
-    localhost,
+    this_host,
+    this_proc,
 )
 from monarch.tools.config import defaults
 from typing_extensions import assert_type
@@ -274,7 +275,7 @@ def test_rust_binding_modules_correct() -> None:
 
 @pytest.mark.timeout(60)
 def test_proc_mesh_liveness() -> None:
-    mesh = localhost().spawn_procs(per_host={"gpus": 2})
+    mesh = this_host().spawn_procs(per_host={"gpus": 2})
     counter = mesh.spawn("counter", Counter, 1).get()
     del mesh
     # Give some time for the mesh to have been shut down.
@@ -310,7 +311,7 @@ class TLSActor(Actor):
 @pytest.mark.timeout(60)
 async def test_actor_tls() -> None:
     """Test that thread-local state is respected."""
-    pm = localhost().spawn_procs(per_host={"gpus": 1})
+    pm = this_host().spawn_procs(per_host={"gpus": 1})
     am = await pm.spawn("tls", TLSActor)
     await am.increment.call_one()
     await am.increment_async.call_one()
@@ -340,7 +341,7 @@ class TLSActorFullSync(Actor):
 @pytest.mark.timeout(60)
 async def test_actor_tls_full_sync() -> None:
     """Test that thread-local state is respected."""
-    pm = localhost().spawn_procs(per_host={"gpus": 1})
+    pm = this_host().spawn_procs(per_host={"gpus": 1})
     am = await pm.spawn("tls", TLSActorFullSync)
     await am.increment.call_one()
     await am.increment.call_one()
@@ -367,7 +368,7 @@ class AsyncActor(Actor):
 @pytest.mark.timeout(15)
 async def test_async_concurrency():
     """Test that async endpoints will be processed concurrently."""
-    pm = await localhost().spawn_procs(per_host={"gpus": 1})
+    pm = await this_host().spawn_procs(per_host={"gpus": 1})
     am = await pm.spawn("async", AsyncActor)
     fut = am.sleep.call()
     # This call should go through and exit the sleep loop, as long as we are
@@ -519,7 +520,7 @@ async def test_actor_log_streaming() -> None:
             sys.stderr = stderr_file
 
             try:
-                pm = localhost().spawn_procs(per_host={"gpus": 2})
+                pm = this_host().spawn_procs(per_host={"gpus": 2})
                 am = await pm.spawn("printer", Printer)
 
                 # Disable streaming logs to client
@@ -669,7 +670,7 @@ async def test_logging_option_defaults() -> None:
             sys.stderr = stderr_file
 
             try:
-                pm = await localhost().spawn_procs(per_host={"gpus": 2})
+                pm = await this_host().spawn_procs(per_host={"gpus": 2})
                 am = await pm.spawn("printer", Printer)
 
                 for _ in range(5):
@@ -780,7 +781,7 @@ async def test_flush_on_disable_aggregation() -> None:
             sys.stdout = stdout_file
 
             try:
-                pm = await localhost().spawn_procs(per_host={"gpus": 2})
+                pm = await this_host().spawn_procs(per_host={"gpus": 2})
                 am = await pm.spawn("printer", Printer)
 
                 # Set a long aggregation window to ensure logs aren't flushed immediately
@@ -868,7 +869,7 @@ async def test_adjust_aggregation_window() -> None:
             sys.stdout = stdout_file
 
             try:
-                pm = await localhost().spawn_procs(per_host={"gpus": 2})
+                pm = await this_host().spawn_procs(per_host={"gpus": 2})
                 am = await pm.spawn("printer", Printer)
 
                 # Set a long aggregation window initially
@@ -947,7 +948,7 @@ def test_port_as_argument() -> None:
 
 @pytest.mark.timeout(15)
 async def test_same_actor_twice() -> None:
-    pm = localhost().spawn_procs(per_host={"gpus": 1})
+    pm = this_host().spawn_procs(per_host={"gpus": 1})
     await pm.spawn("dup", Counter, 0).initialized
 
     # The second spawn with the same name should fail with a specific error
@@ -977,7 +978,7 @@ async def test_sync_workspace() -> None:
     with tempfile.TemporaryDirectory() as workspace_src, tempfile.TemporaryDirectory() as workspace_dst, unittest.mock.patch.dict(
         os.environ, {"WORKSPACE_DIR": workspace_dst}
     ):
-        pm = await localhost().spawn_procs(per_host={"gpus": 1})
+        pm = await this_host().spawn_procs(per_host={"gpus": 1})
 
         os.environ["WORKSPACE_DIR"] = workspace_dst
         config = defaults.config("slurm", workspace_src)
@@ -1008,7 +1009,7 @@ async def test_sync_workspace() -> None:
 
 class TestActorMeshStop(unittest.IsolatedAsyncioTestCase):
     async def test_actor_mesh_stop(self) -> None:
-        pm = localhost().spawn_procs(per_host={"gpus": 2})
+        pm = this_host().spawn_procs(per_host={"gpus": 2})
         am_1 = await pm.spawn("printer", Printer)
         am_2 = await pm.spawn("printer2", Printer)
         await am_1.print.call("hello 1")
@@ -1026,7 +1027,7 @@ class TestActorMeshStop(unittest.IsolatedAsyncioTestCase):
         await pm.stop()
 
     async def test_proc_mesh_stop_after_actor_mesh_stop(self) -> None:
-        pm = localhost().spawn_procs(per_host={"gpus": 2})
+        pm = this_host().spawn_procs(per_host={"gpus": 2})
         am = await pm.spawn("printer", Printer)
 
         await cast(ActorMesh, am).stop()
@@ -1075,3 +1076,8 @@ def test_mesh_len():
     proc_mesh = fake_in_process_host().spawn_procs(per_host={"gpus": 12})
     s = proc_mesh.spawn("sync_actor", SyncActor).get()
     assert 12 == len(s)
+
+
+def test_this_and_that():
+    counter = this_proc().spawn("counter", Counter, 7)
+    assert 7 == counter.value.call_one().get()

@@ -13,6 +13,10 @@ PyTorch, but at cluster scale.
 
 Note: Monarch is currently only supported on Linux systems
 
+## 📖 Documentation
+
+View Monarch's hosted documentation [at this link](https://meta-pytorch.org/monarch/).
+
 ## Installation
 
 ### On Fedora distributions
@@ -59,6 +63,47 @@ pip install --no-build-isolation -e .
 
 # Run unit tests. consider -s for more verbose output
 pytest python/tests/ -v -m "not oss_skip"
+```
+
+### On Ubuntu distributions
+
+```sh
+# Clone the repository and navigate to it
+git clone https://github.com/pytorch-labs/monarch.git
+cd monarch
+
+# Install nightly rust toolchain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+rustup toolchain install nightly
+rustup default nightly
+
+# Install Ubuntu-specific system dependencies
+sudo apt install -y ninja-build
+sudo apt install -y libunwind-dev
+sudo apt install -y clang
+
+# Set clang as the default C/C++ compiler
+export CC=clang
+export CXX=clang++
+
+# Install build dependencies
+pip install -r build-requirements.txt
+# Install test dependencies
+pip install -r python/tests/requirements.txt
+
+# Build and install Monarch (with tensor engine support)
+pip install --no-build-isolation .
+
+# or
+# Build and install Monarch (without tensor engine support)
+USE_TENSOR_ENGINE=0 pip install --no-build-isolation .
+
+# or setup for development
+pip install --no-build-isolation -e .
+
+# Verify installation
+pip list | grep monarch
 ```
 
 ### On MacOS

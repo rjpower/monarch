@@ -172,20 +172,16 @@ pub struct PyAllocSpec {
 impl PyAllocSpec {
     #[new]
     #[pyo3(signature = (constraints, **kwargs))]
-    fn new(constraints: &PyAllocConstraints, kwargs: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let Some(kwargs) = kwargs else {
-            return Err(PyValueError::new_err(
-                "Shape must have at least one dimension",
-            ));
-        };
-        let extent_dict = kwargs.downcast::<PyDict>()?;
-
+    fn new(constraints: &PyAllocConstraints, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut keys = Vec::new();
         let mut values = Vec::new();
-        for (key, value) in extent_dict {
-            keys.push(key.clone());
-            values.push(value.clone());
-        }
+
+        if let Some(kwargs) = kwargs {
+            for (key, value) in kwargs {
+                keys.push(key.clone());
+                values.push(value.clone());
+            }
+        };
 
         let extent = Extent::new(
             keys.into_iter()

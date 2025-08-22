@@ -17,14 +17,24 @@ from monarch._src.actor.proc_mesh import _get_bootstrap_args, ProcessAllocator, 
 from monarch._src.actor.shape import MeshTrait, NDSlice, Shape
 
 
-def localhost() -> "HostMesh":
+def this_host() -> "HostMesh":
     """
-    The current machine. This is just shorthand for:
+    The current machine.
+
+    This is just shorthand for looking it up via the context
     """
     return context().actor_instance.proc_mesh.host_mesh
 
 
-def _create_local_host_mesh() -> "HostMesh":
+def this_proc() -> "ProcMesh":
+    """
+    The current singleton process that this specific actor is
+    running on
+    """
+    return context().actor_instance.proc
+
+
+def create_local_host_mesh() -> "HostMesh":
     cmd, args, env = _get_bootstrap_args()
     return HostMesh(Shape.unity(), ProcessAllocator(cmd, args, env))
 
@@ -46,9 +56,9 @@ class HostMesh(MeshTrait):
     ) -> "ProcMesh":
         """
         Start new processes on this host mesh. By default this starts one proc
-        on each host in the mesh. Additional procs can be started using `proc_per_host` to
+        on each host in the mesh. Additional procs can be started using `per_host` to
         specify the local shape, e.g.
-            proc_per_host = {'gpus': 8}
+            per_host = {'gpus': 8}
         Will create a proc mesh with an additional 'gpus' dimension.
 
         `bootstrap` is a function that will be run at startup on each proc and can be used to e.g.
