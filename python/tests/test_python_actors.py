@@ -384,7 +384,7 @@ class AsyncActor(Actor):
 @pytest.mark.timeout(15)
 async def test_async_concurrency():
     """Test that async endpoints will be processed concurrently."""
-    pm = await this_host().spawn_procs(per_host={"gpus": 1})
+    pm = await this_host().spawn_procs()
     am = await pm.spawn("async", AsyncActor)
     fut = am.sleep.call()
     # This call should go through and exit the sleep loop, as long as we are
