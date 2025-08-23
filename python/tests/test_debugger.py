@@ -885,14 +885,14 @@ def _test_debug_cli_impl_sync() -> None:
 )
 @pytest.mark.timeout(120)
 def test_debug_cli():
+    env = os.environ.copy()
+    env[_MONARCH_ENABLE_EXTERNAL_DEBUG_CLI] = "1"
     # This test needs to run in a subprocess because it requires a debug controller
     # singleton with a different configuration than the other tests in this file.
     if IN_PAR:
-        env = os.environ.copy()
         env["MONARCH_DEBUG_CLI_BIN"] = str(
             importlib.resources.files("monarch.python.tests").joinpath("debug_cli_bin")
         )
-        env[_MONARCH_ENABLE_EXTERNAL_DEBUG_CLI] = "1"
         assert (
             subprocess.call(
                 [
@@ -913,7 +913,8 @@ def test_debug_cli():
                     sys.executable,
                     "-c",
                     "import tests.test_debugger; tests.test_debugger._test_debug_cli_impl_sync()",
-                ]
+                ],
+                env=env,
             )
             == 0
         )
