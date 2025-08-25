@@ -6,6 +6,7 @@
 
 # pyre-unsafe
 import asyncio
+import gc
 import importlib.resources
 import logging
 import operator
@@ -19,14 +20,24 @@ import time
 import unittest
 import unittest.mock
 from types import ModuleType
-from typing import cast
+from typing import cast, Tuple
 
 import pytest
 
 import torch
+from monarch._rust_bindings.monarch_hyperactor.actor import (
+    PythonMessage,
+    PythonMessageKind,
+)
+from monarch._rust_bindings.monarch_hyperactor.mailbox import (
+    PortId,
+    PortRef,
+    UndeliverableMessageEnvelope,
+)
+from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
-from monarch._src.actor.actor_mesh import ActorMesh, Channel, Port
+from monarch._src.actor.actor_mesh import ActorMesh, Channel, context, Port
 from monarch._src.actor.future import Future
 
 from monarch.actor import (
@@ -575,10 +586,7 @@ async def test_actor_log_streaming() -> None:
                     await am.print.call("has print streaming too")
                     await am.log.call("has log streaming as level matched")
 
-                # TODO: remove this completely once we hook the flush logic upon dropping device_mesh
-                log_mesh = pm._logging_mesh_client
-                assert log_mesh is not None
-                Future(coro=log_mesh.flush().spawn().task()).get()
+                await pm.stop()
 
                 # Flush all outputs
                 stdout_file.flush()
@@ -694,10 +702,7 @@ async def test_logging_option_defaults() -> None:
                     await am.print.call("print streaming")
                     await am.log.call("log streaming")
 
-                # TODO: remove this completely once we hook the flush logic upon dropping device_mesh
-                log_mesh = pm._logging_mesh_client
-                assert log_mesh is not None
-                Future(coro=log_mesh.flush().spawn().task()).get()
+                await pm.stop()
 
                 # Flush all outputs
                 stdout_file.flush()
@@ -746,6 +751,151 @@ async def test_logging_option_defaults() -> None:
             os.dup2(original_stderr_fd, 2)
             os.close(original_stdout_fd)
             os.close(original_stderr_fd)
+        except OSError:
+            pass
+
+
+# oss_skip: pytest keeps complaining about mocking get_ipython module
+@pytest.mark.oss_skip
+@pytest.mark.timeout(180)
+async def test_flush_logs_ipython() -> None:
+    """Test that logs are flushed when get_ipython is available and post_run_cell event is triggered."""
+    # Save original file descriptors
+    original_stdout_fd = os.dup(1)  # stdout
+
+    try:
+        # Create temporary files to capture output
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as stdout_file:
+            stdout_path = stdout_file.name
+
+            # Redirect file descriptors to our temp files
+            os.dup2(stdout_file.fileno(), 1)
+
+            # Also redirect Python's sys.stdout
+            original_sys_stdout = sys.stdout
+            sys.stdout = stdout_file
+
+            try:
+                # Mock IPython environment
+                class MockExecutionResult:
+                    pass
+
+                class MockEvents:
+                    def __init__(self):
+                        self.callbacks = {}
+                        self.registers = 0
+                        self.unregisters = 0
+
+                    def register(self, event_name, callback):
+                        if event_name not in self.callbacks:
+                            self.callbacks[event_name] = []
+                        self.callbacks[event_name].append(callback)
+                        self.registers += 1
+
+                    def unregister(self, event_name, callback):
+                        if event_name not in self.callbacks:
+                            raise ValueError(f"Event {event_name} not registered")
+                        assert callback in self.callbacks[event_name]
+                        self.callbacks[event_name].remove(callback)
+                        self.unregisters += 1
+
+                    def trigger(self, event_name, *args, **kwargs):
+                        if event_name in self.callbacks:
+                            for callback in self.callbacks[event_name]:
+                                callback(*args, **kwargs)
+
+                class MockIPython:
+                    def __init__(self):
+                        self.events = MockEvents()
+
+                mock_ipython = MockIPython()
+
+                with unittest.mock.patch(
+                    "monarch._src.actor.logging.get_ipython",
+                    lambda: mock_ipython,
+                ), unittest.mock.patch("monarch._src.actor.logging.IN_IPYTHON", True):
+                    # Make sure we can register and unregister callbacks
+                    for i in range(3):
+                        pm1 = await proc_mesh(gpus=2)
+                        pm2 = await proc_mesh(gpus=2)
+                        am1 = await pm1.spawn("printer", Printer)
+                        am2 = await pm2.spawn("printer", Printer)
+
+                        # Set aggregation window to ensure logs are buffered
+                        await pm1.logging_option(
+                            stream_to_client=True, aggregate_window_sec=600
+                        )
+                        await pm2.logging_option(
+                            stream_to_client=True, aggregate_window_sec=600
+                        )
+                        assert mock_ipython.events.unregisters == 2 * i
+                        # TODO: remove `1 +` from attaching controller_controller
+                        assert mock_ipython.events.registers == 1 + 2 * (i + 1)
+                        await asyncio.sleep(1)
+
+                        # Generate some logs that will be aggregated
+                        for _ in range(5):
+                            await am1.print.call("ipython1 test log")
+                            await am2.print.call("ipython2 test log")
+
+                        # Trigger the post_run_cell event which should flush logs
+                        mock_ipython.events.trigger(
+                            "post_run_cell", MockExecutionResult()
+                        )
+
+                    # Flush all outputs
+                    stdout_file.flush()
+                    os.fsync(stdout_file.fileno())
+
+                gc.collect()
+
+                # TODO: this should be 6 without attaching controller_controller
+                assert mock_ipython.events.registers == 7
+                # There are many objects still taking refs
+                assert mock_ipython.events.unregisters == 4
+                # TODO: same, this should be 2
+                assert len(mock_ipython.events.callbacks["post_run_cell"]) == 3
+            finally:
+                # Restore Python's sys.stdout
+                sys.stdout = original_sys_stdout
+
+        # Restore original file descriptors
+        os.dup2(original_stdout_fd, 1)
+
+        # Read the captured output
+        with open(stdout_path, "r") as f:
+            stdout_content = f.read()
+
+        # TODO: there are quite a lot of code dups and boilerplate; make them contextmanager utils
+
+        # Clean up temp files
+        os.unlink(stdout_path)
+
+        # Verify that logs were flushed when the post_run_cell event was triggered
+        # We should see the aggregated logs in the output
+        assert (
+            len(
+                re.findall(
+                    r"\[10 similar log lines\].*ipython1 test log", stdout_content
+                )
+            )
+            == 3
+        ), stdout_content
+
+        assert (
+            len(
+                re.findall(
+                    r"\[10 similar log lines\].*ipython2 test log", stdout_content
+                )
+            )
+            == 3
+        ), stdout_content
+
+    finally:
+        # Ensure file descriptors are restored even if something goes wrong
+        try:
+            os.dup2(original_stdout_fd, 1)
+            os.close(original_stdout_fd)
         except OSError:
             pass
 
@@ -823,10 +973,7 @@ async def test_flush_on_disable_aggregation() -> None:
                 for _ in range(5):
                     await am.print.call("single log line")
 
-                # TODO: remove this completely once we hook the flush logic upon dropping device_mesh
-                log_mesh = pm._logging_mesh_client
-                assert log_mesh is not None
-                Future(coro=log_mesh.flush().spawn().task()).get()
+                await pm.stop()
 
                 # Flush all outputs
                 stdout_file.flush()
@@ -884,7 +1031,7 @@ async def test_multiple_ongoing_flushes_no_deadlock() -> None:
     for _ in range(10):
         await am.print.call("aggregated log line")
 
-    log_mesh = pm._logging_mesh_client
+    log_mesh = pm._logging_manager._logging_mesh_client
     assert log_mesh is not None
     futures = []
     for _ in range(5):
@@ -936,10 +1083,7 @@ async def test_adjust_aggregation_window() -> None:
                 for _ in range(3):
                     await am.print.call("second batch of logs")
 
-                # TODO: remove this completely once we hook the flush logic upon dropping device_mesh
-                log_mesh = pm._logging_mesh_client
-                assert log_mesh is not None
-                Future(coro=log_mesh.flush().spawn().task()).get()
+                await pm.stop()
 
                 # Flush all outputs
                 stdout_file.flush()
@@ -1127,3 +1271,59 @@ def test_mesh_len():
     proc_mesh = local_proc_mesh(gpus=12).get()
     s = proc_mesh.spawn("sync_actor", SyncActor).get()
     assert 12 == len(s)
+
+
+class UndeliverableMessageReceiver(Actor):
+    def __init__(self):
+        self._messages = asyncio.Queue()
+
+    @endpoint
+    async def receive_undeliverable(
+        self, sender: ActorId, dest: PortId, error_msg: str
+    ) -> None:
+        await self._messages.put((sender, dest, error_msg))
+
+    @endpoint
+    async def get_messages(self) -> Tuple[ActorId, PortId, str]:
+        return await self._messages.get()
+
+
+class UndeliverableMessageSender(Actor):
+    def __init__(self, receiver: UndeliverableMessageReceiver):
+        self._receiver = receiver
+
+    @endpoint
+    def send_undeliverable(self) -> None:
+        mailbox = context().actor_instance._mailbox
+        port_id = PortId(
+            actor_id=ActorId(
+                world_name=mailbox.actor_id.world_name, rank=0, actor_name="bogus"
+            ),
+            port=1234,
+        )
+        port_ref = PortRef(port_id)
+        port_ref.send(
+            mailbox,
+            PythonMessage(PythonMessageKind.Result(None), b"123"),
+        )
+
+    def _handle_undeliverable_message(
+        self, message: UndeliverableMessageEnvelope
+    ) -> bool:
+        self._receiver.receive_undeliverable.call_one(
+            message.sender(), message.dest(), message.error_msg()
+        ).get()
+        return True
+
+
+@pytest.mark.timeout(60)
+async def test_undeliverable_message() -> None:
+    pm = proc_mesh(gpus=1)
+    receiver = pm.spawn("undeliverable_receiver", UndeliverableMessageReceiver)
+    sender = pm.spawn("undeliverable_sender", UndeliverableMessageSender, receiver)
+    sender.send_undeliverable.call().get()
+    sender, dest, error_msg = receiver.get_messages.call_one().get()
+    assert sender.actor_name == "undeliverable_sender"
+    assert dest.actor_id.actor_name == "bogus"
+    assert error_msg is not None
+    pm.stop().get()
