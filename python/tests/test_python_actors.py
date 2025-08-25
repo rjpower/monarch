@@ -1319,7 +1319,7 @@ class UndeliverableMessageSender(Actor):
 
 @pytest.mark.timeout(60)
 async def test_undeliverable_message() -> None:
-    pm = this_host().spawn_procs(per_host={"gpus": 21})
+    pm = this_host().spawn_procs(per_host={"gpus": 1})
     receiver = pm.spawn("undeliverable_receiver", UndeliverableMessageReceiver)
     sender = pm.spawn("undeliverable_sender", UndeliverableMessageSender, receiver)
     sender.send_undeliverable.call().get()
