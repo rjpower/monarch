@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 87af2864d7673cb85da5e9bfbe7cbff7f6c43f5c2453457795ae3e728d140850 # shrinks to drips = [1]
+cc fd0ba176124ae2db3523693c9f44c40fd8971b80e049a5144def4a1db0855b07 # shrinks to msg = Message { body: Part(b""), parts: [Part(b"")], is_illegal: false }, drips = [1]
+cc 9fdba9bf99e30c0846ea7e6bf3da36811a59ab59aa1011698452db65b9811375 # shrinks to msg = Message { body: Part(b""), parts: [], is_illegal: false }, drips = [1]
