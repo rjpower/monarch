@@ -199,7 +199,7 @@ impl ErasedUnbound {
     }
 
     fn downcast<M: DeserializeOwned + Named>(self) -> anyhow::Result<Unbound<M>> {
-        let message: M = self.message.deserialized()?;
+        let message: M = self.message.deserialized_unchecked()?;
         Ok(Unbound {
             message,
             bindings: self.bindings,
