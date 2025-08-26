@@ -6,6 +6,7 @@
 
 # pyre-unsafe
 import asyncio
+import functools
 import importlib.resources
 import os
 import re
@@ -23,11 +24,11 @@ import pytest
 import torch
 from monarch._src.actor.actor_mesh import Actor, ActorError, current_rank, IN_PAR
 from monarch._src.actor.debugger import (
-    _MONARCH_ENABLE_EXTERNAL_DEBUG_CLI,
     Attach,
     Cast,
     Continue,
     DebugCommand,
+    DebugController,
     DebugSession,
     DebugSessionInfo,
     DebugSessions,
@@ -37,13 +38,82 @@ from monarch._src.actor.debugger import (
     Quit,
 )
 from monarch._src.actor.endpoint import endpoint
-
 from monarch._src.actor.proc_mesh import proc_mesh
+
 from pyre_extensions import none_throws
 
 needs_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="CUDA not available",
+)
+
+
+def _debug_ports():
+    for i in range(100):
+        yield {
+            "MONARCH_DEBUG_SERVER_ADDR": f"tcp![::1]:297{i:02d}",
+            "MONARCH_DEBUG_CLI_ADDR": f"tcp![::1]:297{i+1:02d}",
+        }
+
+
+debug_ports = _debug_ports()
+
+
+def isolate_in_subprocess(test_fn=None, *, env=None):
+    if test_fn is None:
+        return functools.partial(isolate_in_subprocess, env=env)
+
+    if env is None:
+        env = {}
+
+    def sync_test_fn():
+        asyncio.run(test_fn())
+
+    sync_test_fn_name = f"sync_{test_fn.__name__}"
+    setattr(sys.modules[__name__], sync_test_fn_name, sync_test_fn)
+
+    env.update(os.environ.copy())
+
+    def wrapper():
+        if IN_PAR:
+            assert (
+                subprocess.call(
+                    [
+                        str(
+                            importlib.resources.files("monarch.python.tests").joinpath(
+                                "run_test_bin"
+                            )
+                        ),
+                        sync_test_fn_name,
+                    ],
+                    env=env,
+                )
+                == 0
+            )
+        else:
+            assert (
+                subprocess.call(
+                    [
+                        sys.executable,
+                        "-c",
+                        f"import tests.test_debugger; tests.test_debugger.{sync_test_fn_name}()",
+                    ],
+                    env=env,
+                )
+                == 0
+            )
+
+    return wrapper
+
+
+def run_test_from_name():
+    getattr(sys.modules[__name__], sys.argv[1])()
+
+
+debug_cli_bin = (
+    str(importlib.resources.files("monarch.python.tests").joinpath("debug_cli_bin"))
+    if IN_PAR
+    else ""
 )
 
 
@@ -81,6 +151,18 @@ class DebugeeActor(Actor):
         return _debugee_actor_internal(rank)
 
 
+class DebugControllerForTesting(DebugController):
+    def __init__(self):
+        super().__init__()
+        self._debug_io = DebugStdIO()
+
+    @endpoint
+    async def blocking_enter(self):
+        async with self._task_lock:
+            assert self._task is None
+            await self._enter()
+
+
 async def _wait_for_breakpoints(
     debug_controller, n_breakpoints
 ) -> List[DebugSessionInfo]:
@@ -95,10 +177,15 @@ async def _wait_for_breakpoints(
     return breakpoints
 
 
+# We have to run this test in a separate process because there is only one
+# debug controller per process, and we don't want this to interfere with
+# the other two tests that access the debug controller.
+@isolate_in_subprocess(env=next(debug_ports))
 @pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
 )
+@pytest.mark.timeout(180)
 async def test_debug() -> None:
     input_mock = AsyncMock()
     input_mock.side_effect = [
@@ -130,6 +217,7 @@ async def test_debug() -> None:
         "c",
         "quit",
         "continue",
+        "quit",
     ]
 
     outputs = []
@@ -144,12 +232,11 @@ async def test_debug() -> None:
     with patch("monarch._src.actor.debugger.DebugStdIO.input", new=input_mock), patch(
         "monarch._src.actor.debugger.DebugStdIO.output", new=output_mock
     ):
-        os.environ[_MONARCH_ENABLE_EXTERNAL_DEBUG_CLI] = "0"
-
         proc = proc_mesh(hosts=2, gpus=2)
         debugee = await proc.spawn("debugee", DebugeeActor)
-        debug_controller = actor.debug_controller()
-        debug_controller._set_disable_auto_attach.call_one(True).get()
+        debug_controller = actor.get_or_spawn_controller(
+            "debug_controller", DebugControllerForTesting
+        ).get()
 
         fut = debugee.to_debug.call()
         await debug_controller.wait_pending_session.call_one()
@@ -164,7 +251,7 @@ async def test_debug() -> None:
             assert info.function == "test_debugger._debugee_actor_internal"
             assert info.lineno == cast(int, breakpoints[0].lineno) + 5 * info.rank
 
-        await debug_controller._blocking_enter_TEST_ONLY.call_one()
+        await debug_controller.blocking_enter.call_one()
 
         # Check that when detaching and re-attaching to a session, the last portion of the output is repeated
         expected_last_output = [
@@ -200,7 +287,7 @@ async def test_debug() -> None:
                 )
                 assert breakpoints[i].lineno == initial_linenos[i]
 
-        await debug_controller._blocking_enter_TEST_ONLY.call_one()
+        await debug_controller.blocking_enter.call_one()
 
         breakpoints = await debug_controller.list.call_one()
         for i in range(len(breakpoints)):
@@ -217,14 +304,14 @@ async def test_debug() -> None:
                 )
                 assert breakpoints[i].lineno == initial_linenos[i]
 
-        await debug_controller._blocking_enter_TEST_ONLY.call_one()
+        await debug_controller.blocking_enter.call_one()
 
         breakpoints = await debug_controller.list.call_one()
         assert len(breakpoints) == 4
         # Expect post-mortem debugging for rank 2
         assert breakpoints[2].function == "test_debugger._bad_rank"
 
-        await debug_controller._blocking_enter_TEST_ONLY.call_one()
+        await debug_controller.blocking_enter.call_one()
 
         expected_last_output = [
             r"\s*(/.*/)+test_debugger.py\(\d+\)_debugee_actor_internal\(\)\n-> _bad_rank\(\)",
@@ -250,7 +337,7 @@ async def test_debug() -> None:
         for i, rank in enumerate((0, 1, 3)):
             assert breakpoints[i].rank == rank
 
-        await debug_controller._blocking_enter_TEST_ONLY.call_one()
+        await debug_controller.blocking_enter.call_one()
         breakpoints = await debug_controller.list.call_one()
         assert len(breakpoints) == 0
 
@@ -260,10 +347,13 @@ async def test_debug() -> None:
             await fut
 
 
+# See earlier comment
+@isolate_in_subprocess(env=next(debug_ports))
 @pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
 )
+@pytest.mark.timeout(180)
 async def test_debug_multi_actor() -> None:
     input_mock = AsyncMock()
     input_mock.side_effect = [
@@ -280,16 +370,16 @@ async def test_debug_multi_actor() -> None:
         "c",
         "quit",
         "continue",
+        "quit",
     ]
 
     with patch("monarch._src.actor.debugger.DebugStdIO.input", side_effect=input_mock):
-        os.environ[_MONARCH_ENABLE_EXTERNAL_DEBUG_CLI] = "0"
-
         proc = await proc_mesh(hosts=2, gpus=2)
         debugee_1 = await proc.spawn("debugee_1", DebugeeActor)
         debugee_2 = await proc.spawn("debugee_2", DebugeeActor)
-        debug_controller = actor.debug_controller()
-        debug_controller._set_disable_auto_attach.call_one(True).get()
+        debug_controller = actor.get_or_spawn_controller(
+            "debug_controller", DebugControllerForTesting
+        ).get()
 
         fut_1 = debugee_1.to_debug.call()
         fut_2 = debugee_2.to_debug.call()
@@ -307,7 +397,7 @@ async def test_debug_multi_actor() -> None:
             assert info.function == "test_debugger._debugee_actor_internal"
             assert info.lineno == cast(int, breakpoints[0].lineno) + 5 * info.rank
 
-        await debug_controller._blocking_enter_TEST_ONLY.call_one()
+        await debug_controller.blocking_enter.call_one()
 
         breakpoints = await _wait_for_breakpoints(debug_controller, 8)
         for i in range(len(breakpoints)):
@@ -326,7 +416,7 @@ async def test_debug_multi_actor() -> None:
                 assert breakpoints[i].rank == i % 4
                 assert breakpoints[i].lineno == initial_linenos[breakpoints[i].rank]
 
-        await debug_controller._blocking_enter_TEST_ONLY.call_one()
+        await debug_controller.blocking_enter.call_one()
 
         breakpoints = await _wait_for_breakpoints(debug_controller, 1)
         with pytest.raises(ActorError, match="ValueError: bad rank"):
@@ -335,7 +425,7 @@ async def test_debug_multi_actor() -> None:
         assert breakpoints[0].rank == 2
         assert breakpoints[0].function == "test_debugger._bad_rank"
 
-        await debug_controller._blocking_enter_TEST_ONLY.call_one()
+        await debug_controller.blocking_enter.call_one()
 
         breakpoints = await _wait_for_breakpoints(debug_controller, 0)
         with pytest.raises(ActorError, match="ValueError: bad rank"):
@@ -676,245 +766,194 @@ async def test_debug_command_parser_invalid_inputs(invalid_input):
     assert await DebugCommand.parse(DebugStdIO(), invalid_input) is None
 
 
-# We have to run this test in a separate process because there is only one
-# debug controller per process, and the configuration for the debug controller
-# for this test conflicts with the configuration for the debug controller for
-# test_debug and test_debug_multi_actor. This test is pretty much the exact
-# same logic as test_debug, but validating the behavior looks a bit different
-# because we have to read outputs from the subprocess running the debug cli.
-def _test_debug_cli_impl_sync() -> None:
-    async def _test_debug_cli_impl():
-        proc = proc_mesh(hosts=2, gpus=2)
-        debugee = await proc.spawn("debugee", DebugeeActor)
-        debug_controller = actor.debug_controller()
-
-        fut = debugee.to_debug.call()
-        breakpoints = await _wait_for_breakpoints(debug_controller, 4)
-
-        initial_linenos = {}
-        for i in range(len(breakpoints)):
-            info = breakpoints[i]
-            initial_linenos[info.rank] = info.lineno
-            assert info.rank == i
-            assert info.coords == {"hosts": info.rank // 2, "gpus": info.rank % 2}
-            assert info.function == "test_debugger._debugee_actor_internal"
-            assert info.lineno == cast(int, breakpoints[0].lineno) + 5 * info.rank
-
-        async def create_debug_cli_proc() -> (
-            Tuple[
-                asyncio.subprocess.Process, asyncio.StreamWriter, asyncio.StreamReader
-            ]
-        ):
-            if IN_PAR:
-                cmd = [os.environ["MONARCH_DEBUG_CLI_BIN"]]
-            else:
-                cmd = [sys.executable, "-m", "monarch.debug_cli"]
-            debug_cli_proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-            )
-            debug_cli_stdin = none_throws(debug_cli_proc.stdin)
-            debug_cli_stdout = none_throws(debug_cli_proc.stdout)
-            return debug_cli_proc, debug_cli_stdin, debug_cli_stdout
-
-        (
-            debug_cli_proc,
-            debug_cli_stdin,
-            debug_cli_stdout,
-        ) = await create_debug_cli_proc()
-
-        debug_cli_stdin.writelines(
-            [
-                b"attach debugee 1\n",
-                b"n\n",
-                b"n\n",
-                b"n\n",
-                b"n\n",
-                b"detach\n",
-                b"attach debugee 1\n",
-                b"print('test separator')\n",
-                b"detach\n",
-            ]
-        )
-        await debug_cli_stdin.drain()
-
-        # Check that when detaching and re-attaching to a session, the last portion of the output is repeated
-        expected_last_output = (
-            r"--Return--\n"
-            r"> (?:/.*/)+test_debugger.py\(\d+\)to_debug\(\)->5\n"
-            r"-> return _debugee_actor_internal\(rank\)\n"
-            r"\(Pdb\) "
-        )
-
-        outputs = (await debug_cli_stdout.readuntil(b"test separator")).decode()
-        assert len(re.findall(expected_last_output, outputs)) == 2
-        assert outputs[0] == outputs[1]
-
-        breakpoints = await debug_controller.list.call_one()
-        for i in range(len(breakpoints)):
-            if i == 1:
-                assert breakpoints[i].function == "test_debugger.to_debug"
-            else:
-                assert (
-                    breakpoints[i].function == "test_debugger._debugee_actor_internal"
-                )
-                assert breakpoints[i].lineno == initial_linenos[i]
-
-        debug_cli_stdin.write(b"quit\n")
-        await debug_cli_stdin.drain()
-        assert await debug_cli_proc.wait() == 0
-
-        (
-            debug_cli_proc,
-            debug_cli_stdin,
-            debug_cli_stdout,
-        ) = await create_debug_cli_proc()
-
-        debug_cli_stdin.writelines(
-            [
-                b"cast debugee ranks(0,3) n\n",
-                b"cast debugee ranks(0,3) n\n",
-                # Attaching to 0 and 3 ensures that when we call "list"
-                # the next time, their function/lineno info will be
-                # up-to-date.
-                b"attach debugee 0\n",
-                b"detach\n",
-                b"attach debugee 3\n",
-                b"detach\n",
-            ]
-        )
-        await debug_cli_stdin.drain()
-
-        # Make sure we have run all the commands before killing the CLI, otherwise
-        # the commands may not actually be sent to the debug controller.
-        await debug_cli_stdout.readuntil(b"Detached from debug session for debugee 3")
-        # Even if we kill the proc using a signal, we should be able to reconnect
-        # without issue.
-        debug_cli_proc.send_signal(signal.SIGINT)
-        assert await debug_cli_proc.wait() != 0
-
-        breakpoints = await debug_controller.list.call_one()
-        for i in range(len(breakpoints)):
-            if i == 1:
-                assert breakpoints[i].function == "test_debugger.to_debug"
-            elif i in (0, 3):
-                assert (
-                    breakpoints[i].function == "test_debugger._debugee_actor_internal"
-                )
-                assert breakpoints[i].lineno == initial_linenos[i] + 2
-            else:
-                assert (
-                    breakpoints[i].function == "test_debugger._debugee_actor_internal"
-                )
-                assert breakpoints[i].lineno == initial_linenos[i]
-
-        (
-            debug_cli_proc,
-            debug_cli_stdin,
-            debug_cli_stdout,
-        ) = await create_debug_cli_proc()
-
-        debug_cli_stdin.writelines([b"attach debugee 2\n", b"c\n"])
-        await debug_cli_stdin.drain()
-
-        # Make sure we have run all the commands before killing the CLI, otherwise
-        # the commands may not actually be sent to the debug controller.
-        await debug_cli_stdout.readuntil(b"raise ValueError")
-        # Even if we kill the proc using a signal while the debugger is attached to
-        # a specific rank, we should be able to reconnect to that rank later without
-        # issue.
-        debug_cli_proc.send_signal(signal.SIGINT)
-        assert await debug_cli_proc.wait() != 0
-
-        breakpoints = await debug_controller.list.call_one()
-        assert len(breakpoints) == 4
-        # Expect post-mortem debugging for rank 2
-        assert breakpoints[2].function == "test_debugger._bad_rank"
-
-        (
-            debug_cli_proc,
-            debug_cli_stdin,
-            debug_cli_stdout,
-        ) = await create_debug_cli_proc()
-
-        debug_cli_stdin.writelines([b"attach debugee 2\n", b"bt\n", b"c\n"])
-        await debug_cli_stdin.drain()
-
-        expected_output = (
-            r"(?:/.*/)+test_debugger.py\(\d+\)_debugee_actor_internal\(\)\n-> _bad_rank\(\)\n"
-            r'> (?:/.*/)+test_debugger.py\(\d+\)_bad_rank\(\)\n-> raise ValueError\("bad rank"\)\n'
-            r"\(Pdb\)"
-        )
-
-        output = (
-            await debug_cli_stdout.readuntil(
-                b"Detached from debug session for debugee 2"
-            )
-        ).decode()
-        assert len(re.findall(expected_output, output)) == 1
-
-        debug_cli_stdin.writelines([b"quit\n"])
-        await debug_cli_stdin.drain()
-        assert await debug_cli_proc.wait() == 0
-
-        breakpoints = await debug_controller.list.call_one()
-        assert len(breakpoints) == 3
-        for i, rank in enumerate((0, 1, 3)):
-            assert breakpoints[i].rank == rank
-
-        debug_cli_proc, debug_cli_stdin, _ = await create_debug_cli_proc()
-        debug_cli_stdin.write(b"continue\n")
-        await debug_cli_stdin.drain()
-        assert await debug_cli_proc.wait() == 0
-
-        breakpoints = await debug_controller.list.call_one()
-        assert len(breakpoints) == 0
-
-        with pytest.raises(
-            monarch._src.actor.actor_mesh.ActorError, match="ValueError: bad rank"
-        ):
-            await fut
-
-    asyncio.run(_test_debug_cli_impl())
-
-
+# See earlier comment
+@isolate_in_subprocess(
+    env={"MONARCH_DEBUG_CLI_BIN": debug_cli_bin, **next(debug_ports)}
+)
 @pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
 )
-@pytest.mark.timeout(120)
-def test_debug_cli():
-    env = os.environ.copy()
-    env[_MONARCH_ENABLE_EXTERNAL_DEBUG_CLI] = "1"
-    # This test needs to run in a subprocess because it requires a debug controller
-    # singleton with a different configuration than the other tests in this file.
-    if IN_PAR:
-        env["MONARCH_DEBUG_CLI_BIN"] = str(
-            importlib.resources.files("monarch.python.tests").joinpath("debug_cli_bin")
+@pytest.mark.timeout(180)
+async def test_debug_cli():
+    proc = proc_mesh(hosts=2, gpus=2)
+    debugee = await proc.spawn("debugee", DebugeeActor)
+    debug_controller = actor.debug_controller()
+
+    fut = debugee.to_debug.call()
+    breakpoints = await _wait_for_breakpoints(debug_controller, 4)
+
+    initial_linenos = {}
+    for i in range(len(breakpoints)):
+        info = breakpoints[i]
+        initial_linenos[info.rank] = info.lineno
+        assert info.rank == i
+        assert info.coords == {"hosts": info.rank // 2, "gpus": info.rank % 2}
+        assert info.function == "test_debugger._debugee_actor_internal"
+        assert info.lineno == cast(int, breakpoints[0].lineno) + 5 * info.rank
+
+    async def create_debug_cli_proc() -> (
+        Tuple[asyncio.subprocess.Process, asyncio.StreamWriter, asyncio.StreamReader]
+    ):
+        if IN_PAR:
+            cmd = [os.environ["MONARCH_DEBUG_CLI_BIN"]]
+        else:
+            cmd = [sys.executable, "-m", "monarch.debug_cli"]
+        debug_cli_proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
         )
-        assert (
-            subprocess.call(
-                [
-                    str(
-                        importlib.resources.files("monarch.python.tests").joinpath(
-                            "test_debug_cli_bin"
-                        )
-                    )
-                ],
-                env=env,
-            )
-            == 0
-        )
-    else:
-        assert (
-            subprocess.call(
-                [
-                    sys.executable,
-                    "-c",
-                    "import tests.test_debugger; tests.test_debugger._test_debug_cli_impl_sync()",
-                ],
-                env=env,
-            )
-            == 0
-        )
+        debug_cli_stdin = none_throws(debug_cli_proc.stdin)
+        debug_cli_stdout = none_throws(debug_cli_proc.stdout)
+        return debug_cli_proc, debug_cli_stdin, debug_cli_stdout
+
+    (
+        debug_cli_proc,
+        debug_cli_stdin,
+        debug_cli_stdout,
+    ) = await create_debug_cli_proc()
+
+    debug_cli_stdin.writelines(
+        [
+            b"attach debugee 1\n",
+            b"n\n",
+            b"n\n",
+            b"n\n",
+            b"n\n",
+            b"detach\n",
+            b"attach debugee 1\n",
+            b"print('test separator')\n",
+            b"detach\n",
+        ]
+    )
+    await debug_cli_stdin.drain()
+
+    # Check that when detaching and re-attaching to a session, the last portion of the output is repeated
+    expected_last_output = (
+        r"--Return--\n"
+        r"> (?:/.*/)+test_debugger.py\(\d+\)to_debug\(\)->5\n"
+        r"-> return _debugee_actor_internal\(rank\)\n"
+        r"\(Pdb\) "
+    )
+
+    outputs = (await debug_cli_stdout.readuntil(b"test separator")).decode()
+    assert len(re.findall(expected_last_output, outputs)) == 2
+    assert outputs[0] == outputs[1]
+
+    breakpoints = await debug_controller.list.call_one()
+    for i in range(len(breakpoints)):
+        if i == 1:
+            assert breakpoints[i].function == "test_debugger.to_debug"
+        else:
+            assert breakpoints[i].function == "test_debugger._debugee_actor_internal"
+            assert breakpoints[i].lineno == initial_linenos[i]
+
+    debug_cli_stdin.write(b"quit\n")
+    await debug_cli_stdin.drain()
+    assert await debug_cli_proc.wait() == 0
+
+    (
+        debug_cli_proc,
+        debug_cli_stdin,
+        debug_cli_stdout,
+    ) = await create_debug_cli_proc()
+
+    debug_cli_stdin.writelines(
+        [
+            b"cast debugee ranks(0,3) n\n",
+            b"cast debugee ranks(0,3) n\n",
+            # Attaching to 0 and 3 ensures that when we call "list"
+            # the next time, their function/lineno info will be
+            # up-to-date.
+            b"attach debugee 0\n",
+            b"detach\n",
+            b"attach debugee 3\n",
+            b"detach\n",
+        ]
+    )
+    await debug_cli_stdin.drain()
+
+    # Make sure we have run all the commands before killing the CLI, otherwise
+    # the commands may not actually be sent to the debug controller.
+    await debug_cli_stdout.readuntil(b"Detached from debug session for debugee 3")
+    # Even if we kill the proc using a signal, we should be able to reconnect
+    # without issue.
+    debug_cli_proc.send_signal(signal.SIGINT)
+    assert await debug_cli_proc.wait() != 0
+
+    breakpoints = await debug_controller.list.call_one()
+    for i in range(len(breakpoints)):
+        if i == 1:
+            assert breakpoints[i].function == "test_debugger.to_debug"
+        elif i in (0, 3):
+            assert breakpoints[i].function == "test_debugger._debugee_actor_internal"
+            assert breakpoints[i].lineno == initial_linenos[i] + 2
+        else:
+            assert breakpoints[i].function == "test_debugger._debugee_actor_internal"
+            assert breakpoints[i].lineno == initial_linenos[i]
+
+    (
+        debug_cli_proc,
+        debug_cli_stdin,
+        debug_cli_stdout,
+    ) = await create_debug_cli_proc()
+
+    debug_cli_stdin.writelines([b"attach debugee 2\n", b"c\n"])
+    await debug_cli_stdin.drain()
+
+    # Make sure we have run all the commands before killing the CLI, otherwise
+    # the commands may not actually be sent to the debug controller.
+    await debug_cli_stdout.readuntil(b"raise ValueError")
+    # Even if we kill the proc using a signal while the debugger is attached to
+    # a specific rank, we should be able to reconnect to that rank later without
+    # issue.
+    debug_cli_proc.send_signal(signal.SIGINT)
+    assert await debug_cli_proc.wait() != 0
+
+    breakpoints = await debug_controller.list.call_one()
+    assert len(breakpoints) == 4
+    # Expect post-mortem debugging for rank 2
+    assert breakpoints[2].function == "test_debugger._bad_rank"
+
+    (
+        debug_cli_proc,
+        debug_cli_stdin,
+        debug_cli_stdout,
+    ) = await create_debug_cli_proc()
+
+    debug_cli_stdin.writelines([b"attach debugee 2\n", b"bt\n", b"c\n"])
+    await debug_cli_stdin.drain()
+
+    expected_output = (
+        r"(?:/.*/)+test_debugger.py\(\d+\)_debugee_actor_internal\(\)\n-> _bad_rank\(\)\n"
+        r'> (?:/.*/)+test_debugger.py\(\d+\)_bad_rank\(\)\n-> raise ValueError\("bad rank"\)\n'
+        r"\(Pdb\)"
+    )
+
+    output = (
+        await debug_cli_stdout.readuntil(b"Detached from debug session for debugee 2")
+    ).decode()
+    assert len(re.findall(expected_output, output)) == 1
+
+    debug_cli_stdin.writelines([b"quit\n"])
+    await debug_cli_stdin.drain()
+    assert await debug_cli_proc.wait() == 0
+
+    breakpoints = await debug_controller.list.call_one()
+    assert len(breakpoints) == 3
+    for i, rank in enumerate((0, 1, 3)):
+        assert breakpoints[i].rank == rank
+
+    debug_cli_proc, debug_cli_stdin, _ = await create_debug_cli_proc()
+    debug_cli_stdin.writelines([b"continue\n", b"quit\n"])
+    await debug_cli_stdin.drain()
+    assert await debug_cli_proc.wait() == 0
+
+    breakpoints = await debug_controller.list.call_one()
+    assert len(breakpoints) == 0
+
+    with pytest.raises(
+        monarch._src.actor.actor_mesh.ActorError, match="ValueError: bad rank"
+    ):
+        await fut

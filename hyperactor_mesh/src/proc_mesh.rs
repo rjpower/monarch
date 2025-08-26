@@ -124,6 +124,7 @@ struct EventState {
 }
 
 impl ProcMesh {
+    #[hyperactor::instrument(fields(name = "proc_mesh_allocate"))]
     pub async fn allocate(
         alloc: impl Alloc + Send + Sync + 'static,
     ) -> Result<Self, AllocatorError> {
@@ -149,10 +150,7 @@ impl ProcMesh {
 
             match state {
                 ProcState::Created { proc_id, point, .. } => {
-                    let rank = shape
-                        .slice()
-                        .location(point.coords())
-                        .map_err(|err| AllocatorError::Other(err.into()))?;
+                    let rank = point.rank();
                     if let Some(old_proc_id) = proc_ids.insert(rank, proc_id.clone()) {
                         tracing::warn!("rank {rank} reassigned from {old_proc_id} to {proc_id}");
                     }
