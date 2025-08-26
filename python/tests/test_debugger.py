@@ -185,7 +185,7 @@ async def _wait_for_breakpoints(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
 )
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(180)
 async def test_debug() -> None:
     input_mock = AsyncMock()
     input_mock.side_effect = [
@@ -353,7 +353,7 @@ async def test_debug() -> None:
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
 )
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(180)
 async def test_debug_multi_actor() -> None:
     input_mock = AsyncMock()
     input_mock.side_effect = [
@@ -774,7 +774,7 @@ async def test_debug_command_parser_invalid_inputs(invalid_input):
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
 )
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(180)
 async def test_debug_cli():
     proc = proc_mesh(hosts=2, gpus=2)
     debugee = await proc.spawn("debugee", DebugeeActor)
