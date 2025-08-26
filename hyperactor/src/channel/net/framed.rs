@@ -72,7 +72,6 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
             match &mut self.state {
                 FrameReaderState::ReadLen { buf, off } if *off < 8 => {
                     let n = self.reader.read(&mut buf[*off..]).await?;
-                    // Print the address of self as a pointer
                     *off += n;
                     assert!(*off <= 8);
 
@@ -112,7 +111,7 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
                         return Err(io::ErrorKind::UnexpectedEof.into());
                     }
                     *off += n;
-                    assert!(*off <= *len,)
+                    assert!(*off <= *len)
                 }
 
                 FrameReaderState::ReadBody { buf, off, len } => {
