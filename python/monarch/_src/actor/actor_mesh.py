@@ -70,6 +70,7 @@ from monarch._rust_bindings.monarch_hyperactor.supervision import SupervisionErr
 from monarch._rust_bindings.monarch_hyperactor.telemetry import enter_span, exit_span
 
 from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
+from monarch._src.actor.debugger.pdb_wrapper import PdbWrapper
 from monarch._src.actor.endpoint import (
     Endpoint,
     EndpointProperty,
@@ -79,7 +80,6 @@ from monarch._src.actor.endpoint import (
     Selection,
 )
 from monarch._src.actor.future import DeprecatedNotAFuture, Future
-from monarch._src.actor.pdb_wrapper import PdbWrapper
 
 from monarch._src.actor.pickle import flatten, unflatten
 
@@ -896,7 +896,7 @@ class _Actor:
         DebugContext.set(DebugContext())
 
     def _post_mortem_debug(self, exc_tb) -> None:
-        from monarch._src.actor.debugger import debug_controller
+        from monarch._src.actor.debugger.debugger import debug_controller
 
         if (pdb_wrapper := DebugContext.get().pdb_wrapper) is not None:
             with fake_sync_state():

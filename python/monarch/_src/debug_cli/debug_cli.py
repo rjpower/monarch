@@ -16,7 +16,7 @@ from monarch._rust_bindings.monarch_hyperactor.debug import (
     get_external_debug_router_id,
 )
 from monarch._src.actor.actor_mesh import ActorMesh
-from monarch._src.actor.debugger import (
+from monarch._src.actor.debugger.debugger import (
     _get_debug_server_addr,
     DebugCliInput,
     DebugCliOutput,
