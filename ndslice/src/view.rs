@@ -828,9 +828,7 @@ impl<T: View> ViewExt for T {
     }
 
     fn values(&self) -> impl Iterator<Item = Self::Item> + '_ {
-        (0usize..self.extent().num_ranks())
-            .into_iter()
-            .map(|rank| self.get(rank).unwrap())
+        (0usize..self.extent().num_ranks()).map(|rank| self.get(rank).unwrap())
     }
 }
 
@@ -843,7 +841,7 @@ impl<T: View> ViewExt for T {
 /// ```
 #[macro_export]
 macro_rules! extent {
-    ( $( $label:ident = $size:expr_2021 ),* $(,)? ) => {
+    ( $( $label:ident = $size:expr ),* $(,)? ) => {
         {
             let mut labels = Vec::new();
             let mut sizes = Vec::new();
