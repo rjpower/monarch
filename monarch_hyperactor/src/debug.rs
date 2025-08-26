@@ -70,7 +70,7 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
         )?;
         hy_mod.add_function(f)?;
         Ok(())
-    };
+    }
 
     wrap_pyfunction(
         hyperactor_mod,
