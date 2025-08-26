@@ -50,13 +50,6 @@ def _get_debug_server_addr() -> ChannelAddr:
     )
 
 
-_MONARCH_ENABLE_EXTERNAL_DEBUG_CLI = "MONARCH_ENABLE_EXTERNAL_DEBUG_CLI"
-
-
-def _external_debug_cli_enabled() -> bool:
-    return os.environ.get(_MONARCH_ENABLE_EXTERNAL_DEBUG_CLI, "1") == "1"
-
-
 class DebugIO:
     @abstractmethod
     async def input(self, prompt: str = "") -> str: ...
@@ -547,14 +540,12 @@ class DebugController(Actor):
         self.sessions = DebugSessions()
         self._task_lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
-        self._debug_io: DebugIO = DebugStdIO()
+        self._debug_io: DebugIO = DebugCliIO()
         self._current_debug_cli_actor_id: ActorId | None = None
-        self._disable_auto_attach = _external_debug_cli_enabled()
-        if _external_debug_cli_enabled():
-            init_debug_server(
-                context().actor_instance._mailbox,
-                _get_debug_server_addr(),
-            )
+        init_debug_server(
+            context().actor_instance._mailbox,
+            _get_debug_server_addr(),
+        )
 
     @endpoint
     async def wait_pending_session(self):
@@ -597,7 +588,6 @@ class DebugController(Actor):
         debug_cli_actor_id: ActorId,
         debug_cli_addr: str,
     ) -> None:
-        assert _external_debug_cli_enabled()
         # Make sure only one external debug process can
         # be attached at a time. If a new request is
         # received, the current task is cancelled.
@@ -616,9 +606,9 @@ class DebugController(Actor):
             # connection, or there could be unused input that would put the debugger
             # in a weird state.
             self._debug_io = DebugCliIO()
-            self._task = asyncio.create_task(self._enter(allow_quit_command=True))
+            self._task = asyncio.create_task(self._enter())
 
-    async def _enter(self, allow_quit_command: bool) -> None:
+    async def _enter(self) -> None:
         await asyncio.sleep(0.5)
         await self._debug_io.output(
             "\n\n************************ MONARCH DEBUGGER ************************\n"
@@ -638,10 +628,9 @@ class DebugController(Actor):
                         "\tattach <actor_name> <rank> - attach to a debug session\n"
                     )
                     await self._debug_io.output("\tlist - list all debug sessions\n")
-                    if allow_quit_command:
-                        await self._debug_io.output(
-                            "\tquit - exit the debugger, leaving all sessions in place\n"
-                        )
+                    await self._debug_io.output(
+                        "\tquit - exit the debugger, leaving all sessions in place\n"
+                    )
                     await self._debug_io.output(
                         "\tcast <actor_name> ranks(...) <command> - send a command to a set of ranks on the specified actor mesh.\n"
                         "\t\tThe value inside ranks(...) can be a single rank (ranks(1)),\n"
@@ -649,7 +638,7 @@ class DebugController(Actor):
                         "\t\tor a dict of dimensions (ranks(dim1=1:5:2,dim2=3, dim4=(3,6))).\n"
                     )
                     await self._debug_io.output(
-                        "\tcontinue - tell all ranks to continue execution, then exit the debugger\n"
+                        "\tcontinue - clear all breakpoints and tell all ranks to continue\n"
                     )
                     await self._debug_io.output("\thelp - print this help message\n")
                 elif isinstance(command, Attach):
@@ -660,21 +649,9 @@ class DebugController(Actor):
                     # pyre-ignore
                     await self.list._method(self)
                 elif isinstance(command, Continue):
-                    # Clear all breakpoints and make sure all ranks have
-                    # exited their debug sessions. If we sent "quit", it
-                    # would raise BdbQuit, crashing the process, which
-                    # probably isn't what we want.
                     await self._cast_input_and_wait("clear")
-                    while len(self.sessions) > 0:
-                        await self._cast_input_and_wait("c")
-                    await self._debug_io.quit()
-                    return
+                    await self._cast_input_and_wait("c")
                 elif isinstance(command, Quit):
-                    if not allow_quit_command:
-                        await self._debug_io.output(
-                            "`quit` command not allowed in this mode\n"
-                        )
-                        continue
                     await self._debug_io.quit()
                     return
                 elif isinstance(command, Cast):
@@ -706,12 +683,6 @@ class DebugController(Actor):
         # Create a session if it doesn't exist
         if (actor_name, rank) not in self.sessions:
             self.sessions.insert(DebugSession(rank, coords, hostname, actor_name))
-            if not self._disable_auto_attach:
-                async with self._task_lock:
-                    if self._task is None:
-                        self._task = asyncio.create_task(
-                            self._enter(allow_quit_command=False)
-                        )
 
     @endpoint
     async def debugger_session_end(self, actor_name: str, rank: int) -> None:
@@ -777,25 +748,6 @@ class DebugController(Actor):
         # needs to be done with it.
         return True
 
-    @endpoint
-    def _set_disable_auto_attach(self, disable_auto_attach: bool) -> None:
-        # It's convenient for testing to be able to set this independently
-        # of whether or not external debugging is enabled. When multiple
-        # debugging tests run in parallel, enabling external debugging can
-        # cause issues due to multiple debug controllers in different tests
-        # trying to use the same port.
-        self._disable_auto_attach = disable_auto_attach
-
-    @endpoint
-    async def _blocking_enter_TEST_ONLY(self) -> None:
-        # This is useful for testing because it allows us to programmatically
-        # run a few commands, exit the debugging session, do some assertions,
-        # and then reattach.
-        assert self._disable_auto_attach
-        async with self._task_lock:
-            assert self._task is None
-            await self._enter(allow_quit_command=True)
-
 
 # Cached so that we don't have to call out to the root client every time,
 # which may be on a different host.
@@ -826,7 +778,7 @@ def remote_breakpointhook() -> None:
     rank = ctx.message_rank
     pdb_wrapper = PdbWrapper(
         rank.rank,
-        rank.shape.coordinates(rank.rank),
+        {k: rank[k] for k in rank},
         ctx.actor_instance.actor_id,
         debug_controller(),
     )
