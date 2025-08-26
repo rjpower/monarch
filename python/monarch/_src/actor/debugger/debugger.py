@@ -28,8 +28,8 @@ from monarch._rust_bindings.monarch_hyperactor.mailbox import (
 
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._src.actor.actor_mesh import Actor, context, DebugContext
+from monarch._src.actor.debugger.pdb_wrapper import DebuggerWrite, PdbWrapper
 from monarch._src.actor.endpoint import endpoint
-from monarch._src.actor.pdb_wrapper import DebuggerWrite, PdbWrapper
 from monarch._src.actor.proc_mesh import get_or_spawn_controller
 from monarch._src.actor.sync_state import fake_sync_state
 from pyre_extensions import none_throws
@@ -48,6 +48,12 @@ def _get_debug_server_addr() -> ChannelAddr:
             _MONARCH_DEBUG_SERVER_ADDR_ENV_VAR, _MONARCH_DEBUG_SERVER_ADDR_DEFAULT
         )
     )
+
+
+@functools.cache
+def _get_source(filename: str) -> str:
+    with open(filename) as f:
+        return f.read()
 
 
 class DebugIO:
@@ -737,6 +743,10 @@ class DebugController(Actor):
             raise RuntimeError("Putting debugger input not supported in current mode")
         await self._debug_io.put_input(inp)
 
+    @endpoint
+    def get_source(self, filename: str) -> str:
+        return _get_source(filename)
+
     def _handle_undeliverable_message(
         self, message: UndeliverableMessageEnvelope
     ) -> bool:
@@ -762,17 +772,6 @@ def remote_breakpointhook() -> None:
     assert frame is not None
     frame = frame.f_back
     assert frame is not None
-    file = frame.f_code.co_filename
-    line = frame.f_lineno
-    module = frame.f_globals.get("__name__", "__main__")
-    if module == "__main__" and not os.path.exists(file):
-        raise NotImplementedError(
-            f"Remote debugging not supported for breakpoint at {file}:{line} because "
-            f"it is defined inside __main__, and the file does not exist on the host. "
-            "In this case, cloudpickle serialization does not interact nicely with pdb. "
-            "To debug your code, move it out of __main__ and into a module that "
-            "exists on both your client and worker processes."
-        )
 
     ctx = context()
     rank = ctx.message_rank
