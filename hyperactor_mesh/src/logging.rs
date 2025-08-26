@@ -764,7 +764,7 @@ fn deserialize_message_lines(
     }
 
     // If both fail, return an error
-    anyhow::bail!("Failed to deserialize message as either String or Vec<u8>")
+    anyhow::bail!("failed to deserialize message as either String or Vec<u8>")
 }
 
 /// A client to receive logs from remote processes
@@ -1111,12 +1111,13 @@ mod tests {
 
         // Test error handling for invalid UTF-8 bytes
         let invalid_utf8_bytes = vec![0xFF, 0xFE, 0xFD]; // Invalid UTF-8 sequence
-        let serialized = Serialized::serialize(&invalid_utf8_bytes).unwrap();
+        let serialized = Serialized::serialize_as::<Vec<u8>, _>(&invalid_utf8_bytes).unwrap();
 
         let result = deserialize_message_lines(&serialized);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid utf-8"));
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("invalid utf-8"), "{}", message);
     }
 
     // Mock implementation of AsyncWrite that captures written data

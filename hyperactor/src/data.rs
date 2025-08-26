@@ -458,10 +458,30 @@ impl Serialized {
         Self::serialize_with_encoding(config::global::get(config::DEFAULT_ENCODING), value)
     }
 
+    /// Serialize U-typed value as a T-typed value. This should be used with care
+    /// (typically only in testing), as the value's representation may be illegally
+    /// coerced.
+    pub fn serialize_as<T: Named, U: Serialize>(value: &U) -> Result<Self, Error> {
+        Self::serialize_with_encoding_as::<T, U>(
+            config::global::get(config::DEFAULT_ENCODING),
+            value,
+        )
+    }
+
     /// Serialize the value with the using the provided encoding.
     pub fn serialize_with_encoding<T: Serialize + Named>(
         encoding: Encoding,
         value: &T,
+    ) -> Result<Self, Error> {
+        Self::serialize_with_encoding_as::<T, T>(encoding, value)
+    }
+
+    /// Serialize U-typed value as a T-typed value. This should be used with care
+    /// (typically only in testing), as the value's representation may be illegally
+    /// coerced.
+    pub fn serialize_with_encoding_as<T: Named, U: Serialize>(
+        encoding: Encoding,
+        value: &U,
     ) -> Result<Self, Error> {
         Ok(Self {
             encoded: match encoding {
@@ -483,6 +503,13 @@ impl Serialized {
             self.typename().unwrap_or("unknown"),
             T::typename()
         );
+        self.deserialized_unchecked()
+    }
+
+    /// Deserialize a value to the provided type T, without checking for type conformance.
+    /// This should be used carefully, only when you know that the dynamic type check is
+    /// not needed.
+    pub fn deserialized_unchecked<T: DeserializeOwned>(&self) -> Result<T, anyhow::Error> {
         match &self.encoded {
             Encoded::Bincode(data) => bincode::deserialize(data).map_err(anyhow::Error::from),
             Encoded::Json(data) => serde_json::from_slice(data).map_err(anyhow::Error::from),
