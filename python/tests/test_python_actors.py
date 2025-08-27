@@ -1355,3 +1355,24 @@ async def test_things_survive_losing_python_reference() -> None:
     receptor = receptor.slice(gpus=0)
 
     await receptor.status.call()
+
+
+class IsInit(Actor):
+    @endpoint
+    def is_cuda_initialized(self) -> bool:
+        import ctypes
+
+        cuda = ctypes.CDLL("libcuda.so")
+        CUresult = ctypes.c_int
+        cuDeviceGetCount = cuda.cuDeviceGetCount
+        cuDeviceGetCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        cuDeviceGetCount.restype = CUresult
+        count = ctypes.c_int()
+        result = cuDeviceGetCount(ctypes.byref(count))
+        CUDA_ERROR_NOT_INITIALIZED = 3
+        return result == CUDA_ERROR_NOT_INITIALIZED
+
+
+def test_cuda_is_not_initialized_in_a_new_proc():
+    proc = this_host().spawn_procs().spawn("is_init", IsInit)
+    assert not proc.is_cuda_initialized.call_one().get()
