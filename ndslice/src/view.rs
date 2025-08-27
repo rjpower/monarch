@@ -765,8 +765,7 @@ impl<T: View> ViewExt for T {
     }
 
     fn values(&self) -> impl Iterator<Item = Self::Item> + '_ {
-        (0usize..self.extent().num_ranks())
-            .map(|rank| self.get(rank).unwrap())
+        (0usize..self.extent().num_ranks()).map(|rank| self.get(rank).unwrap())
     }
 }
 
