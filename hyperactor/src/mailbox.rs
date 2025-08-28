@@ -130,6 +130,7 @@ pub use undeliverable::UndeliverableMessageError;
 pub use undeliverable::custom_monitored_return_handle;
 pub use undeliverable::monitored_return_handle; // TODO: Audit
 pub use undeliverable::supervise_undeliverable_messages;
+pub use undeliverable::supervise_undeliverable_messages_with;
 /// For [`MailboxAdminMessage`], a message type for mailbox administration.
 pub mod mailbox_admin_message;
 pub use mailbox_admin_message::MailboxAdminMessage;
@@ -239,7 +240,7 @@ impl MessageEnvelope {
     }
 
     /// Deserialize the message in the envelope to the provided type T.
-    pub fn deserialized<T: DeserializeOwned>(&self) -> Result<T, anyhow::Error> {
+    pub fn deserialized<T: DeserializeOwned + Named>(&self) -> Result<T, anyhow::Error> {
         self.data.deserialized()
     }
 
@@ -698,7 +699,25 @@ impl MailboxSender for UndeliverableMailboxSender {
         envelope: MessageEnvelope,
         _return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
-        tracing::error!("message not delivered: {}", envelope);
+        let sender_name = envelope.sender.name();
+        let mut error_str = "".to_string();
+        if !envelope.errors.is_empty() {
+            error_str = envelope
+                .errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+        }
+
+        tracing::error!(
+            name = "undelivered_message",
+            actor_name = sender_name,
+            actor_id = envelope.sender.to_string(),
+            "message not delivered to {}, {}",
+            envelope.dest.actor_id().name(),
+            error_str,
+        );
     }
 }
 
@@ -804,13 +823,6 @@ impl MailboxSender for BoxedMailboxSender {
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
-        metrics::MAILBOX_POSTS.add(
-            1,
-            hyperactor_telemetry::kv_pairs!(
-                "actor_id" => envelope.sender.to_string(),
-                "dest_actor_id" => envelope.dest.0.to_string(),
-            ),
-        );
         self.0.post(envelope, return_handle);
     }
 }
@@ -1357,7 +1369,20 @@ impl MailboxSender for Mailbox {
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
-        tracing::trace!(name = "post", "posting message to {}", envelope.dest);
+        metrics::MAILBOX_POSTS.add(
+            1,
+            hyperactor_telemetry::kv_pairs!(
+                "actor_id" => envelope.sender.to_string(),
+                "dest_actor_id" => envelope.dest.0.to_string(),
+            ),
+        );
+        tracing::trace!(
+            name = "post",
+            actor_name = envelope.sender.name(),
+            actor_id = envelope.sender.to_string(),
+            "posting message to {}",
+            envelope.dest
+        );
 
         if envelope.dest().actor_id() != &self.inner.actor_id {
             return self.inner.forwarder.post(envelope, return_handle);
@@ -1975,7 +2000,12 @@ impl<M: RemoteMessage> SerializedSender for UnboundedSender<M> {
         headers: Attrs,
         serialized: Serialized,
     ) -> Result<bool, SerializedSenderError> {
-        match serialized.deserialized() {
+        // Here, the stack ensures that this port is only instantiated for M-typed messages.
+        // This does not protect against bad senders (e.g., encoding wrongly-typed messages),
+        // but it is required as we have some usages that rely on representational equivalence
+        // to provide type indexing, specifically in `IndexedErasedUnbound` which is used to
+        // support port aggregation.
+        match serialized.deserialized_unchecked() {
             Ok(message) => {
                 self.sender.send(headers.clone(), message).map_err(|err| {
                     SerializedSenderError {
