@@ -15,18 +15,6 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from typing import cast, Dict, Generator, List, Optional, Tuple, Union
 
-from monarch._rust_bindings.monarch_hyperactor.channel import ChannelAddr
-
-from monarch._rust_bindings.monarch_hyperactor.debug import (
-    bind_debug_cli_actor,
-    init_debug_server,
-)
-
-from monarch._rust_bindings.monarch_hyperactor.mailbox import (
-    UndeliverableMessageEnvelope,
-)
-
-from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._src.actor.actor_mesh import Actor, context, DebugContext
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.pdb_wrapper import DebuggerWrite, PdbWrapper
@@ -38,15 +26,30 @@ from tabulate import tabulate
 
 logger = logging.getLogger(__name__)
 
-_MONARCH_DEBUG_SERVER_ADDR_ENV_VAR = "MONARCH_DEBUG_SERVER_ADDR"
-_MONARCH_DEBUG_SERVER_ADDR_DEFAULT = "tcp![::1]:29700"
+_MONARCH_DEBUG_SERVER_HOST_ENV_VAR = "MONARCH_DEBUG_SERVER_HOST"
+_MONARCH_DEBUG_SERVER_HOST_DEFAULT = "::1"
+_MONARCH_DEBUG_SERVER_PORT_ENV_VAR = "MONARCH_DEBUG_SERVER_PORT"
+_MONARCH_DEBUG_SERVER_PORT_DEFAULT = "27000"
+_MONARCH_DEBUG_SERVER_PROTOCOL_ENV_VAR = "MONARCH_DEBUG_SERVER_PROTOCOL"
+_MONARCH_DEBUG_SERVER_PROTOCOL_DEFAULT = "tcp"
 
 
-def _get_debug_server_addr() -> ChannelAddr:
-    return ChannelAddr.parse(
-        os.environ.get(
-            _MONARCH_DEBUG_SERVER_ADDR_ENV_VAR, _MONARCH_DEBUG_SERVER_ADDR_DEFAULT
+async def _get_debug_connection() -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    if (
+        proto := os.environ.get(
+            _MONARCH_DEBUG_SERVER_PROTOCOL_ENV_VAR,
+            _MONARCH_DEBUG_SERVER_PROTOCOL_DEFAULT,
         )
+    ) != "tcp":
+        # TODO: Implement other protocols (in particular, TLS)
+        raise NotImplementedError(f"Network protocol {proto} not yet supported.")
+    return await asyncio.open_connection(
+        os.environ.get(
+            _MONARCH_DEBUG_SERVER_HOST_ENV_VAR, _MONARCH_DEBUG_SERVER_HOST_DEFAULT
+        ),
+        os.environ.get(
+            _MONARCH_DEBUG_SERVER_PORT_ENV_VAR, _MONARCH_DEBUG_SERVER_PORT_DEFAULT
+        ),
     )
 
 
@@ -73,53 +76,46 @@ class DebugStdIO(DebugIO):
         pass
 
 
-@dataclass
-class DebugCliInput:
-    prompt: str
-
-
-@dataclass
-class DebugCliOutput:
-    msg: str
-
-
-class DebugCliQuit:
-    pass
-
-
-DebugCliMessage = Union[DebugCliInput, DebugCliOutput, DebugCliQuit]
+class DebugIOError(RuntimeError):
+    def __init__(self):
+        super().__init__("Error encountered during debugger I/O operation.")
 
 
 class DebugCliIO(DebugIO):
-    def __init__(self):
-        # The debug cli will put input into this queue, and
-        # the debug controller will read from it.
-        self._input_queue = asyncio.Queue()
-        # The debug controller will put output into this queue,
-        # and the debug cli will read from it.
-        self._output_queue = asyncio.Queue()
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        self._reader = reader
+        self._writer = writer
 
     async def input(self, prompt: str = "") -> str:
-        # The debug cli fetches output from _output_queue in
-        # a loop. It only knows to send input once it reads
-        # this message from the output.
-        await self._output_queue.put(DebugCliInput(prompt))
-        return await self._input_queue.get()
+        await self._write(b"i", prompt.encode())
+        msg_len = int.from_bytes(await self._read(4), "big")
+        message = (await self._read(msg_len)).decode()
+        return message
 
-    async def output(self, msg) -> None:
-        await self._output_queue.put(DebugCliOutput(msg))
+    async def output(self, msg: str) -> None:
+        await self._write(b"o", msg.encode())
 
     async def quit(self) -> None:
-        await self._output_queue.put(DebugCliQuit())
+        await self._write(b"q", b"")
 
-    async def take_output(self) -> List[DebugCliMessage]:
-        output = [await self._output_queue.get()]
-        while not self._output_queue.empty():
-            output.append(await self._output_queue.get())
-        return output
+    async def _write(self, cmd: bytes, msg: bytes):
+        try:
+            assert len(cmd) == 1
+            self._writer.write(cmd)
+            self._writer.write(len(msg).to_bytes(4, "big"))
+            self._writer.write(msg)
+            await self._writer.drain()
+        except Exception as e:
+            raise DebugIOError from e
 
-    async def put_input(self, inp: str) -> None:
-        await self._input_queue.put(inp)
+    async def _read(self, n: int):
+        try:
+            msg = await self._reader.read(n)
+            if len(msg) < n:
+                raise asyncio.IncompleteReadError(msg, n)
+        except Exception as e:
+            raise DebugIOError from e
+        return msg
 
 
 @dataclass
@@ -204,12 +200,12 @@ class DebugSession:
                         line = None
                         if break_after:
                             break
-                except asyncio.CancelledError as e:
+                except (DebugIOError, asyncio.CancelledError):
                     # See earlier comment about this flag. If either of the awaits inside
                     # the try block is cancelled, we need to redo the read without actually
                     # reinserting "read" into the message queue.
                     self._need_read = True
-                    raise e
+                    raise
             elif message[0] == "write":
                 output = message[1]
                 # If the user sees this output but then detaches from the session,
@@ -529,6 +525,28 @@ class Cast(DebugCommand):
     command: str
 
 
+# "Hope" the server is healthy. On the happy path, _server_started event
+# is set right before calling `await server.serve_forever()`, so we only
+# know that the server is probably healthy at this point. We just have to
+# hope.
+#
+# The "server" in question is how users control debugger sessions
+# from the CLI. If the server is unhealthy, we need to return an
+# exception to any ranks being debugged so that they don't hang
+# indefinitely waiting for instructions with no way to tell them
+# to continue.
+#
+# TODO: Implement a heartbeat for pdb sessions for more robust handling.
+def hope_server_is_healthy(coro):
+    async def wrapper(self: "DebugController", *args, **kwargs):
+        await self._server_started.wait()
+        if self._server_exception is not None:
+            raise self._server_exception
+        return await coro(self, *args, **kwargs)
+
+    return wrapper
+
+
 class DebugController(Actor):
     """
     Single actor for both remote debuggers and users to talk to.
@@ -540,53 +558,45 @@ class DebugController(Actor):
         self.sessions = DebugSessions()
         self._task_lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
-        self._debug_io: DebugIO = DebugCliIO()
-        self._current_debug_cli_actor_id: ActorId | None = None
-        init_debug_server(
-            context().actor_instance._mailbox,
-            _get_debug_server_addr(),
-        )
+        self._debug_io: DebugIO = DebugStdIO()
+        self._server_started = asyncio.Event()
+        self._server_exception: Exception | None = None
+        self._server = asyncio.create_task(self._serve())
 
-    @endpoint
-    async def wait_pending_session(self):
-        while len(self.sessions) == 0:
-            await asyncio.sleep(1)
-
-    @endpoint
-    async def list(self) -> List[DebugSessionInfo]:
-        session_info = sorted(self.sessions.info())
-        await self._debug_io.output(
-            tabulate(
-                (
-                    (
-                        info.actor_name,
-                        info.rank,
-                        info.coords,
-                        info.hostname,
-                        info.function,
-                        info.lineno,
-                    )
-                    for info in session_info
+    async def _serve(self) -> None:
+        try:
+            if (
+                proto := os.environ.get(
+                    _MONARCH_DEBUG_SERVER_PROTOCOL_ENV_VAR,
+                    _MONARCH_DEBUG_SERVER_PROTOCOL_DEFAULT,
+                )
+            ) != "tcp":
+                raise NotImplementedError(
+                    f"Network protocol {proto} not yet supported."
+                )
+            server = await asyncio.start_server(
+                self._handle_client,
+                os.environ.get(
+                    _MONARCH_DEBUG_SERVER_HOST_ENV_VAR,
+                    _MONARCH_DEBUG_SERVER_HOST_DEFAULT,
                 ),
-                headers=[
-                    "Actor Name",
-                    "Rank",
-                    "Coords",
-                    "Hostname",
-                    "Function",
-                    "Line No.",
-                ],
-                tablefmt="grid",
+                os.environ.get(
+                    _MONARCH_DEBUG_SERVER_PORT_ENV_VAR,
+                    _MONARCH_DEBUG_SERVER_PORT_DEFAULT,
+                ),
             )
-            + "\n"
-        )
-        return session_info
+            async with server:
+                self._server_started.set()
+                await server.serve_forever()
+        except Exception as e:
+            self._server_exception = e
+            self._server_started.set()
+            raise
 
-    @endpoint
-    async def enter(
+    async def _handle_client(
         self,
-        debug_cli_actor_id: ActorId,
-        debug_cli_addr: str,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
     ) -> None:
         # Make sure only one external debug process can
         # be attached at a time. If a new request is
@@ -596,17 +606,48 @@ class DebugController(Actor):
                 self._task.cancel()
                 try:
                     await none_throws(self._task)
-                except asyncio.CancelledError:
+                except (DebugIOError, asyncio.CancelledError):
                     pass
-            # Tell the debug controller where to send responses.
-            bind_debug_cli_actor(debug_cli_actor_id, ChannelAddr.parse(debug_cli_addr))
-            self._current_debug_cli_actor_id = debug_cli_actor_id
-            # We need a new DebugCliIO instance for the new connection. Otherwise
-            # a new debug terminal could show confusing partial output from a previous
-            # connection, or there could be unused input that would put the debugger
-            # in a weird state.
-            self._debug_io = DebugCliIO()
+            self._debug_io = DebugCliIO(reader, writer)
             self._task = asyncio.create_task(self._enter())
+
+    @endpoint
+    @hope_server_is_healthy
+    async def wait_pending_session(self):
+        while len(self.sessions) == 0:
+            await asyncio.sleep(1)
+
+    @endpoint
+    @hope_server_is_healthy
+    async def list(self, print_output=True) -> List[DebugSessionInfo]:
+        session_info = sorted(self.sessions.info())
+        if print_output:
+            await self._debug_io.output(
+                tabulate(
+                    (
+                        (
+                            info.actor_name,
+                            info.rank,
+                            info.coords,
+                            info.hostname,
+                            info.function,
+                            info.lineno,
+                        )
+                        for info in session_info
+                    ),
+                    headers=[
+                        "Actor Name",
+                        "Rank",
+                        "Coords",
+                        "Hostname",
+                        "Function",
+                        "Line No.",
+                    ],
+                    tablefmt="grid",
+                )
+                + "\n"
+            )
+        return session_info
 
     async def _enter(self) -> None:
         await asyncio.sleep(0.5)
@@ -658,6 +699,8 @@ class DebugController(Actor):
                     await self._cast_input_and_wait(
                         command.command, (command.actor_name, command.ranks)
                     )
+            except (DebugIOError, asyncio.CancelledError):
+                raise
             except Exception as e:
                 await self._debug_io.output(f"Error processing command: {e}\n")
 
@@ -677,6 +720,7 @@ class DebugController(Actor):
     # These endpoints are called by the remote debuggers to establish sessions
     # and communicate with them.
     @endpoint
+    @hope_server_is_healthy
     async def debugger_session_start(
         self, rank: int, coords: Dict[str, int], hostname: str, actor_name: str
     ) -> None:
@@ -685,11 +729,13 @@ class DebugController(Actor):
             self.sessions.insert(DebugSession(rank, coords, hostname, actor_name))
 
     @endpoint
+    @hope_server_is_healthy
     async def debugger_session_end(self, actor_name: str, rank: int) -> None:
         """Detach from the current debug session."""
         await self.sessions.remove(actor_name, rank).detach()
 
     @endpoint
+    @hope_server_is_healthy
     async def debugger_read(
         self, actor_name: str, rank: int, size: int
     ) -> DebuggerWrite | str:
@@ -697,56 +743,12 @@ class DebugController(Actor):
         return await self.sessions.get(actor_name, rank).debugger_read(size)
 
     @endpoint
+    @hope_server_is_healthy
     async def debugger_write(
         self, actor_name: str, rank: int, write: DebuggerWrite
     ) -> None:
         """Write to the debug session for the given rank."""
         await self.sessions.get(actor_name, rank).debugger_write(write)
-
-    @endpoint
-    async def debug_cli_output(
-        self, debug_cli_actor_id: ActorId
-    ) -> List[DebugCliMessage]:
-        if self._current_debug_cli_actor_id is None:
-            raise RuntimeError(
-                "Attempting to retrieve debugger output, but not in a debug session"
-            )
-        elif self._current_debug_cli_actor_id != debug_cli_actor_id:
-            raise RuntimeError(
-                f"Attempting to retrieve debugger output with incorrect debug_cli_actor_id: "
-                f"{debug_cli_actor_id} (actual) vs. {self._current_debug_cli_actor_id} (expected)"
-            )
-        elif not isinstance(self._debug_io, DebugCliIO):
-            raise RuntimeError(
-                "Retrieving debugger output not supported in current mode"
-            )
-        return await self._debug_io.take_output()
-
-    @endpoint
-    async def debug_cli_input(self, inp: str, debug_cli_actor_id: ActorId) -> None:
-        if self._current_debug_cli_actor_id is None:
-            raise RuntimeError(
-                "Attempting to put debugger input, but not in a debug session"
-            )
-        elif self._current_debug_cli_actor_id != debug_cli_actor_id:
-            raise RuntimeError(
-                f"Attempting to put debugger input with incorrect debug_cli_actor_id: "
-                f"{debug_cli_actor_id} (actual) vs. {self._current_debug_cli_actor_id} (expected)"
-            )
-        elif not isinstance(self._debug_io, DebugCliIO):
-            raise RuntimeError("Putting debugger input not supported in current mode")
-        await self._debug_io.put_input(inp)
-
-    def _handle_undeliverable_message(
-        self, message: UndeliverableMessageEnvelope
-    ) -> bool:
-        logging.warning(
-            "Undeliverable message returned to DebugController: %s. This likely means a previous debug session was closed.",
-            message,
-        )
-        # Return True to indicate that the message was handled and nothing more
-        # needs to be done with it.
-        return True
 
 
 # Cached so that we don't have to call out to the root client every time,

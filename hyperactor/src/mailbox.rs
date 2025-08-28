@@ -130,6 +130,7 @@ pub use undeliverable::UndeliverableMessageError;
 pub use undeliverable::custom_monitored_return_handle;
 pub use undeliverable::monitored_return_handle; // TODO: Audit
 pub use undeliverable::supervise_undeliverable_messages;
+pub use undeliverable::supervise_undeliverable_messages_with;
 /// For [`MailboxAdminMessage`], a message type for mailbox administration.
 pub mod mailbox_admin_message;
 pub use mailbox_admin_message::MailboxAdminMessage;
@@ -239,7 +240,7 @@ impl MessageEnvelope {
     }
 
     /// Deserialize the message in the envelope to the provided type T.
-    pub fn deserialized<T: DeserializeOwned>(&self) -> Result<T, anyhow::Error> {
+    pub fn deserialized<T: DeserializeOwned + Named>(&self) -> Result<T, anyhow::Error> {
         self.data.deserialized()
     }
 
@@ -698,7 +699,25 @@ impl MailboxSender for UndeliverableMailboxSender {
         envelope: MessageEnvelope,
         _return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
-        tracing::error!("message not delivered: {}", envelope);
+        let sender_name = envelope.sender.name();
+        let mut error_str = "".to_string();
+        if !envelope.errors.is_empty() {
+            error_str = envelope
+                .errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+        }
+
+        tracing::error!(
+            name = "undelivered_message",
+            actor_name = sender_name,
+            actor_id = envelope.sender.to_string(),
+            "message not delivered to {}, {}",
+            envelope.dest.actor_id().name(),
+            error_str,
+        );
     }
 }
 
@@ -804,13 +823,6 @@ impl MailboxSender for BoxedMailboxSender {
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
-        metrics::MAILBOX_POSTS.add(
-            1,
-            hyperactor_telemetry::kv_pairs!(
-                "actor_id" => envelope.sender.to_string(),
-                "dest_actor_id" => envelope.dest.0.to_string(),
-            ),
-        );
         self.0.post(envelope, return_handle);
     }
 }
@@ -1357,7 +1369,20 @@ impl MailboxSender for Mailbox {
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
-        tracing::trace!(name = "post", "posting message to {}", envelope.dest);
+        metrics::MAILBOX_POSTS.add(
+            1,
+            hyperactor_telemetry::kv_pairs!(
+                "actor_id" => envelope.sender.to_string(),
+                "dest_actor_id" => envelope.dest.0.to_string(),
+            ),
+        );
+        tracing::trace!(
+            name = "post",
+            actor_name = envelope.sender.name(),
+            actor_id = envelope.sender.to_string(),
+            "posting message to {}",
+            envelope.dest
+        );
 
         if envelope.dest().actor_id() != &self.inner.actor_id {
             return self.inner.forwarder.post(envelope, return_handle);
@@ -1975,7 +2000,12 @@ impl<M: RemoteMessage> SerializedSender for UnboundedSender<M> {
         headers: Attrs,
         serialized: Serialized,
     ) -> Result<bool, SerializedSenderError> {
-        match serialized.deserialized() {
+        // Here, the stack ensures that this port is only instantiated for M-typed messages.
+        // This does not protect against bad senders (e.g., encoding wrongly-typed messages),
+        // but it is required as we have some usages that rely on representational equivalence
+        // to provide type indexing, specifically in `IndexedErasedUnbound` which is used to
+        // support port aggregation.
+        match serialized.deserialized_unchecked() {
             Ok(message) => {
                 self.sender.send(headers.clone(), message).map_err(|err| {
                     SerializedSenderError {
@@ -2510,49 +2540,6 @@ impl MailboxSender for UnroutableMailboxSender {
             DeliveryError::Unroutable("destination not found in routing table".to_string()),
             return_handle,
         );
-    }
-}
-
-/// MailboxSender that expects messages for one actor id and
-/// posts the envelopes to the mailbox of an actor with a
-/// different actor id. Envelopes are opened and resealed with
-/// the correct destination port.
-#[derive(Debug)]
-pub struct AliasingMailboxSender {
-    /// The actor id to expect messages for
-    actor_id: ActorId,
-    /// The mailbox of the true recipient of the message
-    mailbox: Mailbox,
-}
-
-impl AliasingMailboxSender {
-    /// Create a new instance of the AliasingMailboxSender
-    pub fn new(actor_id: ActorId, mailbox: Mailbox) -> Self {
-        Self { actor_id, mailbox }
-    }
-}
-
-impl MailboxSender for AliasingMailboxSender {
-    fn post(
-        &self,
-        envelope: MessageEnvelope,
-        return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
-    ) {
-        let dest_actor_id = envelope.dest().actor_id().clone();
-        if dest_actor_id != self.actor_id {
-            envelope.undeliverable(
-                DeliveryError::Unroutable(format!(
-                    "AliasingMailboxSender expected dest actor id {}, but got {}",
-                    self.actor_id, dest_actor_id
-                )),
-                return_handle,
-            );
-        } else {
-            let (mut metadata, data) = envelope.open();
-            metadata.dest = PortId(self.mailbox.actor_id().clone(), metadata.dest.index());
-            self.mailbox
-                .post(MessageEnvelope::seal(metadata, data), return_handle);
-        }
     }
 }
 
@@ -3379,30 +3366,5 @@ mod tests {
         RealClock.sleep(Duration::from_secs(2)).await;
         let msg = receiver.try_recv().unwrap();
         assert_eq!(msg, None);
-    }
-
-    #[async_timed_test(timeout_secs = 30)]
-    async fn test_aliasing_mailbox_sender() {
-        let mailbox = Mailbox::new_detached(id!(test[0].actor));
-        let (port_handle, mut receiver) = mailbox.open_port::<u64>();
-        let dest_port_true_ref = port_handle.bind();
-        let dest_port_alias_ref = PortRef::<u64>::attest(PortId(
-            id!(test[0].alias),
-            dest_port_true_ref.port_id().index(),
-        ));
-        let aliasing_mailbox_sender =
-            AliasingMailboxSender::new(id!(test[0].alias), mailbox.clone());
-        let sending_mailbox = Mailbox::new(
-            id!(test[0].sender),
-            BoxedMailboxSender::new(aliasing_mailbox_sender),
-        );
-        let (undeliverable_handle, mut undeliverable_receiver) =
-            sending_mailbox.open_port::<Undeliverable<MessageEnvelope>>();
-        undeliverable_handle.bind_to(Undeliverable::<MessageEnvelope>::port());
-        dest_port_alias_ref.send(&sending_mailbox, 5).unwrap();
-        assert_eq!(receiver.recv().await.unwrap(), 5);
-        dest_port_true_ref.send(&sending_mailbox, 6).unwrap();
-        let message = undeliverable_receiver.recv().await.unwrap();
-        assert_eq!(message.0.open().1.deserialized::<u64>().unwrap(), 6);
     }
 }

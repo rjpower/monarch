@@ -18,7 +18,6 @@ pub mod bootstrap;
 pub mod channel;
 pub mod code_sync;
 pub mod config;
-pub mod debug;
 pub mod local_state_broker;
 pub mod logging;
 pub mod mailbox;
