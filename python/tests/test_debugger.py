@@ -48,15 +48,14 @@ needs_cuda = pytest.mark.skipif(
 )
 
 
-def _debug_ports():
+def _debug_port():
     for i in range(100):
         yield {
-            "MONARCH_DEBUG_SERVER_ADDR": f"tcp![::1]:297{i:02d}",
-            "MONARCH_DEBUG_CLI_ADDR": f"tcp![::1]:297{i+1:02d}",
+            "MONARCH_DEBUG_SERVER_PORT": f"270{i:02d}",
         }
 
 
-debug_ports = _debug_ports()
+debug_port = _debug_port()
 
 
 def isolate_in_subprocess(test_fn=None, *, env=None):
@@ -168,7 +167,7 @@ async def _wait_for_breakpoints(
 ) -> List[DebugSessionInfo]:
     breakpoints: List[DebugSessionInfo] = []
     for i in range(20):
-        breakpoints = await debug_controller.list.call_one()
+        breakpoints = await debug_controller.list.call_one(print_output=False)
         if len(breakpoints) == n_breakpoints:
             break
         await asyncio.sleep(1)
@@ -180,7 +179,7 @@ async def _wait_for_breakpoints(
 # We have to run this test in a separate process because there is only one
 # debug controller per process, and we don't want this to interfere with
 # the other two tests that access the debug controller.
-@isolate_in_subprocess(env=next(debug_ports))
+@isolate_in_subprocess(env=next(debug_port))
 @pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
@@ -277,7 +276,7 @@ async def test_debug() -> None:
         ):
             assert re.match(expected_output, real_output) is not None
 
-        breakpoints = await debug_controller.list.call_one()
+        breakpoints = await debug_controller.list.call_one(print_output=False)
         for i in range(len(breakpoints)):
             if i == 1:
                 assert breakpoints[i].function == "test_debugger.to_debug"
@@ -289,7 +288,7 @@ async def test_debug() -> None:
 
         await debug_controller.blocking_enter.call_one()
 
-        breakpoints = await debug_controller.list.call_one()
+        breakpoints = await debug_controller.list.call_one(print_output=False)
         for i in range(len(breakpoints)):
             if i == 1:
                 assert breakpoints[i].function == "test_debugger.to_debug"
@@ -306,7 +305,7 @@ async def test_debug() -> None:
 
         await debug_controller.blocking_enter.call_one()
 
-        breakpoints = await debug_controller.list.call_one()
+        breakpoints = await debug_controller.list.call_one(print_output=False)
         assert len(breakpoints) == 4
         # Expect post-mortem debugging for rank 2
         assert breakpoints[2].function == "test_debugger._bad_rank"
@@ -332,13 +331,13 @@ async def test_debug() -> None:
         ):
             assert re.match(expected_output, output) is not None
 
-        breakpoints = await debug_controller.list.call_one()
+        breakpoints = await debug_controller.list.call_one(print_output=False)
         assert len(breakpoints) == 3
         for i, rank in enumerate((0, 1, 3)):
             assert breakpoints[i].rank == rank
 
         await debug_controller.blocking_enter.call_one()
-        breakpoints = await debug_controller.list.call_one()
+        breakpoints = await debug_controller.list.call_one(print_output=False)
         assert len(breakpoints) == 0
 
         with pytest.raises(
@@ -348,7 +347,7 @@ async def test_debug() -> None:
 
 
 # See earlier comment
-@isolate_in_subprocess(env=next(debug_ports))
+@isolate_in_subprocess(env=next(debug_port))
 @pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
@@ -767,9 +766,7 @@ async def test_debug_command_parser_invalid_inputs(invalid_input):
 
 
 # See earlier comment
-@isolate_in_subprocess(
-    env={"MONARCH_DEBUG_CLI_BIN": debug_cli_bin, **next(debug_ports)}
-)
+@isolate_in_subprocess(env={"MONARCH_DEBUG_CLI_BIN": debug_cli_bin, **next(debug_port)})
 @pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
@@ -841,7 +838,7 @@ async def test_debug_cli():
     assert len(re.findall(expected_last_output, outputs)) == 2
     assert outputs[0] == outputs[1]
 
-    breakpoints = await debug_controller.list.call_one()
+    breakpoints = await debug_controller.list.call_one(print_output=False)
     for i in range(len(breakpoints)):
         if i == 1:
             assert breakpoints[i].function == "test_debugger.to_debug"
@@ -882,7 +879,7 @@ async def test_debug_cli():
     debug_cli_proc.send_signal(signal.SIGINT)
     assert await debug_cli_proc.wait() != 0
 
-    breakpoints = await debug_controller.list.call_one()
+    breakpoints = await debug_controller.list.call_one(print_output=False)
     for i in range(len(breakpoints)):
         if i == 1:
             assert breakpoints[i].function == "test_debugger.to_debug"
@@ -911,7 +908,7 @@ async def test_debug_cli():
     debug_cli_proc.send_signal(signal.SIGINT)
     assert await debug_cli_proc.wait() != 0
 
-    breakpoints = await debug_controller.list.call_one()
+    breakpoints = await debug_controller.list.call_one(print_output=False)
     assert len(breakpoints) == 4
     # Expect post-mortem debugging for rank 2
     assert breakpoints[2].function == "test_debugger._bad_rank"
@@ -940,7 +937,7 @@ async def test_debug_cli():
     await debug_cli_stdin.drain()
     assert await debug_cli_proc.wait() == 0
 
-    breakpoints = await debug_controller.list.call_one()
+    breakpoints = await debug_controller.list.call_one(print_output=False)
     assert len(breakpoints) == 3
     for i, rank in enumerate((0, 1, 3)):
         assert breakpoints[i].rank == rank
@@ -950,7 +947,7 @@ async def test_debug_cli():
     await debug_cli_stdin.drain()
     assert await debug_cli_proc.wait() == 0
 
-    breakpoints = await debug_controller.list.call_one()
+    breakpoints = await debug_controller.list.call_one(print_output=False)
     assert len(breakpoints) == 0
 
     with pytest.raises(

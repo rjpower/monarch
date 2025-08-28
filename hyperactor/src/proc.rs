@@ -786,7 +786,6 @@ impl<A: Actor> Deref for Context<'_, A> {
 /// An actor instance. This is responsible for managing a running actor, including
 /// its full lifecycle, supervision, signal management, etc. Instances can represent
 /// a managed actor or a "client" actor that has joined the proc.
-#[derive(Debug)]
 pub struct Instance<A: Actor> {
     /// The proc that owns this instance.
     proc: Proc,
@@ -947,7 +946,7 @@ impl<A: Actor> Instance<A> {
 
     /// Start an A-typed actor onto this instance with the provided params. When spawn returns,
     /// the actor has been linked with its parent, if it has one.
-    #[hyperactor::instrument]
+    #[hyperactor::instrument(fields(actor_id=self.cell.actor_id().clone().to_string(), actor_name=self.cell.actor_id().name()))]
     async fn start(self, actor: A) -> Result<ActorHandle<A>, anyhow::Error> {
         let instance_cell = self.cell.clone();
         let actor_id = self.cell.actor_id().clone();
@@ -1283,21 +1282,6 @@ impl<A: Actor> Drop for Instance<A> {
                 true
             }
         });
-    }
-}
-
-#[async_trait]
-impl<A: Actor> MailboxSender for &'static Instance<A> {
-    fn post(
-        &self,
-        envelope: MessageEnvelope,
-        return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
-    ) {
-        if envelope.dest().actor_id() == self.self_id() {
-            MailboxSender::post(&self.mailbox, envelope, return_handle);
-        } else {
-            self.proc.post(envelope, return_handle);
-        }
     }
 }
 
@@ -1715,7 +1699,6 @@ impl WeakInstanceCell {
 /// The interface memoizes the ports so that they are reused. We do not
 /// (yet) support stable identifiers across multiple instances of the same
 /// actor.
-#[derive(Debug)]
 pub struct Ports<A: Actor> {
     ports: DashMap<TypeId, Box<dyn Any + Send + Sync + 'static>>,
     bound: DashMap<u64, &'static str>,
