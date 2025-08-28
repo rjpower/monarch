@@ -19,7 +19,6 @@ mod assign;
 pub mod bootstrap;
 pub mod comm;
 pub mod connect;
-pub mod debug;
 pub mod logging;
 pub mod mesh;
 pub mod mesh_selection;
@@ -81,7 +80,7 @@ mod tests {
     use ndslice::selection::Selection;
 
     macro_rules! assert_round_trip_match {
-        ($left:expr_2021, $right:expr_2021) => {{
+        ($left:expr, $right:expr) => {{
             assert_structurally_eq!($left, $right);
             assert_round_trip!($left);
             assert_round_trip!($right);

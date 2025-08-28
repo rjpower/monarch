@@ -188,12 +188,6 @@ pub fn mod_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module,
         "monarch_hyperactor.telemetry",
     )?)?;
-
-    monarch_hyperactor::debug::register_python_bindings(&get_or_add_new_module(
-        module,
-        "monarch_hyperactor.debug",
-    )?)?;
-
     code_sync::register_python_bindings(&get_or_add_new_module(
         module,
         "monarch_extension.code_sync",
