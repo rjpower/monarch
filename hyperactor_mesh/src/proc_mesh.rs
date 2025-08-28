@@ -139,7 +139,7 @@ impl ProcMesh {
         // We wait for the full allocation to be running before returning the mesh.
         let shape = alloc.shape().clone();
 
-        let mut proc_ids = Ranks::new(shape.slice().len());
+        let mut created = Ranks::new(shape.slice().len());
         let mut running = Ranks::new(shape.slice().len());
 
         while !running.is_full() {
@@ -149,28 +149,38 @@ impl ProcMesh {
             };
 
             match state {
-                ProcState::Created { proc_id, point, .. } => {
+                ProcState::Created {
+                    create_key, point, ..
+                } => {
                     let rank = point.rank();
-                    if let Some(old_proc_id) = proc_ids.insert(rank, proc_id.clone()) {
-                        tracing::warn!("rank {rank} reassigned from {old_proc_id} to {proc_id}");
+                    if let Some(old_create_key) = created.insert(rank, create_key.clone()) {
+                        tracing::warn!(
+                            "rank {rank} reassigned from {old_create_key} to {create_key}"
+                        );
                     }
-                    tracing::info!("proc {} rank {}: created", proc_id, rank);
+                    tracing::info!("created: {} rank {}: created", create_key, rank);
                 }
                 ProcState::Running {
+                    create_key,
                     proc_id,
                     mesh_agent,
                     addr,
                 } => {
-                    let Some(rank) = proc_ids.rank(&proc_id) else {
-                        tracing::warn!("proc id {proc_id} running, but not created");
+                    let Some(rank) = created.rank(&create_key) else {
+                        tracing::warn!(
+                            "proc id {proc_id} ({}) running, but not created",
+                            create_key
+                        );
                         continue;
                     };
 
-                    if let Some((old_addr, old_mesh_agent)) =
-                        running.insert(*rank, (addr.clone(), mesh_agent.clone()))
+                    if let Some((old_proc_id, old_addr, old_mesh_agent)) =
+                        running.insert(*rank, (proc_id.clone(), addr.clone(), mesh_agent.clone()))
                     {
                         tracing::warn!(
-                            "duplicate running notifications for {proc_id}, addr:{addr}, mesh_agent:{mesh_agent}, old addr:{old_addr}, old mesh_agent:{old_mesh_agent}"
+                            "duplicate running notifications for {rank}: \
+                            old:{old_proc_id},{old_addr},{old_mesh_agent}; \
+                            new: {proc_id},{addr},{mesh_agent}"
                         )
                     }
                     tracing::info!(
@@ -208,8 +218,7 @@ impl ProcMesh {
             .map_err(|err| AllocatorError::Other(err.into()))?;
         tracing::info!("router channel started listening on addr: {router_channel_addr}");
         let router = DialMailboxRouter::new_with_default(global_router().boxed());
-        for (rank, (addr, _agent)) in running.iter().enumerate() {
-            let proc_id = proc_ids.get(rank).unwrap().clone();
+        for (_rank, (proc_id, addr, _agent)) in running.iter().enumerate() {
             router.bind(Reference::Proc(proc_id.clone()), addr.clone());
             // Work around for Allocs that have more than one world.
             world_ids.insert(
@@ -269,11 +278,11 @@ impl ProcMesh {
         // Map of procs -> channel addresses
         let address_book: HashMap<_, _> = running
             .iter()
-            .map(|(addr, agent)| (agent.actor_id().proc_id().clone(), addr.clone()))
+            .map(|(_proc_id, addr, agent)| (agent.actor_id().proc_id().clone(), addr.clone()))
             .collect();
 
         let (config_handle, mut config_receiver) = client.open_port();
-        for (rank, (_, agent)) in running.iter().enumerate() {
+        for (rank, (_, _, agent)) in running.iter().enumerate() {
             agent
                 .configure(
                     &client,
@@ -309,8 +318,10 @@ impl ProcMesh {
         // unification!
         //
         // Baffling and unsettling.
-        fn project_actor_ref(pair: &(ChannelAddr, ActorRef<MeshAgent>)) -> ActorRef<MeshAgent> {
-            pair.1.clone()
+        fn project_actor_ref(
+            pair: &(ProcId, ChannelAddr, ActorRef<MeshAgent>),
+        ) -> ActorRef<MeshAgent> {
+            pair.2.clone()
         }
 
         // Spawn a comm actor on each proc, so that they can be used
@@ -342,10 +353,9 @@ impl ProcMesh {
             }),
             actor_event_router: Arc::new(DashMap::new()),
             shape,
-            ranks: proc_ids
+            ranks: running
                 .into_iter()
-                .map(Option::unwrap)
-                .zip(running.into_iter())
+                .map(|(proc_id, addr, mesh_agent)| (proc_id, (addr, mesh_agent)))
                 .collect(),
             client_proc,
             client,
@@ -803,6 +813,7 @@ mod tests {
             .allocate(AllocSpec {
                 extent: extent!(replica = 4),
                 constraints: Default::default(),
+                proc_name: None,
             })
             .await
             .unwrap();
@@ -819,6 +830,7 @@ mod tests {
             .allocate(AllocSpec {
                 extent: extent!(replica = 4),
                 constraints: Default::default(),
+                proc_name: None,
             })
             .await
             .unwrap();
@@ -852,6 +864,7 @@ mod tests {
             .allocate(AllocSpec {
                 extent: extent!(replica = 2),
                 constraints: Default::default(),
+                proc_name: None,
             })
             .await
             .unwrap();
@@ -902,6 +915,7 @@ mod tests {
             .allocate(AllocSpec {
                 extent: extent!(replica = 1),
                 constraints: Default::default(),
+                proc_name: None,
             })
             .await
             .unwrap();
