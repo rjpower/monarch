@@ -5,10 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 # pyre-unsafe
-import asyncio
-
 from monarch._src.debug_cli import debug_cli
 
 
 if __name__ == "__main__":
-    asyncio.run(debug_cli.run())
+    debug_cli.run()

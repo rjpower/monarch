@@ -34,22 +34,21 @@ _MONARCH_DEBUG_SERVER_PROTOCOL_ENV_VAR = "MONARCH_DEBUG_SERVER_PROTOCOL"
 _MONARCH_DEBUG_SERVER_PROTOCOL_DEFAULT = "tcp"
 
 
-async def _get_debug_connection() -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    if (
-        proto := os.environ.get(
-            _MONARCH_DEBUG_SERVER_PROTOCOL_ENV_VAR,
-            _MONARCH_DEBUG_SERVER_PROTOCOL_DEFAULT,
-        )
-    ) != "tcp":
-        # TODO: Implement other protocols (in particular, TLS)
-        raise NotImplementedError(f"Network protocol {proto} not yet supported.")
-    return await asyncio.open_connection(
-        os.environ.get(
-            _MONARCH_DEBUG_SERVER_HOST_ENV_VAR, _MONARCH_DEBUG_SERVER_HOST_DEFAULT
-        ),
-        os.environ.get(
-            _MONARCH_DEBUG_SERVER_PORT_ENV_VAR, _MONARCH_DEBUG_SERVER_PORT_DEFAULT
-        ),
+def _get_debug_server_host():
+    return os.environ.get(
+        _MONARCH_DEBUG_SERVER_HOST_ENV_VAR, _MONARCH_DEBUG_SERVER_HOST_DEFAULT
+    )
+
+
+def _get_debug_server_port():
+    return os.environ.get(
+        _MONARCH_DEBUG_SERVER_PORT_ENV_VAR, _MONARCH_DEBUG_SERVER_PORT_DEFAULT
+    )
+
+
+def _get_debug_server_protocol():
+    return os.environ.get(
+        _MONARCH_DEBUG_SERVER_PROTOCOL_ENV_VAR, _MONARCH_DEBUG_SERVER_PROTOCOL_DEFAULT
     )
 
 
@@ -87,35 +86,28 @@ class DebugCliIO(DebugIO):
         self._writer = writer
 
     async def input(self, prompt: str = "") -> str:
-        await self._write(b"i", prompt.encode())
-        msg_len = int.from_bytes(await self._read(4), "big")
-        message = (await self._read(msg_len)).decode()
-        return message
+        try:
+            await self.output(prompt)
+            msg = (await self._reader.readline()).decode()
+            # Incomplete read due to EOF
+            if not msg.endswith("\n"):
+                raise RuntimeError("Unexpected end of input.")
+            # Strip the newline to be consistent with the behavior of input()
+            return msg.strip("\n")
+        except Exception as e:
+            raise DebugIOError() from e
 
     async def output(self, msg: str) -> None:
-        await self._write(b"o", msg.encode())
-
-    async def quit(self) -> None:
-        await self._write(b"q", b"")
-
-    async def _write(self, cmd: bytes, msg: bytes):
         try:
-            assert len(cmd) == 1
-            self._writer.write(cmd)
-            self._writer.write(len(msg).to_bytes(4, "big"))
-            self._writer.write(msg)
+            self._writer.write(msg.encode())
             await self._writer.drain()
         except Exception as e:
-            raise DebugIOError from e
+            raise DebugIOError() from e
 
-    async def _read(self, n: int):
-        try:
-            msg = await self._reader.read(n)
-            if len(msg) < n:
-                raise asyncio.IncompleteReadError(msg, n)
-        except Exception as e:
-            raise DebugIOError from e
-        return msg
+    async def quit(self) -> None:
+        await self.output("Quitting debug session...\n")
+        self._writer.close()
+        await self._writer.wait_closed()
 
 
 @dataclass
@@ -189,7 +181,7 @@ class DebugSession:
                         break_after = True
                     else:
                         line = await debug_io.input()
-                    if line.strip("\n") == "detach":
+                    if line == "detach":
                         self._need_read = True
                         break
                     else:
@@ -565,25 +557,14 @@ class DebugController(Actor):
 
     async def _serve(self) -> None:
         try:
-            if (
-                proto := os.environ.get(
-                    _MONARCH_DEBUG_SERVER_PROTOCOL_ENV_VAR,
-                    _MONARCH_DEBUG_SERVER_PROTOCOL_DEFAULT,
-                )
-            ) != "tcp":
+            if (proto := _get_debug_server_protocol()) != "tcp":
                 raise NotImplementedError(
                     f"Network protocol {proto} not yet supported."
                 )
             server = await asyncio.start_server(
                 self._handle_client,
-                os.environ.get(
-                    _MONARCH_DEBUG_SERVER_HOST_ENV_VAR,
-                    _MONARCH_DEBUG_SERVER_HOST_DEFAULT,
-                ),
-                os.environ.get(
-                    _MONARCH_DEBUG_SERVER_PORT_ENV_VAR,
-                    _MONARCH_DEBUG_SERVER_PORT_DEFAULT,
-                ),
+                _get_debug_server_host(),
+                _get_debug_server_port(),
             )
             async with server:
                 self._server_started.set()

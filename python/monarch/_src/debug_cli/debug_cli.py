@@ -5,28 +5,26 @@
 # LICENSE file in the root directory of this source tree.
 
 # pyre-unsafe
-import sys
+import argparse
+import subprocess
 
-from monarch._src.actor.debugger import _get_debug_connection
+from monarch._src.actor.debugger import _get_debug_server_host, _get_debug_server_port
 
 
-async def run():
-    reader, writer = await _get_debug_connection()
+def run():
+    parser = argparse.ArgumentParser(description="Monarch Debug CLI")
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=_get_debug_server_host(),
+        help="Hostname where the debug server is running",
+    )
+    parser.add_argument(
+        "--port",
+        type=str,
+        default=_get_debug_server_port(),
+        help="Port that the debug server is listening on",
+    )
+    args = parser.parse_args()
 
-    while True:
-        cmd = (await reader.read(1)).decode()
-        msg_len = int.from_bytes(await reader.read(4), "big")
-        message = (await reader.read(msg_len)).decode()
-        match cmd:
-            case "o":
-                sys.stdout.write(message)
-                sys.stdout.flush()
-            case "i":
-                inp = input(message).encode()
-                writer.write(len(inp).to_bytes(4, "big"))
-                writer.write(inp)
-                await writer.drain()
-            case "q":
-                writer.close()
-                await writer.wait_closed()
-                sys.exit(0)
+    subprocess.run(["nc", f"{args.host}", f"{args.port}"], check=True)

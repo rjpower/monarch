@@ -848,6 +848,8 @@ async def test_debug_cli():
 
     debug_cli_stdin.write(b"quit\n")
     await debug_cli_stdin.drain()
+    debug_cli_stdin.close()
+    await debug_cli_stdin.wait_closed()
     assert await debug_cli_proc.wait() == 0
 
     (
@@ -935,6 +937,8 @@ async def test_debug_cli():
 
     debug_cli_stdin.writelines([b"quit\n"])
     await debug_cli_stdin.drain()
+    debug_cli_stdin.close()
+    await debug_cli_stdin.wait_closed()
     assert await debug_cli_proc.wait() == 0
 
     breakpoints = await debug_controller.list.call_one(print_output=False)
@@ -945,6 +949,8 @@ async def test_debug_cli():
     debug_cli_proc, debug_cli_stdin, _ = await create_debug_cli_proc()
     debug_cli_stdin.writelines([b"continue\n", b"quit\n"])
     await debug_cli_stdin.drain()
+    debug_cli_stdin.close()
+    await debug_cli_stdin.wait_closed()
     assert await debug_cli_proc.wait() == 0
 
     breakpoints = await debug_controller.list.call_one(print_output=False)
