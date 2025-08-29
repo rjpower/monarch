@@ -1368,7 +1368,7 @@ class IsInit(Actor):
     def is_cuda_initialized(self) -> bool:
         import ctypes
 
-        cuda = ctypes.CDLL("libcuda.so")
+        cuda = ctypes.CDLL("libcuda.so.1")
         CUresult = ctypes.c_int
         cuDeviceGetCount = cuda.cuDeviceGetCount
         cuDeviceGetCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
