@@ -56,12 +56,14 @@ libc = "0.2.139"
 mockall = "0.13.1"
 ndslice = { version = "0.0.0", path = "../ndslice" }
 nix = { version = "0.30.1", features = ["dir", "event", "hostname", "inotify", "ioctl", "mman", "mount", "net", "poll", "ptrace", "reboot", "resource", "sched", "signal", "term", "time", "user", "zerocopy"] }
+opentelemetry = "0.29"
 pin-project = "1.1.10"
 preempt_rwlock = { version = "0.0.0", path = "../preempt_rwlock" }
 rand = { version = "0.8", features = ["small_rng"] }
 serde = { version = "1.0.219", features = ["derive", "rc"] }
 serde_bytes = "0.11"
 serde_json = { version = "1.0.140", features = ["alloc", "float_roundtrip", "raw_value", "unbounded_depth"] }
+strum = { version = "0.27.1", features = ["derive"] }
 thiserror = "2.0.12"
 tokio = { version = "1.47.1", features = ["full", "test-util", "tracing"] }
 tokio-stream = { version = "0.1.17", features = ["fs", "io-util", "net", "signal", "sync", "time"] }

@@ -59,7 +59,6 @@ use crate::proc::PyProc;
 use crate::proc::PySerialized;
 use crate::pytokio::PythonTask;
 use crate::runtime::signal_safe_block_on;
-use crate::shape::PyShape;
 
 #[pyclass(frozen, module = "monarch._rust_bindings.monarch_hyperactor.actor")]
 #[derive(Serialize, Deserialize, Named)]
@@ -652,7 +651,7 @@ impl Handler<HandlePanic> for PythonActorPanicWatcher {
                 return Err(err.into());
             }
             None => {
-                tracing::warn!("panic forwarding channel was closed unexpectidly")
+                tracing::warn!("panic forwarding channel was closed unexpectedly")
             }
         }
         Ok(())
