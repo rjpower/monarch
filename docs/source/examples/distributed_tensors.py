@@ -77,8 +77,8 @@ try:
         big_w = torch.rand(4, 1024 * 1024 * 1024 * 1024 * 8, device="cuda")
         v = t @ big_w
         monarch.show(v)
-        del big_w
-except Exception as e:
+
+except Exception:
     import traceback
 
     traceback.print_exc()
