@@ -8,7 +8,10 @@
 import argparse
 import subprocess
 
-from monarch._src.actor.debugger import _get_debug_server_host, _get_debug_server_port
+from monarch._src.actor.debugger.debugger import (
+    _get_debug_server_host,
+    _get_debug_server_port,
+)
 
 
 def run():
