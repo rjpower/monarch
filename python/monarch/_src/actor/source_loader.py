@@ -6,11 +6,11 @@
 
 # pyre-unsafe
 import functools
+import importlib
 import importlib.abc
 import linecache
-import os
 
-from monarch._src.actor.actor_mesh import Actor
+from monarch._src.actor.actor_mesh import _context, Actor
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.proc_mesh import get_or_spawn_controller
 from monarch._src.actor.sync_state import fake_sync_state
@@ -39,7 +39,7 @@ class RemoteImportLoader(importlib.abc.Loader):
         self._filename = filename
 
     def get_source(self, _module_name: str) -> str:
-        if os.path.exists(self._filename):
-            with open(self._filename, "r") as f:
-                return f.read()
-        return load_remote_source(self._filename)
+        if _context.get(None) is not None:
+            return load_remote_source(self._filename)
+        else:
+            raise ImportError(f"could not get source for {self._filename}")

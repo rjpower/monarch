@@ -25,7 +25,7 @@ _orig_function_getstate = cloudpickle.cloudpickle._function_getstate
 # To ensure that the debugger and tracebacks work on remote hosts
 # running code that was pickled by value, we need to monkeypatch
 # cloudpickle to set the `__loader__` attribute inside `__globals__`
-# for the unpickled function. That way, when the rmeote host tries
+# for the unpickled function. That way, when the remote host tries
 # to load the source code for the function, it will use the RemoteImportLoader
 # to retrieve the source code from the root client, where it *ostensibly*
 # exists.
