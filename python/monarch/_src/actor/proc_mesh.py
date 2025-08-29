@@ -46,7 +46,6 @@ from monarch._rust_bindings.monarch_hyperactor.proc_mesh import (
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape, Slice
 from monarch._src.actor.actor_mesh import _Actor, Actor, ActorMesh, context
-
 from monarch._src.actor.allocator import (
     AllocateMixin,
     AllocHandle,
@@ -68,22 +67,25 @@ from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import DeprecatedNotAFuture, Future
 from monarch._src.actor.logging import LoggingManager
 from monarch._src.actor.shape import MeshTrait
-from monarch.tools.config import Workspace
+from monarch.tools.config.environment import CondaEnvironment
+from monarch.tools.config.workspace import Workspace
 from monarch.tools.utils import conda as conda_utils
 
 
-HAS_TENSOR_ENGINE = False
-try:
-    # Torch is needed for tensor engine
-    import torch  # @manual
+@cache
+def _has_tensor_engine() -> bool:
+    try:
+        # Torch is needed for tensor engine
+        import torch  # @manual
 
-    # Confirm that rust bindings were built with tensor engine enabled
-    from monarch._rust_bindings.rdma import _RdmaManager  # noqa
+        # Confirm that rust bindings were built with tensor engine enabled
+        from monarch._rust_bindings.rdma import _RdmaManager  # noqa
 
-    # type: ignore[16]
-    HAS_TENSOR_ENGINE = torch.cuda.is_available()
-except ImportError:
-    logging.warning("Tensor engine is not available on this platform")
+        # type: ignore[16]
+        return torch.cuda.is_available()
+    except ImportError:
+        logging.warning("Tensor engine is not available on this platform")
+        return False
 
 
 if TYPE_CHECKING:
@@ -320,7 +322,9 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
 
         pm = ProcMesh(hy_proc_mesh, shape)
         if _attach_controller_controller:
-            pm._controller_controller = context().actor_instance._controller_controller
+            instance = context().actor_instance
+            pm._controller_controller = instance._controller_controller
+            instance._add_child(pm)
 
         async def task(
             pm: "ProcMesh",
@@ -362,6 +366,9 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
     ) -> T:
         return self._spawn_nonblocking_on(self._proc_mesh, name, Class, *args, **kwargs)
 
+    def to_table(self) -> str:
+        return self._device_mesh.to_table()
+
     def _spawn_nonblocking_on(
         self,
         pm: "Shared[HyProcMesh]",
@@ -376,21 +383,23 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
             )
 
         actor_mesh = HyProcMesh.spawn_async(pm, name, _Actor, _use_standin_mesh())
+        instance = context().actor_instance
         service = ActorMesh._create(
             Class,
             actor_mesh,
-            context().actor_instance._mailbox,
+            instance._mailbox,
             self._shape,
             self,
             self._controller_controller,
             *args,
             **kwargs,
         )
+        instance._add_child(service)
         return cast(T, service)
 
     @property
     def _device_mesh(self) -> "DeviceMesh":
-        if not HAS_TENSOR_ENGINE:
+        if not _has_tensor_engine():
             raise RuntimeError(
                 "DeviceMesh is not available because tensor_engine was not compiled (USE_TENSOR_ENGINE=0)"
             )
@@ -419,7 +428,7 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
 
     async def sync_workspace(
         self,
-        workspace: Workspace = None,
+        workspace: Workspace,
         conda: bool = False,
         auto_reload: bool = False,
     ) -> None:
@@ -435,12 +444,15 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
         assert set(self._shape.labels).issubset({"gpus", "hosts"})
 
         workspaces = []
-        if workspace is not None:
+        for src_dir, dst_dir in workspace.dirs.items():
             workspaces.append(
                 WorkspaceConfig(
-                    local=Path(workspace),
+                    local=Path(src_dir),
                     remote=RemoteWorkspace(
-                        location=WorkspaceLocation.FromEnvVar("WORKSPACE_DIR"),
+                        location=WorkspaceLocation.FromEnvVar(
+                            env="WORKSPACE_DIR",
+                            relpath=dst_dir,
+                        ),
                         shape=WorkspaceShape.shared("gpus"),
                     ),
                     method=CodeSyncMethod.Rsync,
@@ -449,6 +461,9 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
 
         # If `conda` is set, also sync the currently activated conda env.
         conda_prefix = conda_utils.active_env_dir()
+        if isinstance(workspace.env, CondaEnvironment):
+            conda_prefix = workspace.env._conda_prefix
+
         if conda and conda_prefix is not None:
             conda_prefix = Path(conda_prefix)
 
@@ -460,7 +475,10 @@ class ProcMesh(MeshTrait, DeprecatedNotAFuture):
                 WorkspaceConfig(
                     local=conda_prefix,
                     remote=RemoteWorkspace(
-                        location=WorkspaceLocation.FromEnvVar("CONDA_PREFIX"),
+                        location=WorkspaceLocation.FromEnvVar(
+                            env="CONDA_PREFIX",
+                            relpath="",
+                        ),
                         shape=WorkspaceShape.shared("gpus"),
                     ),
                     method=CodeSyncMethod.CondaSync,
@@ -637,7 +655,7 @@ def proc_mesh(
     setup: Callable[[], None] | None = None,
 ) -> ProcMesh:
     warnings.warn(
-        "use this_host().spawn_proc(per_host = {'hosts': 2, 'gpus': 3}) instead of monarch.actor.proc_mesh(hosts=2, gpus=3)",
+        "use this_host().spawn_procs(per_host = {'hosts': 2, 'gpus': 3}) instead of monarch.actor.proc_mesh(hosts=2, gpus=3)",
         DeprecationWarning,
         stacklevel=2,
     )

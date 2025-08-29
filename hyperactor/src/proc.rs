@@ -448,6 +448,7 @@ impl Proc {
 
     /// Spawn a named (root) actor on this proc. The name of the actor must be
     /// unique.
+    #[hyperactor::observe("proc")]
     pub async fn spawn<A: Actor>(
         &self,
         name: &str,
@@ -639,7 +640,7 @@ impl Proc {
     }
 
     /// Create a root allocation in the proc.
-    #[hyperactor::instrument]
+    #[hyperactor::instrument(fields(actor_name=name))]
     fn allocate_root_id(&self, name: &str) -> Result<ActorId, anyhow::Error> {
         let name = name.to_string();
         match self.state().roots.entry(name.to_string()) {
@@ -654,6 +655,7 @@ impl Proc {
     }
 
     /// Create a child allocation in the proc.
+    #[hyperactor::instrument(fields(actor_name=parent_id.name()))]
     pub(crate) fn allocate_child_id(&self, parent_id: &ActorId) -> Result<ActorId, anyhow::Error> {
         assert_eq!(*parent_id.proc_id(), self.state().proc_id);
         let pid = match self.state().roots.get(parent_id.name()) {
@@ -832,7 +834,8 @@ impl<A: Actor> Instance<A> {
             None => ActorType::Anonymous(std::any::type_name::<A>()),
         };
         let ais = actor_id.to_string();
-
+        let aid = actor_id.clone();
+        let actor_name = aid.name();
         let actor_loop_ports = if detached {
             None
         } else {
@@ -868,6 +871,7 @@ impl<A: Actor> Instance<A> {
             status_span: Mutex::new(tracing::debug_span!(
                 "actor_status",
                 actor_id = ais,
+                actor_name = actor_name,
                 name = "created"
             )),
             _last_status_change: Arc::new(start),
@@ -877,14 +881,7 @@ impl<A: Actor> Instance<A> {
     /// Notify subscribers of a change in the actors status and bump counters with the duration which
     /// the last status was active for.
     fn change_status(&self, new: ActorStatus) {
-        // let old = self.status_tx.send_replace(new.clone());
         self.status_tx.send_replace(new.clone());
-        let actor_id_str = self.self_id().to_string();
-        *self.status_span.lock().expect("can't change") = tracing::debug_span!(
-            "actor_status",
-            actor_id = actor_id_str,
-            name = new.arm().unwrap_or_default()
-        );
     }
 
     /// This instance's actor ID.
@@ -942,7 +939,7 @@ impl<A: Actor> Instance<A> {
 
     /// Start an A-typed actor onto this instance with the provided params. When spawn returns,
     /// the actor has been linked with its parent, if it has one.
-    #[hyperactor::instrument]
+    #[hyperactor::instrument(fields(actor_id=self.cell.actor_id().clone().to_string(), actor_name=self.cell.actor_id().name()))]
     async fn start(self, actor: A) -> Result<ActorHandle<A>, anyhow::Error> {
         let instance_cell = self.cell.clone();
         let actor_id = self.cell.actor_id().clone();
@@ -1613,6 +1610,7 @@ impl InstanceCell {
     }
 
     /// Get parent instance cell, if it exists.
+    #[allow(dead_code)]
     fn get_parent_cell(&self) -> Option<InstanceCell> {
         self.inner.parent.upgrade()
     }

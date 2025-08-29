@@ -29,7 +29,7 @@ Here are some suggested steps to get started with Monarch:
 
 1. **Learn the Basics**: Check out the [Getting Started](get_started) guide to learn the basics of Monarch
 2. **Explore Examples**: Review the [Examples](./generated/examples/index) to see Monarch in action
-3. **Dive Deeper**: Explore the API Documentation(rust-api) for more detailed information:
+3. **Dive Deeper**: Explore the API Documentation for more detailed information:
     - [Python API](api/index)
     - [Rust API](rust-api)
 
@@ -48,13 +48,13 @@ rust-api
 
 ## License
 
-Monarch is BSD-3 licensed, as found in the [LICENSE](https://github.com/pytorch-labs/monarch/blob/main/LICENSE) file.
+Monarch is BSD-3 licensed, as found in the [LICENSE](https://github.com/meta-pytorch/monarch/blob/main/LICENSE) file.
 
 ## Community
 
 We welcome contributions from the community! If you're interested in contributing, please:
 
-1. Check the [GitHub repository](https://github.com/pytorch-labs/monarch)
+1. Check the [GitHub repository](https://github.com/meta-pytorch/monarch)
 2. Review existing issues or create a new one
 3. Discuss your proposed changes before starting work
 4. Submit a pull request with your changes
