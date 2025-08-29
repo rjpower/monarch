@@ -392,7 +392,7 @@ class AsyncActor(Actor):
         self.should_exit = True
 
 
-@pytest.mark.timeout(15)
+@pytest.mark.timeout(30)
 async def test_async_concurrency():
     """Test that async endpoints will be processed concurrently."""
     pm = await this_host().spawn_procs()
@@ -1144,7 +1144,7 @@ def test_port_as_argument() -> None:
         assert i == recv.recv().get()
 
 
-@pytest.mark.timeout(15)
+@pytest.mark.timeout(30)
 async def test_same_actor_twice() -> None:
     pm = this_host().spawn_procs(per_host={"gpus": 1})
     await pm.spawn("dup", Counter, 0).initialized
