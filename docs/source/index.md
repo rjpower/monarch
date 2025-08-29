@@ -45,7 +45,7 @@ Note: Monarch is currently only supported on Linux systems
 Here are some suggested steps to get started with Monarch:
 
 1. **Installation**: Check out the [Install guide](installation) for getting monarch installed.
-2. **Getting Started**: The [getting started](getting_started) provides an introduction to monarchs core API
+2. **Getting Started**: The [getting started](./generated/examples/getting_started) provides an introduction to monarchs core API
 2. **Explore Examples**: Review the [Examples](./generated/examples/index) to see Monarch in action
 3. **Dive Deeper**: Explore the API Documentation for more detailed information:
     - [Python API](api/index)

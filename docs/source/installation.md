@@ -66,7 +66,7 @@ pytest python/tests/ -v -m "not oss_skip"
 
 Now that you've got the basics, you can:
 
-1. Read the [getting started](getting_started) guide to understand the core concepts.
+1. Read the [getting started](./generated/examples/getting_started) guide to understand the core concepts.
 1. Check out the [Examples](./generated/examples/index) directory for more detailed demonstrations
 2. Explore the [API documentation](python-api) for a complete reference
 

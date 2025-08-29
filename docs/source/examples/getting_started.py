@@ -43,6 +43,7 @@ class Counter(Actor):
         return self.value
 
 
+# %%
 # The decorator `endpoint` specifies functions of the Actor that can be called remotely
 # from other actors. We do it this way to ensure that IDE can offer autocompletions of
 # actor calls with correct types.
@@ -54,7 +55,8 @@ class Counter(Actor):
 
 counter: Counter = this_proc().spawn("counter", Counter, initial_value=0)
 
-# `this_proc()` is a handle to a process and lets us directly control where an actor runs.
+# %%
+# ``this_proc()`` is a handle to a process and lets us directly control where an actor runs.
 # Monarch is very literal about where things run so that code can be written in the most
 # efficient way. For instance, two actors in the same proc can rely on the fact that they
 # have the same memory space. Two actors on the same host can communicate through /dev/shm, etc.
@@ -71,12 +73,13 @@ value: int = fut.get()
 
 print(f"Counter value: {value}")
 
+# %%
 # Here we invoked the get_value message, returning 0, the current value of the Counter.
-# We refer to the `call_one` method as an 'adverb' because it modifies how results of the
-# endpoint are handled. `call_one` just invokes a single actor and gets its value.
+# We refer to the ``call_one`` method as an 'adverb' because it modifies how results of the
+# endpoint are handled. ``call_one`` just invokes a single actor and gets its value.
 #
 # Notice the return value is a Future[int] -- the message is sent asynchronously, letting
-# the sender do other things before it needs the reply. `get()` waits on the result.
+# the sender do other things before it needs the reply. ``get()`` waits on the result.
 
 # %%
 # Multiple Actors at Once
@@ -93,6 +96,7 @@ print(f"Counter value: {value}")
 
 from monarch.actor import ProcMesh, this_host
 
+# %%
 # To create a mesh of actors, we first create a mesh of processes, and spawn an actor on them:
 procs: ProcMesh = this_host().spawn_procs(per_host={"gpus": 8})
 counters: Counter = procs.spawn("counters", Counter, 0)
@@ -104,7 +108,9 @@ counters: Counter = procs.spawn("counters", Counter, 0)
 
 counters.increment.broadcast()
 
-# The `broadcast` adverb means that we are sending a message to all members of the mesh,
+
+# %%
+# The ``broadcast`` adverb means that we are sending a message to all members of the mesh,
 # and then not waiting for any response.
 
 # %%
@@ -114,12 +120,16 @@ counters.increment.broadcast()
 
 counters.slice(gpus=slice(0, 4)).increment.broadcast()
 
-# The `call` adverb lets us broadcast a message to a group of actors, and then aggregate
+
+# %%
+# The ``call`` adverb lets us broadcast a message to a group of actors, and then aggregate
 # their responses back:
 print(counters.get_value.call().get())
 
-# `broadcast` and `call` are the most commonly used adverbs. The `call_one` adverb we used
-# earlier is actually just a special case of `call`, asserting that you know there is only
+
+# %%
+# ``broadcast`` and ``call`` are the most commonly used adverbs. The ``call_one`` adverb we used
+# earlier is actually just a special case of ``call``, asserting that you know there is only
 # a single actor being messaged.
 
 # %%
@@ -132,11 +142,15 @@ print(counters.get_value.call().get())
 
 from monarch.actor import context, HostMesh, hosts_from_config
 
+
+# %%
 # We obtain the mesh of hosts for the job by loading that config:
+
 hosts: HostMesh = hosts_from_config("MONARCH_HOSTS")  # NYI: hosts_from_config
 print(hosts.extent)
 
 
+# %%
 # Let's imagine we are writing a trainer across multiple hosts:
 class Trainer(Actor):
     @endpoint
@@ -148,10 +162,13 @@ class Trainer(Actor):
 trainer_procs: ProcMesh = hosts.spawn_procs(per_host={"gpus": 4})
 print(f"Process mesh extent: {trainer_procs.extent}")
 
+
+# %%
 # Spawn the trainers
 
 trainers = trainer_procs.spawn("trainer", Trainer)
 
+# %%
 # Do one training step and wait for all to finish it
 
 print(trainers.step.call().get())
@@ -211,7 +228,9 @@ class Errorful(Actor):
         raise Exception("I don't want to")
 
 
+# %%
 # If we are calling the endpoint and expecting a response, the error will get routed to the caller:
+
 e = this_proc().spawn("errorful", Errorful)
 try:
     e.say_hello.call_one().get()
@@ -226,6 +245,8 @@ except Exception:
 if False:
     e.say_hello.broadcast()  # do not expect a response NYI: supervision is buggy here and doesn't kill the process!
 
+
+# %%
 # The default behavior of the supervision tree means that an error at any level of process
 # or actor creation will not go unreported. This can prevent a lot of accidental deadlocks
 # compared to the standard unix-style defaults where threads and processes exiting do not
@@ -242,7 +263,7 @@ if False:
 
 class SupervisedActor(Actor):
     def __supervise__(self, event):
-        # NYI: specific supervise protocol is not specced out or implemented.
+        # NYI: specific supervise protocol is not spec'd out or implemented.
         print(f"Supervision event received: {event}")
         # Logic to handle supervision events and potentially restart failed actors
 
@@ -256,7 +277,7 @@ class SupervisedActor(Actor):
 # in your system, then explicitly transfer the actual data only when and where you need it.
 # This approach lets you design your service's coordination patterns based on your application
 # logic rather than being constrained by when the framework forces data transfers.
-
+#
 # RDMA transfers use libibverbs to transfer data over infiniband or RoCE.
 # Unlike traditional NCCL collectives where a send must be matched to a receive,
 # once an actor has a handle to a buffer, it read or write to the buffer without the owner of the buffer.
@@ -300,6 +321,8 @@ worker = worker_proc.spawn("worker", Worker)
 
 worker.sync_weights.call_one(server).get()
 
+
+# %%
 # RDMABuffers are intentionally low-level: they do just the data movement when requested. It is up
 # to the caller to ensure that the data is not modified until the movement is complete. We intend to
 # build higher-level libraries for transferring tensors or implementing collective operations
@@ -320,8 +343,9 @@ with trainer_procs.activate():
     t = torch.rand(3, 4)
 print(t)
 
-# The tensor `t` is now a distributed tensor with a unique value across each process in the mesh.
 
+# %%
+# The tensor `t` is now a distributed tensor with a unique value across each process in the mesh.
 # we can examine the values on each proc using built in functions:
 
 from monarch import fetch_shard
@@ -329,6 +353,8 @@ from monarch import fetch_shard
 print("one", fetch_shard(t, hosts=0, gpus=0).get())
 print("two", fetch_shard(t, hosts=0, gpus=1).get())
 
+
+# %%
 # and compute with the tensors using any torch function:
 
 with trainer_procs.activate():
@@ -337,6 +363,7 @@ with trainer_procs.activate():
 print("dist", fetch_shard(dist_compute, hosts=0, gpus=0).get())
 
 
+# %%
 # A distributed tensor can be passed to any mesh of actors that is located on the same mesh
 # of processes as the tensors. Each actor will receive the shard of the distributed tensor
 # that is on the same process as the actor:
@@ -344,6 +371,7 @@ print("dist", fetch_shard(dist_compute, hosts=0, gpus=0).get())
 print(dtrainers.step.call(dist_compute[0]).get())
 
 
+# %%
 # And actors themselves can define their own distributed tensors with the `rref` adverb:
 
 
@@ -360,9 +388,11 @@ linear = trainer_procs.spawn("linear", LinearActor)
 
 o = torch.relu(linear.forward.rref(t))
 
-# The `rref` adverb invokes the endpoint and then makes the output of the endpoint into a distributed tensor that can be used in
-# further distributed computation.
 
+# %%
+# The ``rref`` adverb invokes the endpoint and then makes the output of the endpoint into a distributed tensor that can be used in
+# further distributed computation.
+#
 # Distributed tensors also include ways of doing reductions and gathers across shards and moving tensors between processes.
 # See the guide for distributed tensors for more information including reductions across shards and moving tensors between processes.
 # We eventually want it to be possible for an entirely training framework to be written in terms of distributed tensors.
@@ -382,7 +412,7 @@ o = torch.relu(linear.forward.rref(t))
 #
 # This foundation enables building sophisticated multi-machine training programs with
 # clear semantics for distribution, fault tolerance, and communication patterns.
-
+#
 # The remaining sections fill in more details about how to accomplish common patterns
 # with the above features.
 
@@ -409,9 +439,13 @@ class ContextAwareActor(Actor):
 c = trainer_procs.spawn("context_actor", ContextAwareActor)
 print(c.get_context_info.call().get())
 
+
+# %%
 # ranks are always multidimension and reported as dictionaries of the dimension names
 # and the point within that dimension.
 
+
+# %%
 # Free Remote Functions
 # ====================
 # It is possible to run functions on a process mesh that are not associated with any actor.
@@ -438,22 +472,23 @@ with trainer_procs.activate():
 # or forward the handling of some messages from one actor to another.
 # To enable this, all messaging in monarch is build out of port objects.
 
-
+# %%
 # An actor can create a new channel, which provides a Port for sending and
 # a PortReceiver for receiving messages. The Port object can then be send
 # to any endpoint.
 
 from monarch.actor import Channel, Port
 
-port, recv = Channel[int].open()
+port, recv = Channel.open()
 
 port.send(3)
 print(recv.recv().get())
 
 
+# %%
 # Ports can be passed as arguments to actors and send a response
 # remotely. We can also directly ask an endpoint to send its response to a port using
-# the  `send` messaging primitive.
+# the  ``send`` messaging primitive.
 
 from monarch.actor import send
 
@@ -461,13 +496,15 @@ with trainer_procs.activate():
     send(check_memory, args=(), kwargs={}, port=port)
 
 
+# %%
 # The port will receive a response from each actor send the message:
 
 for _ in range(4):
     print(recv.recv().get())
 
 
-# The other adverbs like `call`, `stream`, and `broadcast` are just
+# %%
+# The other adverbs like ``call``, ``stream``, and ``broadcast`` are just
 # implemented in terms of ports and send.
 
 
@@ -480,10 +517,10 @@ for _ in range(4):
 # Messages in monarch are sent to a mesh of multiple actor instances at once. For
 # the purpose of message ordering, this bulk send behaves as if it send each message
 # individually to each destination.
-
+#
 # Each actor handles its messages sequentially. It must finish the handling of a message
 # before the next message on the actor is called.
-
+#
 # Different actors in the same process handle messages concurrently.
 
 # %%
@@ -492,9 +529,9 @@ for _ in range(4):
 # Messages to actors are delivered in order, but sometimes an actor might want to
 # repond to later messages first. The normal way of defining an endpoint does not
 # allow for this since it must return the response before future messages are delivered.
-
+#
 # Instead, an endpoint can request an explicit port object on which to deliver a reponse.
-
+#
 # Here is an example of an inference engine
 # where we use an explicit reponse port for the `infer` endpoint
 # so that we can make sure that we always use the most recent version of the weights
