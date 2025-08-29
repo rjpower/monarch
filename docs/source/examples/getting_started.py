@@ -60,6 +60,8 @@ counter: Counter = this_proc().spawn("counter", Counter, initial_value=0)
 # Monarch is very literal about where things run so that code can be written in the most
 # efficient way. For instance, two actors in the same proc can rely on the fact that they
 # have the same memory space. Two actors on the same host can communicate through /dev/shm, etc.
+# Note that passing messages between two actors (even if they are on the same proc) currently
+# always implies serialization.
 
 # %%
 # Sending A Simple Message
@@ -80,6 +82,7 @@ print(f"Counter value: {value}")
 #
 # Notice the return value is a Future[int] -- the message is sent asynchronously, letting
 # the sender do other things before it needs the reply. ``get()`` waits on the result.
+# Futures can also be awaited if you are in an asyncio context.
 
 # %%
 # Multiple Actors at Once
@@ -110,8 +113,10 @@ counters.increment.broadcast()
 
 
 # %%
-# The ``broadcast`` adverb means that we are sending a message to all members of the mesh,
-# and then not waiting for any response.
+# The `broadcast` adverb means that we are sending a message to all members of the mesh.
+# `broadcast` is inherently asynchronous: it does not return a future that you can wait on.
+# Note however that all messages (including broadcasts) are delivered in the order sent by
+# the client (about which more later).
 
 # %%
 # Slicing Meshes
@@ -148,6 +153,9 @@ from monarch.actor import context, HostMesh, hosts_from_config
 
 hosts: HostMesh = hosts_from_config("MONARCH_HOSTS")  # NYI: hosts_from_config
 print(hosts.extent)
+
+# An extent is the logical shape of a mesh. It is an ordered map, specifying the size of
+# each dimension in the mesh.
 
 
 # %%
@@ -258,10 +266,10 @@ if False:
 # Sometimes fine-grained recovery is possible. For instance, if a data loader failed to
 # read a URL, perhaps it would work to just restart it. In these cases, we also offer a
 # different API. If an actor defines a `__supervise__` special method, then it will get
-# called in response to any supervision event.
+# called to handle supervision events for meshes owned by the actor.
 
 
-class SupervisedActor(Actor):
+class SupervisorActor(Actor):
     def __supervise__(self, event):
         # NYI: specific supervise protocol is not spec'd out or implemented.
         print(f"Supervision event received: {event}")
@@ -379,6 +387,11 @@ class LinearActor(Actor):
     def __init__(self):
         self.w = torch.rand(3, 3)
 
+    # The propagation function is like a type signature: it computes the
+    # shape of the output, given an input of a particular shape. It is used
+    # by the tensor engine to correctly create the (local) returned distributed
+    # tensor references; this way local references can be created and used
+    # immediately, without needing to synchronize the calls with the actors.
     @endpoint(propagate=lambda x: x)
     def forward(self, input):
         return input @ self.w
@@ -511,7 +524,7 @@ for _ in range(4):
 # %%
 # Message Ordering
 # ======================
-# Messages are delivered to an actor in order in which they are sent.
+# Messages from an actor are delivered to the destination actor in order in which they are sent.
 # In particular, if actor A sends a message M0 to actor B, and then
 # later A sends another message M1 to B, then actor B will receive M0 before M1.
 # Messages in monarch are sent to a mesh of multiple actor instances at once. For
