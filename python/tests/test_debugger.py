@@ -26,6 +26,8 @@ import pytest
 import torch
 from monarch._src.actor.actor_mesh import Actor, ActorError, current_rank, IN_PAR
 from monarch._src.actor.debugger.debugger import (
+    _MONARCH_DEBUG_SERVER_HOST_ENV_VAR,
+    _MONARCH_DEBUG_SERVER_PORT_ENV_VAR,
     Attach,
     Cast,
     Continue,
@@ -51,14 +53,15 @@ needs_cuda = pytest.mark.skipif(
 )
 
 
-def _debug_port():
+def _debug_env():
     for i in range(100):
         yield {
-            "MONARCH_DEBUG_SERVER_PORT": f"270{i:02d}",
+            _MONARCH_DEBUG_SERVER_HOST_ENV_VAR: "0.0.0.0",
+            _MONARCH_DEBUG_SERVER_PORT_ENV_VAR: f"270{i:02d}",
         }
 
 
-debug_port = _debug_port()
+debug_env = _debug_env()
 
 
 def isolate_in_subprocess(test_fn=None, *, env=None):
@@ -182,7 +185,7 @@ async def _wait_for_breakpoints(
 # We have to run this test in a separate process because there is only one
 # debug controller per process, and we don't want this to interfere with
 # the other two tests that access the debug controller.
-@isolate_in_subprocess(env=next(debug_port))
+@isolate_in_subprocess(env=next(debug_env))
 @pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
@@ -350,7 +353,7 @@ async def test_debug() -> None:
 
 
 # See earlier comment
-@isolate_in_subprocess(env=next(debug_port))
+@isolate_in_subprocess(env=next(debug_env))
 @pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
@@ -771,7 +774,7 @@ async def test_debug_command_parser_invalid_inputs(invalid_input):
 
 
 # See earlier comment
-@isolate_in_subprocess(env={"MONARCH_DEBUG_CLI_BIN": debug_cli_bin, **next(debug_port)})
+@isolate_in_subprocess(env={"MONARCH_DEBUG_CLI_BIN": debug_cli_bin, **next(debug_env)})
 @pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
@@ -1038,7 +1041,7 @@ class ClosureDebugeeActor(Actor):
         "MONARCH_RESOURCES_DIR": ""
         if not IN_PAR
         else str(importlib.resources.files("monarch.python.tests")),
-        **next(debug_port),
+        **next(debug_env),
     }
 )
 @pytest.mark.timeout(180)
