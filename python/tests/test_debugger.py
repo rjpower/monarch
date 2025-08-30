@@ -1095,10 +1095,10 @@ class ClosureDebugeeActor(Actor):
         "MONARCH_RESOURCES_DIR": ""
         if not IN_PAR
         else str(importlib.resources.files("monarch.python.tests")),
-        **next(debug_env),
+        **debug_env,
     }
 )
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(60)
 async def test_debug_with_pickle_by_value():
     """
     This test tests debugger functionality when there are breakpoints in
