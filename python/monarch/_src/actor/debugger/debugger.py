@@ -529,8 +529,8 @@ class DebugController(Actor):
         self._task_lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
         self._debug_io: DebugIO = DebugStdIO()
-        self._server_started = asyncio.Future()
-        self._server = asyncio.create_task(self._serve())
+        self._server = asyncio.Future()
+        self._server_task = asyncio.create_task(self._serve())
 
     async def _serve(self) -> None:
         try:
@@ -544,12 +544,12 @@ class DebugController(Actor):
                 _get_debug_server_port(),
             )
             async with server:
-                self._server_started.set_result(True)
+                self._server.set_result(server)
                 await server.serve_forever()
         except Exception as e:
-            if self._server_started.done():
-                self._server_started = asyncio.Future()
-            self._server_started.set_exception(e)
+            if self._server.done():
+                self._server = asyncio.Future()
+            self._server.set_exception(e)
             raise
 
     async def _handle_client(
@@ -686,7 +686,7 @@ class DebugController(Actor):
         # Of course this isn't sufficient to handle the case where the server
         # fails after the rank's debug session has successfully started.
         # TODO: implement a heartbeat to prevent pdb sessions from hanging.
-        await self._server_started
+        await self._server
         # Create a session if it doesn't exist
         if (actor_name, rank) not in self.sessions:
             self.sessions.insert(DebugSession(rank, coords, hostname, actor_name))

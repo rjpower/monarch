@@ -6,6 +6,7 @@
 
 # pyre-unsafe
 import argparse
+import logging
 import subprocess
 
 from monarch._src.actor.debugger.debugger import (
@@ -30,4 +31,13 @@ def run():
     )
     args = parser.parse_args()
 
-    subprocess.run(["nc", f"{args.host}", f"{args.port}"], check=True)
+    for cmd in ["ncat", "nc", "netcat"]:
+        try:
+            subprocess.run([cmd, f"{args.host}", f"{args.port}"], check=True)
+            return
+        except FileNotFoundError:
+            pass
+
+    logging.error(
+        "Could not find a suitable netcat binary. Please install one and try again."
+    )
