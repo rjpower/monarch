@@ -8,7 +8,7 @@ import monarch
 import pytest
 import torch
 from monarch import remote
-from monarch.actor import Actor, as_endpoint, endpoint, proc_mesh
+from monarch.actor import Actor, as_endpoint, endpoint, proc_mesh, this_host
 from monarch.mesh_controller import spawn_tensor_engine
 
 
@@ -130,3 +130,25 @@ def test_rref_actor() -> None:
         x.update.rref(torch.ones((3, 4)))
         t = as_endpoint(x.forward, propagate=lambda x: torch.rand(3, 4)).rref(y)
         assert monarch.inspect(t.sum()).item() == 3 * 4 * 4
+
+
+class IsInit(Actor):
+    @endpoint
+    def is_cuda_initialized(self) -> bool:
+        import ctypes
+
+        cuda = ctypes.CDLL("libcuda.so.1")
+        CUresult = ctypes.c_int
+        cuDeviceGetCount = cuda.cuDeviceGetCount
+        cuDeviceGetCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        cuDeviceGetCount.restype = CUresult
+        count = ctypes.c_int()
+        result = cuDeviceGetCount(ctypes.byref(count))
+        CUDA_ERROR_NOT_INITIALIZED = 3
+        return result == CUDA_ERROR_NOT_INITIALIZED
+
+
+@two_gpu
+def test_cuda_is_not_initialized_in_a_new_proc():
+    proc = this_host().spawn_procs().spawn("is_init", IsInit)
+    assert not proc.is_cuda_initialized.call_one().get()
