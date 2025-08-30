@@ -14,9 +14,7 @@ import inspect
 import itertools
 import logging
 import random
-import traceback
-from abc import abstractmethod, abstractproperty
-
+from abc import abstractproperty
 from dataclasses import dataclass
 from pprint import pformat
 from textwrap import indent
@@ -873,9 +871,12 @@ class _Actor:
         DebugContext.set(DebugContext())
 
     def _post_mortem_debug(self, exc_tb) -> None:
-        from monarch._src.actor.debugger.debugger import debug_controller
+        from monarch._src.actor.debugger.debugger import (
+            _post_mortem_enabled,
+            debug_controller,
+        )
 
-        if (pdb_wrapper := DebugContext.get().pdb_wrapper) is not None:
+        if _post_mortem_enabled():
             with fake_sync_state():
                 ctx = context()
                 msg_rank = ctx.message_rank
@@ -887,7 +888,7 @@ class _Actor:
                 )
                 DebugContext.set(DebugContext(pdb_wrapper))
                 pdb_wrapper.post_mortem(exc_tb)
-                self._maybe_exit_debugger(do_continue=False)
+        self._maybe_exit_debugger(do_continue=False)
 
     def _handle_undeliverable_message(
         self, message: UndeliverableMessageEnvelope
