@@ -288,7 +288,7 @@ async fn ensure_mesh_healthy(unhealthy_event: &Mutex<Unhealthy<ProcEvent>>) -> R
             "proc mesh is stopped with reason: alloc is stopped".to_string(),
         )),
         Unhealthy::Crashed(event) => Err(SupervisionError::new_err(format!(
-            "proc mesh is stopped with reason: {:?}",
+            "proc mesh is stopped with reason: {}",
             event
         ))),
     }
@@ -543,6 +543,7 @@ mod tests {
             .allocate(AllocSpec {
                 extent: extent! { replica = 1 },
                 constraints: Default::default(),
+                proc_name: None,
             })
             .await?;
 
@@ -590,6 +591,7 @@ mod tests {
             .allocate(AllocSpec {
                 extent: extent! { replica = 1 },
                 constraints: Default::default(),
+                proc_name: None,
             })
             .await?;
 
@@ -653,6 +655,7 @@ mod tests {
             .allocate(AllocSpec {
                 extent: extent! { replica = 1 },
                 constraints: Default::default(),
+                proc_name: None,
             })
             .await?;
 
