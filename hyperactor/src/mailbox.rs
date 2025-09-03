@@ -3484,7 +3484,7 @@ mod tests {
         // - world1[0] (not covered by anything else)
         // - world1[1] (not covered by anything else)
         // - world2[0].actor0 (not covered by anything else)
-        let mut expected = vec![
+        let expected = vec![
             id!(world0).into(),
             id!(world1[0]).into(),
             id!(world1[1]).into(),

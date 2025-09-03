@@ -7,7 +7,7 @@
  */
 
 use std::collections::HashMap;
-use std::collections::HashSet;
+
 use std::fmt;
 use std::ops::Deref;
 use std::panic::Location;
@@ -37,7 +37,7 @@ use hyperactor::mailbox;
 use hyperactor::mailbox::BoxableMailboxSender;
 use hyperactor::mailbox::BoxedMailboxSender;
 use hyperactor::mailbox::DialMailboxRouter;
-use hyperactor::mailbox::MailboxRouter;
+
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::PortHandle;
@@ -46,7 +46,7 @@ use hyperactor::mailbox::Undeliverable;
 use hyperactor::metrics;
 use hyperactor::proc::Proc;
 use hyperactor::reference::ProcId;
-use hyperactor::reference::Reference;
+
 use hyperactor::supervision::ActorSupervisionEvent;
 use ndslice::Range;
 use ndslice::Shape;
@@ -249,7 +249,7 @@ impl ProcMesh {
 
         // 2. Set up routing to the initialized procs; these require dialing.
         let router = DialMailboxRouter::new();
-        for (_rank, AllocatedProc { proc_id, addr, .. }) in running.iter().enumerate() {
+        for AllocatedProc { proc_id, addr, .. } in running.iter() {
             if proc_id.is_direct() {
                 continue;
             }
