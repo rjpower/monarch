@@ -210,15 +210,6 @@ class PythonMessage:
     @property
     def kind(self) -> PythonMessageKind: ...
 
-class UndeliverableMessageEnvelope:
-    """
-    An envelope representing a message that could not be delivered.
-
-    This object is opaque; its contents are not accessible from Python.
-    """
-
-    ...
-
 @final
 class PythonActorHandle:
     """
@@ -266,9 +257,7 @@ class PortProtocol(Generic[R], Protocol):
 class Actor(Protocol):
     async def handle(
         self,
-        mailbox: Mailbox,
-        rank: int,
-        shape: Shape,
+        context: Any,
         method: MethodSpecifier,
         message: bytes,
         panic_flag: PanicFlag,

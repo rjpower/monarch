@@ -19,6 +19,8 @@ use pyo3::exceptions::PyStopIteration;
 use pyo3::exceptions::PyTimeoutError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyNone;
+use pyo3::types::PyType;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 
@@ -119,7 +121,7 @@ where
 }
 
 impl PyPythonTask {
-    fn take_task(
+    pub(crate) fn take_task(
         &mut self,
     ) -> PyResult<Pin<Box<dyn Future<Output = Result<Py<PyAny>, PyErr>> + Send + 'static>>> {
         self.inner
@@ -149,11 +151,16 @@ fn send_result(
 
 #[pymethods]
 impl PyPythonTask {
-    fn block_on(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        signal_safe_block_on(py, self.take_task()?)?
+    fn block_on(mut slf: PyRefMut<PyPythonTask>, py: Python<'_>) -> PyResult<PyObject> {
+        let task = slf.take_task()?;
+        // mutable references to python objects must be dropped before calling
+        // signal_safe_block_on. It will release the GIL, and any other thread
+        // trying to access slf will throw.
+        drop(slf);
+        signal_safe_block_on(py, task)?
     }
 
-    fn spawn(&mut self) -> PyResult<PyShared> {
+    pub(crate) fn spawn(&mut self) -> PyResult<PyShared> {
         let (tx, rx) = watch::channel(None);
         let task = self.take_task()?;
         get_tokio_runtime().spawn(async move {
@@ -175,8 +182,16 @@ impl PyPythonTask {
     }
 
     #[staticmethod]
-    fn from_coroutine(coro: PyObject) -> PyResult<PyPythonTask> {
-        PyPythonTask::new(async {
+    fn from_coroutine(py: Python<'_>, coro: PyObject) -> PyResult<PyPythonTask> {
+        // context() used inside a PythonTask should inherit the value of
+        // context() from the context in which the PythonTask was constructed.
+        // We need to do this manually because the value of the contextvar isn't
+        // maintained inside the tokio runtime.
+        let monarch_context = py
+            .import("monarch._src.actor.actor_mesh")?
+            .call_method0("context")?
+            .unbind();
+        PyPythonTask::new(async move {
             let (coroutine_iterator, none) = Python::with_gil(|py| {
                 coro.into_bound(py)
                     .call_method0("__await__")
@@ -189,12 +204,23 @@ impl PyPythonTask {
             }
             loop {
                 let action: PyResult<Action> = Python::with_gil(|py| {
+                    // We may be executing in a new thread at this point, so we need to set the value
+                    // of context().
+                    let _context = py
+                        .import("monarch._src.actor.actor_mesh")?
+                        .getattr("_context")?;
+                    let old_context = _context.call_method1("get", (PyNone::get(py),))?;
+                    _context.call_method1("set", (monarch_context.clone_ref(py),))?;
+
                     let result = match last {
                         Ok(value) => coroutine_iterator.bind(py).call_method1("send", (value,)),
                         Err(pyerr) => coroutine_iterator
                             .bind(py)
                             .call_method1("throw", (pyerr.into_value(py),)),
                     };
+
+                    // Reset context() so that when this tokio thread yields, it has its original state.
+                    _context.call_method1("set", (old_context,))?;
                     match result {
                         Ok(task) => Ok(Action::Wait(
                             task.extract::<Py<PyPythonTask>>()
@@ -261,6 +287,11 @@ impl PyPythonTask {
             result.map(|r| (r, index))
         })
     }
+
+    #[classmethod]
+    fn __class_getitem__(cls: &Bound<'_, PyType>, _arg: PyObject) -> PyObject {
+        cls.clone().unbind().into()
+    }
 }
 
 #[pyclass(
@@ -272,7 +303,7 @@ pub struct PyShared {
 }
 #[pymethods]
 impl PyShared {
-    fn task(&mut self) -> PyResult<PyPythonTask> {
+    pub(crate) fn task(&mut self) -> PyResult<PyPythonTask> {
         // watch channels start unchanged, and when a value is sent to them signal
         // the receivers `changed` future.
         // By cloning the rx before awaiting it,
@@ -293,9 +324,18 @@ impl PyShared {
         let task = self.task()?;
         Ok(PythonTaskAwaitIterator::new(task.into_py_any(py)?))
     }
-    pub fn block_on(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        let mut task = self.task()?;
-        task.block_on(py)
+    pub fn block_on(mut slf: PyRefMut<PyShared>, py: Python<'_>) -> PyResult<PyObject> {
+        let task = slf.task()?.take_task()?;
+        // mutable references to python objects must be dropped before calling
+        // signal_safe_block_on. It will release the GIL, and any other thread
+        // trying to access slf will throw.
+        drop(slf);
+        signal_safe_block_on(py, task)?
+    }
+
+    #[classmethod]
+    fn __class_getitem__(cls: &Bound<'_, PyType>, _arg: PyObject) -> PyObject {
+        cls.clone().unbind().into()
     }
 }
 

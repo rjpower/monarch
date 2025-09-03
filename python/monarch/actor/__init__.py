@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-unsafe
 """
 Monarch Actor API - Public interface for actor functionality.
 """
@@ -14,17 +15,28 @@ from monarch._src.actor.actor_mesh import (
     ActorError,
     as_endpoint,
     Channel,
+    context,
     current_actor_name,
     current_rank,
     current_size,
     Point,
+    Port,
+    PortReceiver,
     send,
     ValueMesh,
 )
+from monarch._src.actor.debugger.debugger import debug_controller
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
+
+from monarch._src.actor.host_mesh import (
+    HostMesh,
+    hosts_from_config,
+    this_host,
+    this_proc,
+)
 from monarch._src.actor.proc_mesh import (
-    debug_client,
+    get_or_spawn_controller,
     local_proc_mesh,
     proc_mesh,
     ProcMesh,
@@ -49,5 +61,13 @@ __all__ = [
     "send",
     "sim_proc_mesh",
     "ValueMesh",
-    "debug_client",
+    "debug_controller",
+    "get_or_spawn_controller",
+    "this_host",
+    "this_proc",
+    "HostMesh",
+    "context",
+    "hosts_from_config",
+    "Port",
+    "PortReceiver",
 ]

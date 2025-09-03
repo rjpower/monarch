@@ -12,8 +12,9 @@ We hope this becomes the book we wish we had when we started working with Monarc
 
 ./actors/index
 ./macros/index
+./channels/index
 ./mailboxes/index
 ./references/index
+./appendix/index
 ./SUMMARY.md
-
 ```

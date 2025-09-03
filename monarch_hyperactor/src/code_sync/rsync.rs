@@ -198,7 +198,8 @@ pub async fn do_rsync(addr: &SocketAddr, workspace: &Path) -> Result<RsyncResult
     // line in rsync output.
     fs::create_dir_all(workspace).await?;
 
-    let output = Command::new(get_rsync_bin_path().await?)
+    let rsync_bin_path = get_rsync_bin_path().await?;
+    let output = Command::new(rsync_bin_path)
         .arg("--archive")
         .arg("--delete")
         // Show detailed changes for each file
@@ -216,7 +217,16 @@ pub async fn do_rsync(addr: &SocketAddr, workspace: &Path) -> Result<RsyncResult
         .stderr(Stdio::piped())
         .output()
         .await
-        .context("spawning `rsync` binary")?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "rsync binary: '{}' does not exist. Please ensure 'rsync' is installed and available in PATH.",
+                    rsync_bin_path.display()
+                )
+            } else {
+                anyhow::anyhow!("failed to execute rsync: {}", e)
+            }
+        })?;
 
     output
         .status
@@ -358,11 +368,19 @@ impl Handler<RsyncMessage> for RsyncActor {
         }: RsyncMessage,
     ) -> Result<(), anyhow::Error> {
         let res = async {
-            let workspace = workspace.resolve()?;
+            let workspace = workspace
+                .resolve()
+                .context("resolving workspace location")?;
             let (connect_msg, completer) = Connect::allocate(cx.self_id().clone(), cx);
             connect.send(cx, connect_msg)?;
+
+            // some machines (e.g. github CI) do not have ipv6, so try ipv6 then fallback to ipv4
+            let ipv6_lo: SocketAddr = "[::1]:0".parse()?;
+            let ipv4_lo: SocketAddr = "127.0.0.1:0".parse()?;
+            let addrs: [SocketAddr; 2] = [ipv6_lo, ipv4_lo];
+
             let (listener, mut stream) = try_join!(
-                TcpListener::bind(("::1", 0)).err_into(),
+                TcpListener::bind(&addrs[..]).err_into(),
                 completer.complete(),
             )?;
             let addr = listener.local_addr()?;

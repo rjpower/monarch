@@ -86,6 +86,7 @@ pub mod proc;
 pub mod reference;
 mod signal_handler;
 pub mod simnet;
+mod stdio_redirect;
 pub mod supervision;
 pub mod sync;
 /// Test utilities
@@ -106,6 +107,8 @@ pub use cityhasher;
 #[doc(hidden)]
 pub use dashmap; // For intern_typename!
 pub use data::Named;
+#[doc(hidden)]
+pub use hyperactor_macros::Actor;
 #[doc(inline)]
 pub use hyperactor_macros::Bind;
 #[doc(inline)]
@@ -128,6 +131,7 @@ pub use hyperactor_macros::forward;
 pub use hyperactor_macros::instrument;
 #[doc(inline)]
 pub use hyperactor_macros::instrument_infallible;
+pub use hyperactor_macros::observe;
 pub use hyperactor_telemetry::declare_static_counter;
 pub use hyperactor_telemetry::declare_static_gauge;
 pub use hyperactor_telemetry::declare_static_histogram;
@@ -171,9 +175,15 @@ pub use serde_json;
 #[doc(inline)]
 pub use signal_handler::SignalCleanupGuard;
 #[doc(inline)]
+pub use signal_handler::SignalDisposition;
+#[doc(inline)]
+pub use signal_handler::query_signal_disposition;
+#[doc(inline)]
 pub use signal_handler::register_signal_cleanup;
 #[doc(inline)]
 pub use signal_handler::register_signal_cleanup_scoped;
+#[doc(inline)]
+pub use signal_handler::sigpipe_disposition;
 #[doc(inline)]
 pub use signal_handler::unregister_signal_cleanup;
 // Re-exported to support tracing in hyperactor_macros codegen.

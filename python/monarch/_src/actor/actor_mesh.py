@@ -6,17 +6,20 @@
 
 # pyre-unsafe
 
+import abc
 import collections
 import contextvars
 import functools
 import inspect
 import itertools
 import logging
-import os
 import random
 import traceback
+from abc import abstractmethod, abstractproperty
 
 from dataclasses import dataclass
+from pprint import pformat
+from textwrap import indent
 from traceback import TracebackException
 from typing import (
     Any,
@@ -24,7 +27,6 @@ from typing import (
     Callable,
     cast,
     Concatenate,
-    Coroutine,
     Dict,
     Generator,
     Generic,
@@ -35,7 +37,6 @@ from typing import (
     Optional,
     overload,
     ParamSpec,
-    Protocol,
     Tuple,
     Type,
     TYPE_CHECKING,
@@ -50,28 +51,23 @@ from monarch._rust_bindings.monarch_hyperactor.actor import (
 )
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import (
     PythonActorMesh,
-    PythonActorMeshRef,
+    PythonActorMeshImpl,
 )
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
-    OncePortReceiver as HyOncePortReceiver,
+    OncePortReceiver as HyOncePortReceiver,  # noqa: F401
     OncePortRef,
-    PortReceiver as HyPortReceiver,
+    PortReceiver as HyPortReceiver,  # noqa: F401
     PortRef,
+    UndeliverableMessageEnvelope,
 )
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
-
-if TYPE_CHECKING:
-    from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
-    from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiverBase
-
 from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 from monarch._rust_bindings.monarch_hyperactor.selection import Selection as HySelection
 from monarch._rust_bindings.monarch_hyperactor.shape import Point as HyPoint, Shape
 from monarch._rust_bindings.monarch_hyperactor.supervision import SupervisionError
-from monarch._rust_bindings.monarch_hyperactor.telemetry import enter_span, exit_span
-
 from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
+from monarch._src.actor.debugger.pdb_wrapper import PdbWrapper
 from monarch._src.actor.endpoint import (
     Endpoint,
     EndpointProperty,
@@ -80,24 +76,27 @@ from monarch._src.actor.endpoint import (
     Propagator,
     Selection,
 )
-from monarch._src.actor.future import Future
-from monarch._src.actor.pdb_wrapper import PdbWrapper
-
+from monarch._src.actor.future import DeprecatedNotAFuture, Future
 from monarch._src.actor.pickle import flatten, unflatten
-
+from monarch._src.actor.python_extension_methods import rust_struct
 from monarch._src.actor.shape import MeshTrait, NDSlice
 from monarch._src.actor.sync_state import fake_sync_state
-
 from monarch._src.actor.telemetry import METER
-
 from monarch._src.actor.tensor_engine_shim import actor_rref, actor_send
 from typing_extensions import Self
 
-
 if TYPE_CHECKING:
-    from monarch._src.actor.proc_mesh import ProcMesh
+    from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
+    from monarch._rust_bindings.monarch_hyperactor.actor_mesh import ActorMeshProtocol
+    from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiverBase
+    from monarch._src.actor.proc_mesh import _ControllerController, ProcMesh
+from monarch._src.actor.telemetry import get_monarch_tracer
+
+CallMethod = PythonMessageKind.CallMethod
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+TRACER = get_monarch_tracer()
 
 Allocator = ProcessAllocator | LocalAllocator
 
@@ -116,26 +115,101 @@ class Point(HyPoint, collections.abc.Mapping):
     pass
 
 
-@dataclass
-class MonarchContext:
-    mailbox: Mailbox
-    proc_id: str
-    point: Point
+@rust_struct("monarch_hyperactor::mailbox::Instance")
+class Instance(abc.ABC):
+    @abstractproperty
+    def _mailbox(self) -> Mailbox:
+        """
+        This can be removed once we fix all the uses of mailbox to just use context instead.
+        """
+        ...
+
+    @property
+    def proc_id(self) -> str:
+        """
+        The proc_id of the current actor.
+        """
+        return self.actor_id.proc_id
+
+    @abstractproperty
+    def actor_id(self) -> ActorId:
+        """
+        The actor_id of the current actor.
+        """
+        ...
+
+    @property
+    def proc(self) -> "ProcMesh":
+        """
+        The singleton proc mesh that corresponds to just this actor.
+        """
+
+        return self.proc_mesh.slice(**self.rank)
+
+    """
+    Every actor is spawned over some mesh of processes. This identifies the point in that mesh where
+    the current actor was spawned. In other words, it is the `monarch.current_rank()` of
+    The actors __init__ message.
+    """
+    rank: Point
+    proc_mesh: "ProcMesh"
+    _controller_controller: "_ControllerController"
+
+    # this property is used to hold the handles to actors and processes launched by this actor
+    # in order to keep them alive until this actor exits.
+    _children: "Optional[List[ActorMesh | ProcMesh]]"
+
+    def _add_child(self, child: "ActorMesh | ProcMesh") -> None:
+        if self._children is None:
+            self._children = [child]
+        else:
+            self._children.append(child)
+
+
+@rust_struct("monarch_hyperactor::mailbox::Context")
+class Context:
+    @property
+    def actor_instance(self) -> Instance:
+        """
+        Information about the actor currently running in this context.
+        """
+        ...
+
+    @property
+    def message_rank(self) -> Point:
+        """
+        Every message is sent as some broadcast of messages. This call identifies the
+        point in this space where the current actor is participating.
+
+        This is not the same self.actor_instance.rank: if the message was sent to some slice of
+        actors this identifies where the actor appears in the slice and not the identity of the actor.
+
+        These Point objects always exist. For singletons it will have 0 dimensions.
+        """
+        ...
 
     @staticmethod
-    def get() -> "MonarchContext":
-        c = _context.get(None)
-        if c is None:
-            mb = Mailbox.root_client_mailbox()
-            proc_id = mb.actor_id.proc_id
-            c = MonarchContext(mb, proc_id, Point(0, singleton_shape))
-            _context.set(c)
-        return c
+    def _root_client_context() -> "Context": ...
 
 
-_context: contextvars.ContextVar[MonarchContext] = contextvars.ContextVar(
+_context: contextvars.ContextVar[Context] = contextvars.ContextVar(
     "monarch.actor_mesh._context"
 )
+
+
+def context() -> Context:
+    c = _context.get(None)
+    if c is None:
+        c = Context._root_client_context()
+        _context.set(c)
+        from monarch._src.actor.host_mesh import create_local_host_mesh
+        from monarch._src.actor.proc_mesh import _get_controller_controller
+
+        c.actor_instance.proc_mesh, c.actor_instance._controller_controller = (
+            _get_controller_controller()
+        )
+        c.actor_instance.proc_mesh._host_mesh = create_local_host_mesh()
+    return c
 
 
 @dataclass
@@ -165,153 +239,17 @@ A = TypeVar("A")
 _load_balancing_seed = random.Random(4)
 
 
-def to_hy_sel(selection: Selection) -> HySelection:
-    if selection == "choose":
-        return HySelection.any()
-    elif selection == "all":
-        return HySelection.all()
-    else:
-        raise ValueError(f"invalid selection: {selection}")
-
-
-# A temporary gate used by the PythonActorMesh/PythonActorMeshRef migration.
-# We can use this gate to quickly roll back to using _ActorMeshRefImpl, if we
-# encounter any issues with the migration.
-#
-# This should be removed once we confirm PythonActorMesh/PythonActorMeshRef is
-# working correctly in production.
-def _use_standin_mesh() -> bool:
-    return bool(os.getenv("USE_STANDIN_ACTOR_MESH", default=False))
-
-
-class ActorMeshProtocol(Protocol):
-    """
-    Protocol defining the common interface for actor mesh, mesh ref and _ActorMeshRefImpl.
-
-    Note: We do not want to use ABC because _ActorMeshRefImpl already inherits
-    from MeshTrait and we want to avoid multiple inheritance, especially when
-    _ActorMeshRefImpl will be deleted soon.
-    """
-
-    def cast(
-        self,
-        message: PythonMessage,
-        selection: Selection,
-        mailbox: Mailbox,
-    ) -> None: ...
-
-    def new_with_shape(self, shape: Shape) -> Self: ...
-
-    def supervision_event(self) -> "Optional[Shared[Exception]]": ...
-
-    async def stop(self) -> None: ...
-
-
-class _PythonActorMeshAdapter(ActorMeshProtocol):
-    """
-    Adapter for PythonActorMesh to implement the normalized ActorMeshProtocol
-    interface. This adapter also provides a convenient way to add states to
-    the mesh on the python side, without changing the rust side implementation.
-
-    Since PythonActorMesh cannot be pickled, this adapter also provides a
-    custom pickling logic which bind the mesh to PythonActorMeshRef during
-    pickling.
-    """
-
-    def __init__(self, inner: PythonActorMesh) -> None:
-        if _use_standin_mesh():
-            raise ValueError(
-                "_PythonActorMeshAdapter should only be used when USE_STANDIN_ACTOR_MESH is not set"
-            )
-        self._inner = inner
-
-    def cast(
-        self,
-        message: PythonMessage,
-        selection: Selection,
-        mailbox: Mailbox,
-    ) -> None:
-        self._inner.cast(mailbox, to_hy_sel(selection), message)
-
-    def new_with_shape(self, shape: Shape) -> "ActorMeshProtocol":
-        sliced: PythonActorMeshRef = self._inner.new_with_shape(shape)
-        return _PythonActorMeshRefAdapter(sliced)
-
-    def supervision_event(self) -> "Optional[Shared[Exception]]":
-        return self._inner.supervision_event().spawn()
-
-    async def stop(self) -> None:
-        await self._inner.stop()
-
-    def __reduce_ex__(self, protocol: ...) -> Tuple[Any, Tuple[Any, ...]]:
-        """
-        Automatically pickle as a PythonActorMeshRef by binding the mesh.
-        Unpicklable states such as proc_mesh are dropped as well.
-        """
-        mesh_ref = self._inner.bind()
-        return _PythonActorMeshRefAdapter, (mesh_ref,)
-
-
-class _PythonActorMeshRefAdapter(ActorMeshProtocol):
-    """
-    Adapter for PythonActorMeshRef to implement the normalized ActorMeshProtocol interface. It is
-    also used to store unpickable states such as proc_mesh.
-    """
-
-    def __init__(
-        self,
-        inner: PythonActorMeshRef,
-    ) -> None:
-        if _use_standin_mesh():
-            raise ValueError(
-                "_PythonActorMeshRefAdapter should only be used when USE_STANDIN_ACTOR_MESH is not set"
-            )
-        self._inner = inner
-
-    def cast(
-        self,
-        message: PythonMessage,
-        selection: Selection,
-        mailbox: Mailbox,
-    ) -> None:
-        self._inner.cast(mailbox, to_hy_sel(selection), message)
-
-    def new_with_shape(self, shape: Shape) -> "ActorMeshProtocol":
-        sliced: PythonActorMeshRef = self._inner.new_with_shape(shape)
-        return _PythonActorMeshRefAdapter(sliced)
-
-    def supervision_event(self) -> "Optional[Shared[Exception]]":
-        return None
-
-    async def stop(self) -> None:
-        raise NotImplementedError("PythonActorMeshRef.stop() is not supported")
-
-    def __reduce_ex__(self, protocol: ...) -> Tuple[Any, Tuple[Any, ...]]:
-        """
-        Dropping all unpickable states.
-        """
-        return _PythonActorMeshRefAdapter, (self._inner,)
-
-
-class _SingletonActorAdapator(ActorMeshProtocol):
+class _SingletonActorAdapator:
     def __init__(self, inner: ActorId, shape: Optional[Shape] = None) -> None:
         self._inner: ActorId = inner
         if shape is None:
             shape = singleton_shape
         self._shape = shape
 
-    @property
-    def shape(self) -> Shape:
-        return singleton_shape
-
-    @property
-    def proc_mesh(self) -> Optional["ProcMesh"]:
-        return None
-
     def cast(
         self,
         message: PythonMessage,
-        selection: Selection,
+        selection: str,
         mailbox: Mailbox,
     ) -> None:
         mailbox.post(self._inner, message)
@@ -322,26 +260,28 @@ class _SingletonActorAdapator(ActorMeshProtocol):
     def supervision_event(self) -> "Optional[Shared[Exception]]":
         return None
 
-    async def stop(self) -> None:
-        raise NotImplementedError("ActorId does not support stop")
+    def stop(self) -> "PythonTask[None]":
+        raise NotImplementedError("stop()")
+
+    def initialized(self) -> "PythonTask[None]":
+        async def empty():
+            pass
+
+        return PythonTask.from_coroutine(empty())
 
 
 # standin class for whatever is the serializable python object we use
 # to name an actor mesh. Hacked up today because ActorMesh
 # isn't plumbed to non-clients
-class _ActorMeshRefImpl(ActorMeshProtocol):
+class _ActorMeshRefImpl:
     def __init__(
         self,
         mailbox: Mailbox,
-        hy_actor_mesh: Optional[PythonActorMesh],
+        hy_actor_mesh: Optional[PythonActorMeshImpl],
         proc_mesh: "Optional[ProcMesh]",
         shape: Shape,
         actor_ids: List[ActorId],
     ) -> None:
-        if not _use_standin_mesh():
-            raise ValueError(
-                "ActorMeshRefImpl should only be used when USE_STANDIN_ACTOR_MESH is set"
-            )
         self._mailbox = mailbox
         self._actor_mesh = hy_actor_mesh
         # actor meshes do not have a way to look this up at the moment,
@@ -352,14 +292,16 @@ class _ActorMeshRefImpl(ActorMeshProtocol):
 
     @staticmethod
     def from_hyperactor_mesh(
-        mailbox: Mailbox, hy_actor_mesh: PythonActorMesh, proc_mesh: "ProcMesh"
+        mailbox: Mailbox,
+        shape: Shape,
+        hy_actor_mesh: PythonActorMeshImpl,
+        proc_mesh: "ProcMesh",
     ) -> "_ActorMeshRefImpl":
-        shape: Shape = hy_actor_mesh.shape
         return _ActorMeshRefImpl(
             mailbox,
             hy_actor_mesh,
             proc_mesh,
-            hy_actor_mesh.shape,
+            shape,
             [cast(ActorId, hy_actor_mesh.get(i)) for i in range(len(shape))],
         )
 
@@ -394,7 +336,7 @@ class _ActorMeshRefImpl(ActorMeshProtocol):
     def cast(
         self,
         message: PythonMessage,
-        selection: Selection,
+        selection: str,
         mailbox: Mailbox,
     ) -> None:
         self._check_state()
@@ -461,16 +403,26 @@ class _ActorMeshRefImpl(ActorMeshProtocol):
     def supervision_event(self) -> "Optional[Shared[Exception]]":
         if self._actor_mesh is None:
             return None
-        return self._actor_mesh.supervision_event().spawn()
+        return self._actor_mesh.supervision_event()
 
-    async def stop(self):
-        await self._actor_mesh.stop()
+    def stop(self) -> PythonTask[None]:
+        async def task():
+            if self._actor_mesh is not None:
+                self._actor_mesh.stop()
+
+        return PythonTask.from_coroutine(task())
+
+    def initialized(self) -> PythonTask[None]:
+        async def task():
+            pass
+
+        return PythonTask.from_coroutine(task())
 
 
 class ActorEndpoint(Endpoint[P, R]):
     def __init__(
         self,
-        actor_mesh: ActorMeshProtocol,
+        actor_mesh: "ActorMeshProtocol",
         shape: Shape,
         proc_mesh: "Optional[ProcMesh]",
         name: MethodSpecifier,
@@ -585,9 +537,7 @@ class Accumulator(Generic[P, R, A]):
         self._combine: Callable[[A, R], A] = combine
 
     def accumulate(self, *args: P.args, **kwargs: P.kwargs) -> "Future[A]":
-        gen: Generator[Coroutine[None, None, R], None, None] = self._endpoint._stream(
-            *args, **kwargs
-        )
+        gen: Generator[Future[R], None, None] = self._endpoint.stream(*args, **kwargs)
 
         async def impl() -> A:
             value = self._identity
@@ -618,17 +568,16 @@ class ValueMesh(MeshTrait, Generic[R]):
         return self._values[self._ndslice.nditem(coordinates)]
 
     def items(self) -> Iterable[Tuple[Point, R]]:
-        for rank in self._shape.ranks():
-            yield Point(rank, self._shape), self._values[rank]
+        extent = self._shape.extent
+        for i, rank in enumerate(self._shape.ranks()):
+            yield Point(i, extent), self._values[rank]
 
     def __iter__(self) -> Iterator[Tuple[Point, R]]:
         return iter(self.items())
 
-    def __len__(self) -> int:
-        return len(self._shape)
-
     def __repr__(self) -> str:
-        return f"ValueMesh({self._shape})"
+        body = indent(pformat(tuple(self.items())), "  ")
+        return f"ValueMesh({self._shape.extent}):\n{body}"
 
     @property
     def _ndslice(self) -> NDSlice:
@@ -709,7 +658,7 @@ T = TypeVar("T")
 class Channel(Generic[R]):
     @staticmethod
     def open(once: bool = False) -> Tuple["Port[R]", "PortReceiver[R]"]:
-        mailbox = MonarchContext.get().mailbox
+        mailbox = context().actor_instance._mailbox
         handle, receiver = mailbox.open_once_port() if once else mailbox.open_port()
         port_ref = handle.bind()
         return (
@@ -811,45 +760,43 @@ class _Actor:
 
     async def handle(
         self,
-        mailbox: Mailbox,
-        rank: int,
-        shape: Shape,
-        method_spec: MethodSpecifier,
+        ctx: Context,
+        method: MethodSpecifier,
         message: bytes,
         panic_flag: PanicFlag,
         local_state: Iterable[Any],
-        port: "PortProtocol",
+        response_port: "PortProtocol[Any]",
     ) -> None:
         MESSAGES_HANDLED.add(1)
         # response_port can be None. If so, then sending to port will drop the response,
         # and raise any exceptions to the caller.
         try:
-            ctx: MonarchContext = MonarchContext(
-                mailbox, mailbox.actor_id.proc_id, Point(rank, shape)
-            )
             _context.set(ctx)
 
             DebugContext.set(DebugContext())
 
             args, kwargs = unflatten(message, local_state)
 
-            match method_spec:
+            match method:
                 case MethodSpecifier.Init():
-                    Class, *args = args
+                    ins = ctx.actor_instance
+                    Class, ins.proc_mesh, ins._controller_controller, *args = args
+                    ins.rank = ctx.message_rank
                     try:
                         self.instance = Class(*args, **kwargs)
+                        self._maybe_exit_debugger()
                     except Exception as e:
                         self._saved_error = ActorError(
                             e, f"Remote actor {Class}.__init__ call failed."
                         )
                         raise e
-                    port.send(None)
+                    response_port.send(None)
                     return None
-                case MethodSpecifier.ReturnsResponse(name=method):
+                case MethodSpecifier.ReturnsResponse(name=method_name):
                     pass
-                case MethodSpecifier.ExplicitPort(name=method):
-                    args = (port, *args)
-                    port = DroppingPort()
+                case MethodSpecifier.ExplicitPort(name=method_name):
+                    args = (response_port, *args)
+                    response_port = DroppingPort()
 
             if self.instance is None:
                 # This could happen because of the following reasons. Both
@@ -862,52 +809,50 @@ class _Actor:
                 #    should never happen. It indicates either a bug in the
                 #    message delivery mechanism, or the framework accidentally
                 #    mixed the usage of cast and direct send.
-                error_message = f"Actor object is missing when executing method {method} on actor {mailbox.actor_id}."
+
+                error_message = f"Actor object is missing when executing method {method_name} on actor {ctx.actor_instance.actor_id}."
                 if self._saved_error is not None:
                     error_message += (
                         f" This is likely due to an earlier error: {self._saved_error}"
                     )
                 raise AssertionError(error_message)
-            the_method = getattr(self.instance, method)
+
+            the_method = getattr(self.instance, method_name)
             if isinstance(the_method, EndpointProperty):
-                module = the_method._method.__module__
                 the_method = functools.partial(the_method._method, self.instance)
-            else:
-                module = the_method.__module__
 
             if inspect.iscoroutinefunction(the_method):
 
                 async def instrumented():
-                    enter_span(
-                        module,
-                        method,
-                        str(ctx.mailbox.actor_id),
-                    )
-                    try:
-                        result = await the_method(*args, **kwargs)
-                        self._maybe_exit_debugger()
-                    except Exception as e:
-                        logging.critical(
-                            "Unhandled exception in actor endpoint",
-                            exc_info=e,
-                        )
-                        raise e
-                    exit_span()
+                    with TRACER.start_as_current_span(
+                        method_name,
+                        attributes={"actor_id": str(ctx.actor_instance.actor_id)},
+                    ):
+                        try:
+                            result = await the_method(*args, **kwargs)
+                            self._maybe_exit_debugger()
+                        except Exception as e:
+                            logging.critical(
+                                "Unhandled exception in actor endpoint",
+                                exc_info=e,
+                            )
+                            raise e
                     return result
 
                 result = await instrumented()
             else:
-                enter_span(module, method, str(ctx.mailbox.actor_id))
-                with fake_sync_state():
-                    result = the_method(*args, **kwargs)
-                self._maybe_exit_debugger()
-                exit_span()
+                with TRACER.start_as_current_span(
+                    method_name,
+                    attributes={"actor_id": str(ctx.actor_instance.actor_id)},
+                ):
+                    with fake_sync_state():
+                        result = the_method(*args, **kwargs)
+                    self._maybe_exit_debugger()
 
-            port.send(result)
+            response_port.send(result)
         except Exception as e:
             self._post_mortem_debug(e.__traceback__)
-            traceback.print_exc()
-            port.exception(ActorError(e))
+            response_port.exception(ActorError(e))
         except BaseException as e:
             self._post_mortem_debug(e.__traceback__)
             # A BaseException can be thrown in the case of a Rust panic.
@@ -929,20 +874,32 @@ class _Actor:
         DebugContext.set(DebugContext())
 
     def _post_mortem_debug(self, exc_tb) -> None:
-        from monarch._src.actor.debugger import DebugManager
+        from monarch._src.actor.debugger.debugger import debug_controller
 
         if (pdb_wrapper := DebugContext.get().pdb_wrapper) is not None:
             with fake_sync_state():
-                ctx = MonarchContext.get()
+                ctx = context()
+                msg_rank = ctx.message_rank
                 pdb_wrapper = PdbWrapper(
-                    ctx.point.rank,
-                    ctx.point.shape.coordinates(ctx.point.rank),
-                    ctx.mailbox.actor_id,
-                    DebugManager.ref().get_debug_client.call_one().get(),
+                    msg_rank.rank,
+                    {k: msg_rank[k] for k in msg_rank},
+                    ctx.actor_instance.actor_id,
+                    debug_controller(),
                 )
                 DebugContext.set(DebugContext(pdb_wrapper))
                 pdb_wrapper.post_mortem(exc_tb)
                 self._maybe_exit_debugger(do_continue=False)
+
+    def _handle_undeliverable_message(
+        self, message: UndeliverableMessageEnvelope
+    ) -> bool:
+        handle_undeliverable = getattr(
+            self.instance, "_handle_undeliverable_message", None
+        )
+        if handle_undeliverable is not None:
+            return handle_undeliverable(message)
+        else:
+            return False
 
 
 def _is_mailbox(x: object) -> bool:
@@ -962,7 +919,7 @@ def _pickle(obj: object) -> bytes:
     return msg
 
 
-class Actor(MeshTrait):
+class Actor(MeshTrait, DeprecatedNotAFuture):
     @functools.cached_property
     def logger(cls) -> logging.Logger:
         lgr = logging.getLogger(cls.__class__.__name__)
@@ -986,19 +943,31 @@ class Actor(MeshTrait):
             "actor implementations are not meshes, but we can't convince the typechecker of it..."
         )
 
+    @property
+    def initialized(self):
+        raise NotImplementedError(
+            "actor implementations are not meshes, but we can't convince the typechecker of it..."
+        )
 
-class ActorMesh(MeshTrait, Generic[T]):
+    def _handle_undeliverable_message(
+        self, message: UndeliverableMessageEnvelope
+    ) -> bool:
+        # Return False to indicate that the undeliverable message was not handled.
+        return False
+
+
+class ActorMesh(MeshTrait, Generic[T], DeprecatedNotAFuture):
     def __init__(
         self,
         Class: Type[T],
-        inner: ActorMeshProtocol,
+        inner: "ActorMeshProtocol",
         mailbox: Mailbox,
         shape: Shape,
         proc_mesh: "Optional[ProcMesh]",
     ) -> None:
         self.__name__: str = Class.__name__
         self._class: Type[T] = Class
-        self._inner: ActorMeshProtocol = inner
+        self._inner: "ActorMeshProtocol" = inner
         self._mailbox: Mailbox = mailbox
         self._shape = shape
         self._proc_mesh = proc_mesh
@@ -1049,22 +1018,22 @@ class ActorMesh(MeshTrait, Generic[T]):
     def _create(
         cls,
         Class: Type[T],
-        actor_mesh: PythonActorMesh,
+        actor_mesh: "PythonActorMesh | PythonActorMeshImpl",
         mailbox: Mailbox,
         shape: Shape,
         proc_mesh: "ProcMesh",
+        controller_controller: Optional["_ControllerController"],
         # args and kwargs are passed to the __init__ method of the user defined
         # python actor object.
         *args: Any,
         **kwargs: Any,
     ) -> "ActorMesh[T]":
-        if _use_standin_mesh():
-            wrapper = _ActorMeshRefImpl.from_hyperactor_mesh(
-                mailbox, actor_mesh, proc_mesh
+        if isinstance(actor_mesh, PythonActorMeshImpl):
+            actor_mesh = _ActorMeshRefImpl.from_hyperactor_mesh(
+                mailbox, shape, actor_mesh, proc_mesh
             )
-        else:
-            wrapper = _PythonActorMeshAdapter(actor_mesh)
-        mesh = cls(Class, wrapper, mailbox, shape, proc_mesh)
+
+        mesh = cls(Class, actor_mesh, mailbox, shape, proc_mesh)
 
         async def null_func(*_args: Iterable[Any], **_kwargs: Dict[str, Any]) -> None:
             return None
@@ -1077,7 +1046,7 @@ class ActorMesh(MeshTrait, Generic[T]):
             None,
             False,
         )
-        send(ep, (mesh._class, *args), kwargs)
+        send(ep, (mesh._class, proc_mesh, controller_controller, *args), kwargs)
 
         return mesh
 
@@ -1110,8 +1079,12 @@ class ActorMesh(MeshTrait, Generic[T]):
     def __repr__(self) -> str:
         return f"ActorMesh(class={self._class}, shape={self._shape}), inner={type(self._inner)})"
 
-    async def stop(self):
-        await self._inner.stop()
+    def stop(self) -> "Future[None]":
+        return Future(coro=self._inner.stop())
+
+    @property
+    def initialized(self) -> Future[None]:
+        return Future(coro=self._inner.initialized())
 
 
 class ActorError(Exception):
@@ -1149,14 +1122,13 @@ class ActorError(Exception):
 
 
 def current_actor_name() -> str:
-    return str(MonarchContext.get().mailbox.actor_id)
+    return str(context().actor_instance.actor_id)
 
 
 def current_rank() -> Point:
-    ctx = MonarchContext.get()
-    return ctx.point
+    return context().message_rank
 
 
 def current_size() -> Dict[str, int]:
-    ctx = MonarchContext.get()
-    return dict(zip(ctx.point.shape.labels, ctx.point.shape.ndslice.sizes))
+    r = context().message_rank.extent
+    return {k: r[k] for k in r}

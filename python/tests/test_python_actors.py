@@ -5,7 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 # pyre-unsafe
+
 import asyncio
+import ctypes
+import gc
 import importlib.resources
 import logging
 import operator
@@ -17,15 +20,28 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from types import ModuleType
-from typing import cast
+from typing import cast, Tuple
 
 import pytest
 
 import torch
+from monarch._rust_bindings.monarch_hyperactor.actor import (
+    PythonMessage,
+    PythonMessageKind,
+)
+from monarch._rust_bindings.monarch_hyperactor.mailbox import (
+    PortId,
+    PortRef,
+    UndeliverableMessageEnvelope,
+)
+from monarch._rust_bindings.monarch_hyperactor.proc import ActorId
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 
-from monarch._src.actor.actor_mesh import ActorMesh, Channel, Port
+from monarch._src.actor.actor_mesh import ActorMesh, Channel, context, Port
+from monarch._src.actor.future import Future
+from monarch._src.actor.host_mesh import fake_in_process_host
 
 from monarch.actor import (
     Accumulator,
@@ -34,9 +50,10 @@ from monarch.actor import (
     current_rank,
     current_size,
     endpoint,
-    local_proc_mesh,
-    proc_mesh,
+    this_host,
+    this_proc,
 )
+from monarch.tools.config import defaults
 from typing_extensions import assert_type
 
 
@@ -71,7 +88,7 @@ class Indirect(Actor):
 
 @pytest.mark.timeout(60)
 async def test_choose():
-    proc = await local_proc_mesh(gpus=2)
+    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     v = await proc.spawn("counter", Counter, 3)
     i = await proc.spawn("indirect", Indirect)
     v.incr.broadcast()
@@ -90,7 +107,7 @@ async def test_choose():
 
 @pytest.mark.timeout(60)
 async def test_stream():
-    proc = await local_proc_mesh(gpus=2)
+    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     v = await proc.spawn("counter2", Counter, 3)
     v.incr.broadcast()
 
@@ -105,42 +122,42 @@ class To(Actor):
 
 class From(Actor):
     @endpoint
-    async def get(self, to: To):
+    async def fetch(self, to: To):
         return [await x for x in to.whoami.stream()]
 
 
 @pytest.mark.timeout(60)
 async def test_mesh_passed_to_mesh():
-    proc = await local_proc_mesh(gpus=2)
+    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     f = await proc.spawn("from", From)
     t = await proc.spawn("to", To)
-    all = [y for x in f.get.stream(t) for y in await x]
+    all = [y for x in f.fetch.stream(t) for y in await x]
     assert len(all) == 4
     assert all[0] != all[1]
 
 
 @pytest.mark.timeout(60)
 async def test_mesh_passed_to_mesh_on_different_proc_mesh():
-    proc = await local_proc_mesh(gpus=2)
-    proc2 = await local_proc_mesh(gpus=2)
+    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
+    proc2 = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     f = await proc.spawn("from", From)
     t = await proc2.spawn("to", To)
-    all = [y for x in f.get.stream(t) for y in await x]
+    all = [y for x in f.fetch.stream(t) for y in await x]
     assert len(all) == 4
     assert all[0] != all[1]
 
 
 @pytest.mark.timeout(60)
 def test_actor_slicing():
-    proc = local_proc_mesh(gpus=2)
-    proc2 = local_proc_mesh(gpus=2)
+    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
+    proc2 = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
 
-    f = proc.spawn("from", From).get()
-    t = proc2.spawn("to", To).get()
+    f = proc.spawn("from", From)
+    t = proc2.spawn("to", To)
 
     assert t.slice(gpus=0).whoami.call().get() != t.slice(gpus=1).whoami.call().get()
 
-    result = [y for x in f.get.stream(t.slice(gpus=0)) for y in x.get()]
+    result = [y for x in f.fetch.stream(t.slice(gpus=0)) for y in x.get()]
     assert len(result) == 2
 
     assert result[0] == result[1]
@@ -148,7 +165,7 @@ def test_actor_slicing():
 
 @pytest.mark.timeout(60)
 async def test_aggregate():
-    proc = await local_proc_mesh(gpus=2)
+    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     counter = await proc.spawn("counter", Counter, 1)
     counter.incr.broadcast()
     acc = Accumulator(counter.value, 0, operator.add)
@@ -161,16 +178,31 @@ class RunIt(Actor):
     async def run(self, fn):
         return fn()
 
+    @endpoint
+    async def return_current_rank_str(self):
+        return str(current_rank())
+
 
 @pytest.mark.timeout(60)
 async def test_rank_size():
-    proc = await local_proc_mesh(gpus=2)
+    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     r = await proc.spawn("runit", RunIt)
 
     acc = Accumulator(r.run, 0, operator.add)
 
     assert 1 == await acc.accumulate(lambda: current_rank()["gpus"])
     assert 4 == await acc.accumulate(lambda: current_size()["gpus"])
+
+
+@pytest.mark.timeout(60)
+async def test_rank_string():
+    proc = fake_in_process_host().spawn_procs(per_host={"hosts": 1, "gpus": 2})
+    r = proc.spawn("runit", RunIt)
+    vm = r.return_current_rank_str.call().get()
+    r0 = vm.flatten("r").slice(r=0).item()
+    r1 = vm.flatten("r").slice(r=1).item()
+    assert r0 == "{'hosts': 0/1, 'gpus': 0/2}"
+    assert r1 == "{'hosts': 0/1, 'gpus': 1/2}"
 
 
 class SyncActor(Actor):
@@ -181,7 +213,7 @@ class SyncActor(Actor):
 
 @pytest.mark.timeout(60)
 async def test_sync_actor():
-    proc = await local_proc_mesh(gpus=2)
+    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     a = await proc.spawn("actor", SyncActor)
     c = await proc.spawn("counter", Counter, 5)
     r = await a.sync_endpoint.choose(c)
@@ -190,7 +222,7 @@ async def test_sync_actor():
 
 @pytest.mark.timeout(60)
 def test_sync_actor_sync_client() -> None:
-    proc = local_proc_mesh(gpus=2)
+    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     a = proc.spawn("actor", SyncActor).get()
     c = proc.spawn("counter", Counter, 5).get()
     r = a.sync_endpoint.choose(c).get()
@@ -199,13 +231,13 @@ def test_sync_actor_sync_client() -> None:
 
 @pytest.mark.timeout(60)
 def test_proc_mesh_size() -> None:
-    proc = local_proc_mesh(gpus=2)
+    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     assert 2 == proc.size("gpus")
 
 
 @pytest.mark.timeout(60)
 def test_rank_size_sync() -> None:
-    proc = local_proc_mesh(gpus=2)
+    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     r = proc.spawn("runit", RunIt).get()
 
     acc = Accumulator(r.run, 0, operator.add)
@@ -215,7 +247,7 @@ def test_rank_size_sync() -> None:
 
 @pytest.mark.timeout(60)
 def test_accumulate_sync() -> None:
-    proc = local_proc_mesh(gpus=2)
+    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     counter = proc.spawn("counter", Counter, 1).get()
     counter.incr.broadcast()
     acc = Accumulator(counter.value, 0, operator.add)
@@ -231,7 +263,7 @@ class CastToCounter(Actor):
 
 @pytest.mark.timeout(60)
 def test_value_mesh() -> None:
-    proc = local_proc_mesh(gpus=2)
+    proc = fake_in_process_host().spawn_procs(per_host={"hosts": 1, "gpus": 2})
     counter = proc.spawn("counter", Counter, 0).get()
     counter.slice(hosts=0, gpus=1).incr.broadcast()
     x = counter.value.call().get()
@@ -244,6 +276,16 @@ def test_value_mesh() -> None:
 
 @pytest.mark.timeout(60)
 def test_rust_binding_modules_correct() -> None:
+    """
+    This tests that rust bindings will survive pickling correctly.
+
+    To correctly define a rust binding, either
+
+    (1) Set its module to "monarch._rust_bindings.rust_crate.rust_module",
+        and make sure it is registered in monarch_extension/lib.rs
+    (2) Set its module to some existing python file, and use @rust_struct to install
+        the rust struct in that file and patch in any python extension methods.
+    """
     import monarch._rust_bindings as bindings
 
     def check(module, path):
@@ -253,15 +295,16 @@ def test_rust_binding_modules_correct() -> None:
             if isinstance(value, ModuleType):
                 check(value, f"{path}.{name}")
             elif hasattr(value, "__module__"):
-                assert value.__name__ == name
-                assert value.__module__ == path
+                value_module = importlib.import_module(value.__module__)
+                resolved_value = getattr(value_module, value.__name__)
+                assert value is resolved_value
 
     check(bindings, "monarch._rust_bindings")
 
 
 @pytest.mark.timeout(60)
 def test_proc_mesh_liveness() -> None:
-    mesh = proc_mesh(gpus=2)
+    mesh = this_host().spawn_procs(per_host={"gpus": 2})
     counter = mesh.spawn("counter", Counter, 1).get()
     del mesh
     # Give some time for the mesh to have been shut down.
@@ -286,7 +329,7 @@ class TLSActor(Actor):
         self.local.value += 1
 
     @endpoint
-    def get(self):
+    def get_value(self):
         return self.local.value
 
     @endpoint
@@ -297,14 +340,14 @@ class TLSActor(Actor):
 @pytest.mark.timeout(60)
 async def test_actor_tls() -> None:
     """Test that thread-local state is respected."""
-    pm = proc_mesh(gpus=1)
+    pm = this_host().spawn_procs(per_host={"gpus": 1})
     am = await pm.spawn("tls", TLSActor)
     await am.increment.call_one()
     await am.increment_async.call_one()
     await am.increment.call_one()
     await am.increment_async.call_one()
 
-    assert 4 == await am.get.call_one()
+    assert 4 == await am.get_value.call_one()
     assert 4 == await am.get_async.call_one()
 
 
@@ -320,21 +363,21 @@ class TLSActorFullSync(Actor):
         self.local.value += 1
 
     @endpoint
-    def get(self):
+    def get_value(self):
         return self.local.value
 
 
 @pytest.mark.timeout(60)
 async def test_actor_tls_full_sync() -> None:
     """Test that thread-local state is respected."""
-    pm = proc_mesh(gpus=1)
+    pm = this_host().spawn_procs(per_host={"gpus": 1})
     am = await pm.spawn("tls", TLSActorFullSync)
     await am.increment.call_one()
     await am.increment.call_one()
     await am.increment.call_one()
     await am.increment.call_one()
 
-    assert 4 == await am.get.call_one()
+    assert 4 == await am.get_value.call_one()
 
 
 class AsyncActor(Actor):
@@ -351,10 +394,10 @@ class AsyncActor(Actor):
         self.should_exit = True
 
 
-@pytest.mark.timeout(15)
+@pytest.mark.timeout(30)
 async def test_async_concurrency():
     """Test that async endpoints will be processed concurrently."""
-    pm = await proc_mesh(gpus=1)
+    pm = await this_host().spawn_procs()
     am = await pm.spawn("async", AsyncActor)
     fut = am.sleep.call()
     # This call should go through and exit the sleep loop, as long as we are
@@ -506,7 +549,7 @@ async def test_actor_log_streaming() -> None:
             sys.stderr = stderr_file
 
             try:
-                pm = proc_mesh(gpus=2)
+                pm = this_host().spawn_procs(per_host={"gpus": 2})
                 am = await pm.spawn("printer", Printer)
 
                 # Disable streaming logs to client
@@ -546,8 +589,7 @@ async def test_actor_log_streaming() -> None:
                     await am.print.call("has print streaming too")
                     await am.log.call("has log streaming as level matched")
 
-                # Give it some time to reflect and aggregate
-                await asyncio.sleep(1)
+                await pm.stop()
 
                 # Flush all outputs
                 stdout_file.flush()
@@ -656,13 +698,14 @@ async def test_logging_option_defaults() -> None:
             sys.stderr = stderr_file
 
             try:
-                pm = await proc_mesh(gpus=2)
+                pm = await this_host().spawn_procs(per_host={"gpus": 2})
                 am = await pm.spawn("printer", Printer)
 
                 for _ in range(5):
                     await am.print.call("print streaming")
                     await am.log.call("log streaming")
-                await asyncio.sleep(4)
+
+                await pm.stop()
 
                 # Flush all outputs
                 stdout_file.flush()
@@ -715,6 +758,151 @@ async def test_logging_option_defaults() -> None:
             pass
 
 
+# oss_skip: pytest keeps complaining about mocking get_ipython module
+@pytest.mark.oss_skip
+@pytest.mark.timeout(180)
+async def test_flush_logs_ipython() -> None:
+    """Test that logs are flushed when get_ipython is available and post_run_cell event is triggered."""
+    # Save original file descriptors
+    original_stdout_fd = os.dup(1)  # stdout
+
+    try:
+        # Create temporary files to capture output
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as stdout_file:
+            stdout_path = stdout_file.name
+
+            # Redirect file descriptors to our temp files
+            os.dup2(stdout_file.fileno(), 1)
+
+            # Also redirect Python's sys.stdout
+            original_sys_stdout = sys.stdout
+            sys.stdout = stdout_file
+
+            try:
+                # Mock IPython environment
+                class MockExecutionResult:
+                    pass
+
+                class MockEvents:
+                    def __init__(self):
+                        self.callbacks = {}
+                        self.registers = 0
+                        self.unregisters = 0
+
+                    def register(self, event_name, callback):
+                        if event_name not in self.callbacks:
+                            self.callbacks[event_name] = []
+                        self.callbacks[event_name].append(callback)
+                        self.registers += 1
+
+                    def unregister(self, event_name, callback):
+                        if event_name not in self.callbacks:
+                            raise ValueError(f"Event {event_name} not registered")
+                        assert callback in self.callbacks[event_name]
+                        self.callbacks[event_name].remove(callback)
+                        self.unregisters += 1
+
+                    def trigger(self, event_name, *args, **kwargs):
+                        if event_name in self.callbacks:
+                            for callback in self.callbacks[event_name]:
+                                callback(*args, **kwargs)
+
+                class MockIPython:
+                    def __init__(self):
+                        self.events = MockEvents()
+
+                mock_ipython = MockIPython()
+
+                with unittest.mock.patch(
+                    "monarch._src.actor.logging.get_ipython",
+                    lambda: mock_ipython,
+                ), unittest.mock.patch("monarch._src.actor.logging.IN_IPYTHON", True):
+                    # Make sure we can register and unregister callbacks
+                    for i in range(3):
+                        pm1 = await this_host().spawn_procs(per_host={"gpus": 2})
+                        pm2 = await this_host().spawn_procs(per_host={"gpus": 2})
+                        am1 = await pm1.spawn("printer", Printer)
+                        am2 = await pm2.spawn("printer", Printer)
+
+                        # Set aggregation window to ensure logs are buffered
+                        await pm1.logging_option(
+                            stream_to_client=True, aggregate_window_sec=600
+                        )
+                        await pm2.logging_option(
+                            stream_to_client=True, aggregate_window_sec=600
+                        )
+                        assert mock_ipython.events.unregisters == 2 * i
+                        # TODO: remove `1 +` from attaching controller_controller
+                        assert mock_ipython.events.registers == 1 + 2 * (i + 1)
+                        await asyncio.sleep(1)
+
+                        # Generate some logs that will be aggregated
+                        for _ in range(5):
+                            await am1.print.call("ipython1 test log")
+                            await am2.print.call("ipython2 test log")
+
+                        # Trigger the post_run_cell event which should flush logs
+                        mock_ipython.events.trigger(
+                            "post_run_cell", MockExecutionResult()
+                        )
+
+                    # Flush all outputs
+                    stdout_file.flush()
+                    os.fsync(stdout_file.fileno())
+
+                gc.collect()
+
+                # TODO: this should be 6 without attaching controller_controller
+                assert mock_ipython.events.registers == 7
+                # There are many objects still taking refs
+                assert mock_ipython.events.unregisters == 4
+                # TODO: same, this should be 2
+                assert len(mock_ipython.events.callbacks["post_run_cell"]) == 3
+            finally:
+                # Restore Python's sys.stdout
+                sys.stdout = original_sys_stdout
+
+        # Restore original file descriptors
+        os.dup2(original_stdout_fd, 1)
+
+        # Read the captured output
+        with open(stdout_path, "r") as f:
+            stdout_content = f.read()
+
+        # TODO: there are quite a lot of code dups and boilerplate; make them contextmanager utils
+
+        # Clean up temp files
+        os.unlink(stdout_path)
+
+        # Verify that logs were flushed when the post_run_cell event was triggered
+        # We should see the aggregated logs in the output
+        assert (
+            len(
+                re.findall(
+                    r"\[10 similar log lines\].*ipython1 test log", stdout_content
+                )
+            )
+            == 3
+        ), stdout_content
+
+        assert (
+            len(
+                re.findall(
+                    r"\[10 similar log lines\].*ipython2 test log", stdout_content
+                )
+            )
+            == 3
+        ), stdout_content
+
+    finally:
+        # Ensure file descriptors are restored even if something goes wrong
+        try:
+            os.dup2(original_stdout_fd, 1)
+            os.close(original_stdout_fd)
+        except OSError:
+            pass
+
+
 # oss_skip: importlib not pulling resource correctly in git CI, needs to be revisited
 @pytest.mark.oss_skip
 async def test_flush_logs_fast_exit() -> None:
@@ -725,22 +913,218 @@ async def test_flush_logs_fast_exit() -> None:
 
     # Run the binary in a separate process and capture stdout and stderr
     cmd = [str(test_bin), "flush-logs"]
+
     process = subprocess.run(cmd, capture_output=True, timeout=60, text=True)
 
     # Check if the process ended without error
     if process.returncode != 0:
         raise RuntimeError(f"{cmd} ended with error code {process.returncode}. ")
 
-    # Assertions on the captured output
+    # Assertions on the captured output, 160 = 32 procs * 5 logs per proc
+    # 32 and 5 are specified in the test_bin flush-logs.
     assert (
         len(
             re.findall(
-                r"similar.*has print streaming",
+                r"160 similar log lines.*has print streaming",
                 process.stdout,
             )
         )
         == 1
     ), process.stdout
+
+
+@pytest.mark.timeout(60)
+async def test_flush_on_disable_aggregation() -> None:
+    """Test that logs are flushed when disabling aggregation.
+
+    This tests the corner case: "Make sure we flush whatever in the aggregators before disabling aggregation."
+    """
+    # Save original file descriptors
+    original_stdout_fd = os.dup(1)  # stdout
+
+    try:
+        # Create temporary files to capture output
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as stdout_file:
+            stdout_path = stdout_file.name
+
+            # Redirect file descriptors to our temp files
+            os.dup2(stdout_file.fileno(), 1)
+
+            # Also redirect Python's sys.stdout
+            original_sys_stdout = sys.stdout
+            sys.stdout = stdout_file
+
+            try:
+                pm = await this_host().spawn_procs(per_host={"gpus": 2})
+                am = await pm.spawn("printer", Printer)
+
+                # Set a long aggregation window to ensure logs aren't flushed immediately
+                await pm.logging_option(stream_to_client=True, aggregate_window_sec=60)
+
+                # Generate some logs that will be aggregated but not flushed immediately
+                for _ in range(5):
+                    await am.print.call("aggregated log line")
+                await asyncio.sleep(1)
+
+                # Now disable aggregation - this should trigger an immediate flush
+                await pm.logging_option(
+                    stream_to_client=True, aggregate_window_sec=None
+                )
+
+                # Wait a bit to ensure logs are collected
+                await asyncio.sleep(1)
+                for _ in range(5):
+                    await am.print.call("single log line")
+
+                await pm.stop()
+
+                # Flush all outputs
+                stdout_file.flush()
+                os.fsync(stdout_file.fileno())
+
+            finally:
+                # Restore Python's sys.stdout
+                sys.stdout = original_sys_stdout
+
+        # Restore original file descriptors
+        os.dup2(original_stdout_fd, 1)
+
+        # Read the captured output
+        with open(stdout_path, "r") as f:
+            stdout_content = f.read()
+
+        # Clean up temp files
+        os.unlink(stdout_path)
+
+        # Verify that logs were flushed when aggregation was disabled
+        # We should see the aggregated logs in the output
+        # 10 = 5 log lines * 2 procs
+        assert re.search(
+            r"\[10 similar log lines\].*aggregated log line", stdout_content
+        ), stdout_content
+
+        # No aggregated single log lines
+        assert not re.search(
+            r"similar log lines.*single log line", stdout_content
+        ), stdout_content
+
+        # 10 = 5 log lines * 2 procs
+        assert (
+            len(re.findall(r"\[.* [0-9]+\] single log line", stdout_content)) == 10
+        ), stdout_content
+
+    finally:
+        # Ensure file descriptors are restored even if something goes wrong
+        try:
+            os.dup2(original_stdout_fd, 1)
+            os.close(original_stdout_fd)
+        except OSError:
+            pass
+
+
+@pytest.mark.timeout(120)
+async def test_multiple_ongoing_flushes_no_deadlock() -> None:
+    """
+    The goal is to make sure when a user sends multiple sync flushes, we are not deadlocked.
+    Because now a flush call is purely sync, it is very easy to get into a deadlock.
+    So we assert the last flush call will not get into such a state.
+    """
+    pm = this_host().spawn_procs(per_host={"gpus": 4})
+    am = pm.spawn("printer", Printer)
+
+    # Generate some logs that will be aggregated but not flushed immediately
+    for _ in range(10):
+        await am.print.call("aggregated log line")
+
+    log_mesh = pm._logging_manager._logging_mesh_client
+    assert log_mesh is not None
+    futures = []
+    for _ in range(5):
+        # FIXME: the order of futures doesn't necessarily mean the order of flushes due to the async nature.
+        await asyncio.sleep(0.1)
+        futures.append(Future(coro=log_mesh.flush().spawn().task()))
+
+    # The last flush should not block
+    futures[-1].get()
+
+
+@pytest.mark.timeout(60)
+async def test_adjust_aggregation_window() -> None:
+    """Test that the flush deadline is updated when the aggregation window is adjusted.
+
+    This tests the corner case: "This can happen if the user has adjusted the aggregation window."
+    """
+    # Save original file descriptors
+    original_stdout_fd = os.dup(1)  # stdout
+
+    try:
+        # Create temporary files to capture output
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as stdout_file:
+            stdout_path = stdout_file.name
+
+            # Redirect file descriptors to our temp files
+            os.dup2(stdout_file.fileno(), 1)
+
+            # Also redirect Python's sys.stdout
+            original_sys_stdout = sys.stdout
+            sys.stdout = stdout_file
+
+            try:
+                pm = await this_host().spawn_procs(per_host={"gpus": 2})
+                am = await pm.spawn("printer", Printer)
+
+                # Set a long aggregation window initially
+                await pm.logging_option(stream_to_client=True, aggregate_window_sec=100)
+
+                # Generate some logs that will be aggregated
+                for _ in range(3):
+                    await am.print.call("first batch of logs")
+                await asyncio.sleep(1)
+
+                # Now adjust to a shorter window - this should update the flush deadline
+                await pm.logging_option(stream_to_client=True, aggregate_window_sec=2)
+
+                # Generate more logs
+                for _ in range(3):
+                    await am.print.call("second batch of logs")
+
+                await pm.stop()
+
+                # Flush all outputs
+                stdout_file.flush()
+                os.fsync(stdout_file.fileno())
+
+            finally:
+                # Restore Python's sys.stdout/stderr
+                sys.stdout = original_sys_stdout
+
+        # Restore original file descriptors
+        os.dup2(original_stdout_fd, 1)
+
+        # Read the captured output
+        with open(stdout_path, "r") as f:
+            stdout_content = f.read()
+
+        # Clean up temp files
+        os.unlink(stdout_path)
+
+        # Verify that logs were flushed when the aggregation window was adjusted
+        # We should see both batches of logs in the output
+        assert re.search(
+            r"\[6 similar log lines\].*first batch of logs", stdout_content
+        ), stdout_content
+
+        assert re.search(
+            r"similar log lines.*second batch of logs", stdout_content
+        ), stdout_content
+
+    finally:
+        # Ensure file descriptors are restored even if something goes wrong
+        try:
+            os.dup2(original_stdout_fd, 1)
+            os.close(original_stdout_fd)
+        except OSError:
+            pass
 
 
 class SendAlot(Actor):
@@ -752,7 +1136,7 @@ class SendAlot(Actor):
 
 @pytest.mark.timeout(60)
 def test_port_as_argument() -> None:
-    proc_mesh = local_proc_mesh(gpus=1)
+    proc_mesh = fake_in_process_host().spawn_procs(per_host={"gpus": 1})
     s = proc_mesh.spawn("send_alot", SendAlot).get()
     send, recv = Channel[int].open()
 
@@ -762,14 +1146,14 @@ def test_port_as_argument() -> None:
         assert i == recv.recv().get()
 
 
-@pytest.mark.timeout(15)
+@pytest.mark.timeout(30)
 async def test_same_actor_twice() -> None:
-    pm = proc_mesh(gpus=1)
-    await pm.spawn("dup", Counter, 0)
+    pm = this_host().spawn_procs(per_host={"gpus": 1})
+    await pm.spawn("dup", Counter, 0).initialized
 
     # The second spawn with the same name should fail with a specific error
     with pytest.raises(Exception) as exc_info:
-        await pm.spawn("dup", Counter, 0)
+        await pm.spawn("dup", Counter, 0).initialized
 
     # Assert that the error message contains the expected text about duplicate actor name
     error_msg = str(exc_info.value)
@@ -778,9 +1162,58 @@ async def test_same_actor_twice() -> None:
     ), f"Expected error message about duplicate actor name, got: {error_msg}"
 
 
+class LsActor(Actor):
+    def __init__(self, workspace: str):
+        self.workspace = workspace
+
+    @endpoint
+    async def ls(self) -> list[str]:
+        return os.listdir(self.workspace)
+
+
+async def test_sync_workspace() -> None:
+    # create two workspaces: one for local and one for remote
+    with tempfile.TemporaryDirectory() as workspace_src, tempfile.TemporaryDirectory() as workspace_dst:
+
+        def bootstrap_WORKSPACE_DIR() -> None:
+            import os
+
+            os.environ["WORKSPACE_DIR"] = workspace_dst
+
+        pm = this_host().spawn_procs(
+            per_host={"gpus": 1}, bootstrap=bootstrap_WORKSPACE_DIR
+        )
+
+        config = defaults.config("slurm", workspace_src)
+        await pm.sync_workspace(workspace=config.workspace, auto_reload=True)
+
+        # no file in remote workspace initially
+        am = await pm.spawn("ls", LsActor, workspace_dst)
+        for item in list(am.ls.call().get()):
+            assert len(item[1]) == 0
+
+        # write a file to local workspace
+        file_path = os.path.join(workspace_src, "new_file")
+        with open(file_path, "w") as f:
+            f.write("hello world")
+            f.flush()
+
+        # force a sync and it should populate on the dst workspace
+        await pm.sync_workspace(config.workspace, auto_reload=True)
+        for item in list(am.ls.call().get()):
+            assert len(item[1]) == 1
+            assert item[1][0] == "new_file"
+            file_path = os.path.join(workspace_dst, item[1][0])
+            with open(file_path, "r") as f:
+                assert f.readline() == "hello world"
+
+    # sanity check
+    assert "WORKSPACE_DIR" not in os.environ, "test leaves env var side-effects!"
+
+
 class TestActorMeshStop(unittest.IsolatedAsyncioTestCase):
     async def test_actor_mesh_stop(self) -> None:
-        pm = proc_mesh(gpus=2)
+        pm = this_host().spawn_procs(per_host={"gpus": 2})
         am_1 = await pm.spawn("printer", Printer)
         am_2 = await pm.spawn("printer2", Printer)
         await am_1.print.call("hello 1")
@@ -795,6 +1228,15 @@ class TestActorMeshStop(unittest.IsolatedAsyncioTestCase):
         await am_2.print.call("hello 3")
         await am_2.log.call("hello 4")
 
+        await pm.stop()
+
+    async def test_proc_mesh_stop_after_actor_mesh_stop(self) -> None:
+        pm = this_host().spawn_procs(per_host={"gpus": 2})
+        am = await pm.spawn("printer", Printer)
+
+        await cast(ActorMesh, am).stop()
+        await pm.stop()
+
 
 class PortedActor(Actor):
     @endpoint(explicit_response_port=True)
@@ -804,7 +1246,7 @@ class PortedActor(Actor):
 
 @pytest.mark.timeout(60)
 def test_ported_actor():
-    proc_mesh = local_proc_mesh(gpus=1).get()
+    proc_mesh = fake_in_process_host().spawn_procs(per_host={"gpus": 1}).get()
     a = proc_mesh.spawn("port_actor", PortedActor).get()
     assert 5 == a.add.call_one(2).get()
 
@@ -832,3 +1274,116 @@ def test_select_result() -> None:
     b = PythonTask.spawn_blocking(lambda: s(0))
     r = PythonTask.select_one([a.task(), b.task()]).block_on()
     assert r == (0, 1)
+
+
+def test_mesh_len():
+    proc_mesh = fake_in_process_host().spawn_procs(per_host={"gpus": 12})
+    s = proc_mesh.spawn("sync_actor", SyncActor).get()
+    assert 12 == len(s)
+
+
+class UndeliverableMessageReceiver(Actor):
+    def __init__(self):
+        self._messages = asyncio.Queue()
+
+    @endpoint
+    async def receive_undeliverable(
+        self, sender: ActorId, dest: PortId, error_msg: str
+    ) -> None:
+        await self._messages.put((sender, dest, error_msg))
+
+    @endpoint
+    async def get_messages(self) -> Tuple[ActorId, PortId, str]:
+        return await self._messages.get()
+
+
+class UndeliverableMessageSender(Actor):
+    def __init__(self, receiver: UndeliverableMessageReceiver):
+        self._receiver = receiver
+
+    @endpoint
+    def send_undeliverable(self) -> None:
+        mailbox = context().actor_instance._mailbox
+        port_id = PortId(
+            actor_id=ActorId(
+                world_name=mailbox.actor_id.world_name, rank=0, actor_name="bogus"
+            ),
+            port=1234,
+        )
+        port_ref = PortRef(port_id)
+        port_ref.send(
+            mailbox,
+            PythonMessage(PythonMessageKind.Result(None), b"123"),
+        )
+
+    def _handle_undeliverable_message(
+        self, message: UndeliverableMessageEnvelope
+    ) -> bool:
+        self._receiver.receive_undeliverable.call_one(
+            message.sender(), message.dest(), message.error_msg()
+        ).get()
+        return True
+
+
+@pytest.mark.timeout(60)
+async def test_undeliverable_message() -> None:
+    pm = this_host().spawn_procs(per_host={"gpus": 1})
+    receiver = pm.spawn("undeliverable_receiver", UndeliverableMessageReceiver)
+    sender = pm.spawn("undeliverable_sender", UndeliverableMessageSender, receiver)
+    sender.send_undeliverable.call().get()
+    sender, dest, error_msg = receiver.get_messages.call_one().get()
+    assert sender.actor_name == "undeliverable_sender"
+    assert dest.actor_id.actor_name == "bogus"
+    assert error_msg is not None
+    pm.stop().get()
+
+
+def test_this_and_that():
+    counter = this_proc().spawn("counter", Counter, 7)
+    assert 7 == counter.value.call_one().get()
+
+
+class ReceptorActor(Actor):
+    @endpoint
+    def status(self):
+        return 1
+
+
+async def test_things_survive_losing_python_reference() -> None:
+    """Test the slice_receptor_mesh function in LOCAL mode, verifying that setup methods are called."""
+
+    receptor = (
+        this_host()
+        .spawn_procs(per_host={"gpus": 1})
+        .spawn(
+            "receptor",
+            ReceptorActor,
+        )
+    )
+    receptor = receptor.slice(gpus=0)
+
+    await receptor.status.call()
+
+
+class IsInit(Actor):
+    @endpoint
+    def is_cuda_initialized(self) -> bool:
+        cuda = ctypes.CDLL("libcuda.so.1")
+        CUresult = ctypes.c_int
+        cuDeviceGetCount = cuda.cuDeviceGetCount
+        cuDeviceGetCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        cuDeviceGetCount.restype = CUresult
+        count = ctypes.c_int()
+        result = cuDeviceGetCount(ctypes.byref(count))
+        CUDA_ERROR_NOT_INITIALIZED = 3
+        return result == CUDA_ERROR_NOT_INITIALIZED
+
+
+@pytest.mark.oss_skip
+def test_cuda_is_not_initialized_in_a_new_proc():
+    try:
+        ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        pytest.skip("cannot find cuda")
+    proc = this_host().spawn_procs().spawn("is_init", IsInit)
+    assert not proc.is_cuda_initialized.call_one().get()

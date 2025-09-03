@@ -8,47 +8,15 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use std::cell::Cell;
-
 use hyperactor::clock::ClockKind;
 use hyperactor::clock::RealClock;
 use hyperactor::clock::SimClock;
+use hyperactor_telemetry::sqlite::SqliteTracing;
 use hyperactor_telemetry::swap_telemetry_clock;
 use opentelemetry::global;
 use opentelemetry::metrics;
 use pyo3::prelude::*;
 use pyo3::types::PyTraceback;
-use tracing::span::EnteredSpan;
-// Thread local to store the current span
-thread_local! {
-    static ACTIVE_ACTOR_SPAN: Cell<Option<EnteredSpan>> = const { Cell::new(None) };
-}
-
-/// Enter the span stored in the thread local
-#[pyfunction]
-pub fn enter_span(module_name: String, method_name: String, actor_id: String) -> PyResult<()> {
-    let mut maybe_span = ACTIVE_ACTOR_SPAN.take();
-    if maybe_span.is_none() {
-        maybe_span = Some(
-            tracing::info_span!(
-                "py_actor_method",
-                name = method_name,
-                target = module_name,
-                actor_id = actor_id
-            )
-            .entered(),
-        );
-    }
-    ACTIVE_ACTOR_SPAN.set(maybe_span);
-    Ok(())
-}
-
-/// Exit the span stored in the thread local
-#[pyfunction]
-pub fn exit_span() -> PyResult<()> {
-    ACTIVE_ACTOR_SPAN.replace(None);
-    Ok(())
-}
 
 /// Get the current span ID from the active span
 #[pyfunction]
@@ -65,7 +33,6 @@ pub fn forward_to_tracing(py: Python, record: PyObject) -> PyResult<()> {
     let file = record.getattr(py, "filename")?;
     let file: &str = file.extract(py)?;
     let level: i32 = record.getattr(py, "levelno")?.extract(py)?;
-
     // Map level number to level name
     match level {
         40 | 50 => {
@@ -82,6 +49,7 @@ pub fn forward_to_tracing(py: Python, record: PyObject) -> PyResult<()> {
             match traceback {
                 Some(traceback) => {
                     tracing::error!(
+                        target:"log_events",
                         file = file,
                         lineno = lineno,
                         stacktrace = traceback,
@@ -93,10 +61,10 @@ pub fn forward_to_tracing(py: Python, record: PyObject) -> PyResult<()> {
                 }
             }
         }
-        30 => tracing::warn!(file = file, lineno = lineno, message),
-        20 => tracing::info!(file = file, lineno = lineno, message),
-        10 => tracing::debug!(file = file, lineno = lineno, message),
-        _ => tracing::info!(file = file, lineno = lineno, message),
+        30 => tracing::warn!(target:"log_events", file = file, lineno = lineno, message),
+        20 => tracing::info!(target:"log_events", file = file, lineno = lineno, message),
+        10 => tracing::debug!(target:"log_events", file = file, lineno = lineno, message),
+        _ => tracing::info!(target:"log_events", file = file, lineno = lineno, message),
     }
     Ok(())
 }
@@ -110,6 +78,12 @@ pub fn use_real_clock() -> PyResult<()> {
 pub fn use_sim_clock() -> PyResult<()> {
     swap_telemetry_clock(ClockKind::Sim(SimClock));
     Ok(())
+}
+
+/// Get the current execution ID
+#[pyfunction]
+pub fn get_execution_id() -> PyResult<String> {
+    Ok(hyperactor_telemetry::env::execution_id())
 }
 
 // opentelemetry requires that the names of counters etc are static for the lifetime of the program.
@@ -203,8 +177,17 @@ struct PySpan {
 #[pymethods]
 impl PySpan {
     #[new]
-    fn new(name: &str) -> Self {
-        let span = tracing::span!(tracing::Level::DEBUG, "python.span", name = name);
+    fn new(name: &str, actor_id: Option<&str>) -> Self {
+        let span = if let Some(actor_id) = actor_id {
+            tracing::span!(
+                tracing::Level::DEBUG,
+                "python.span",
+                name = name,
+                actor_id = actor_id
+            )
+        } else {
+            tracing::span!(tracing::Level::DEBUG, "python.span", name = name)
+        };
         let entered_span = span.entered();
 
         Self { span: entered_span }
@@ -212,6 +195,62 @@ impl PySpan {
 
     fn exit(&mut self) {
         self.span = tracing::span::Span::none().entered();
+    }
+}
+
+#[pyclass(
+    subclass,
+    module = "monarch._rust_bindings.monarch_hyperactor.telemetry"
+)]
+struct PySqliteTracing {
+    guard: Option<SqliteTracing>,
+}
+
+#[pymethods]
+impl PySqliteTracing {
+    #[new]
+    #[pyo3(signature = (in_memory = false))]
+    fn new(in_memory: bool) -> PyResult<Self> {
+        let guard = if in_memory {
+            SqliteTracing::new_in_memory()
+        } else {
+            SqliteTracing::new()
+        };
+
+        match guard {
+            Ok(guard) => Ok(Self { guard: Some(guard) }),
+            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create SQLite tracing guard: {}",
+                e
+            ))),
+        }
+    }
+
+    fn db_path(&self) -> PyResult<Option<String>> {
+        match &self.guard {
+            Some(guard) => Ok(guard.db_path().map(|p| p.to_string_lossy().to_string())),
+            None => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "Guard has been closed",
+            )),
+        }
+    }
+
+    fn __enter__(slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
+        Ok(slf)
+    }
+
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<PyObject>,
+        _exc_value: Option<PyObject>,
+        _traceback: Option<PyObject>,
+    ) -> PyResult<bool> {
+        self.guard = None;
+        Ok(false) // Don't suppress exceptions
+    }
+
+    fn close(&mut self) {
+        self.guard = None;
     }
 }
 
@@ -228,20 +267,6 @@ pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(f)?;
 
     // Register the span-related functions
-    let enter_span_fn = wrap_pyfunction!(enter_span, module)?;
-    enter_span_fn.setattr(
-        "__module__",
-        "monarch._rust_bindings.monarch_hyperactor.telemetry",
-    )?;
-    module.add_function(enter_span_fn)?;
-
-    let exit_span_fn = wrap_pyfunction!(exit_span, module)?;
-    exit_span_fn.setattr(
-        "__module__",
-        "monarch._rust_bindings.monarch_hyperactor.telemetry",
-    )?;
-    module.add_function(exit_span_fn)?;
-
     let get_current_span_id_fn = wrap_pyfunction!(get_current_span_id, module)?;
     get_current_span_id_fn.setattr(
         "__module__",
@@ -263,9 +288,17 @@ pub fn register_python_bindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     module.add_function(use_sim_clock_fn)?;
 
+    let get_execution_id_fn = wrap_pyfunction!(get_execution_id, module)?;
+    get_execution_id_fn.setattr(
+        "__module__",
+        "monarch._rust_bindings.monarch_hyperactor.telemetry",
+    )?;
+    module.add_function(get_execution_id_fn)?;
+
     module.add_class::<PySpan>()?;
     module.add_class::<PyCounter>()?;
     module.add_class::<PyHistogram>()?;
     module.add_class::<PyUpDownCounter>()?;
+    module.add_class::<PySqliteTracing>()?;
     Ok(())
 }

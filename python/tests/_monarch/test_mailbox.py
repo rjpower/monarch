@@ -157,9 +157,7 @@ async def test_accumulator() -> None:
 class MyActor:
     async def handle(
         self,
-        mailbox: Mailbox,
-        rank: int,
-        shape: Shape,
+        ctx: Any,
         method: MethodSpecifier,
         message: bytes,
         panic_flag: PanicFlag,
@@ -188,14 +186,14 @@ async def test_reducer() -> None:
     port_ref = handle.bind()
 
     actor_mesh.cast(
-        proc_mesh.client,
-        Selection.from_string("*"),
         PythonMessage(
             PythonMessageKind.CallMethod(
                 MethodSpecifier.ReturnsResponse("echo"), port_ref
             ),
             pickle.dumps("start"),
         ),
+        "all",
+        proc_mesh.client,
     )
 
     messge = await receiver.recv_task().with_timeout(seconds=5)

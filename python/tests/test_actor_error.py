@@ -497,7 +497,7 @@ async def test_proc_mesh_monitoring(mesh):
 
     # should not be able to spawn actors anymore as proc mesh is unhealthy
     with pytest.raises(SupervisionError, match="proc mesh is stopped with reason"):
-        await proc.spawn("ex", ExceptionActorSync)
+        await proc.spawn("ex", ExceptionActorSync).initialized
 
 
 @pytest.mark.parametrize(
@@ -533,7 +533,7 @@ async def test_actor_mesh_supervision_handling(mesh):
 
     # should not be able to spawn actors anymore as proc mesh is unhealthy
     with pytest.raises(SupervisionError, match="proc mesh is stopped with reason"):
-        await proc.spawn("ex", ExceptionActorSync)
+        await proc.spawn("ex", ExceptionActorSync).initialized
 
 
 class HealthyActor(Actor):
@@ -657,13 +657,17 @@ async def test_supervision_with_proc_mesh_stopped(mesh):
 
     # proc mesh cannot spawn new actors anymore
     with pytest.raises(RuntimeError, match="`ProcMesh` has already been stopped"):
-        await proc.spawn("immediate", Intermediate)
+        await proc.spawn("immediate", Intermediate).initialized
 
 
 # TODO - re-enable after resolving T232206970
 @pytest.mark.oss_skip
 async def test_supervision_with_sending_error():
+    # Messages of length > this will cause a send error and a returned
+    # undeliverable.
     os.environ["HYPERACTOR_CODEC_MAX_FRAME_LENGTH"] = "50000000"
+    # Limit retries for sending before giving up.
+    os.environ["HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT_SECS"] = "5"
 
     proc = await proc_mesh(gpus=1)
     actor_mesh = await proc.spawn("healthy", HealthyActor)
@@ -685,3 +689,61 @@ async def test_supervision_with_sending_error():
         await actor_mesh.check.call()
     with pytest.raises(SupervisionError, match="Actor .* is unhealthy with reason"):
         await actor_mesh.check_with_payload.call(payload="a")
+
+
+async def test_slice_supervision() -> None:
+    pm = await proc_mesh(gpus=4)
+    healthy_mesh = await pm.spawn("healthy", HealthyActor)
+    error_mesh = await pm.spawn("error", ErrorActor)
+    slice_1 = error_mesh.slice(gpus=slice(2, 4))
+    slice_2 = error_mesh.slice(gpus=2)
+    slice_3 = error_mesh.slice(gpus=3)
+
+    # Trigger supervision error on gpus=3
+    with pytest.raises(SupervisionError, match="did not handle supervision event"):
+        await slice_3.fail_with_supervision_error.call()
+
+    # Mesh containing all gpus is unhealthy
+    with pytest.raises(SupervisionError, match="Actor .* is unhealthy with reason:"):
+        await error_mesh.check.call()
+
+    # Slice containing only gpus=3 is unhealthy
+    with pytest.raises(SupervisionError, match="Actor .* is unhealthy with reason:"):
+        await slice_3.check.call()
+
+    # Slice containing gpus=3 is unhealthy
+    with pytest.raises(SupervisionError, match="Actor .* is unhealthy with reason:"):
+        await slice_1.check.call()
+
+    # Slice not containing gpus=3 is healthy
+    check = await slice_2.check.call()
+    for _, item in check.items():
+        assert item == "this is a healthy check"
+
+    # Other actor mesh on the same proc mesh is healthy
+    check = await healthy_mesh.check.call()
+    for _, item in check.items():
+        assert item == "this is a healthy check"
+
+
+async def test_mesh_slices_inherit_parent_errors() -> None:
+    pm = await proc_mesh(gpus=4)
+    error_mesh = await pm.spawn("error", ErrorActor)
+    slice_1 = error_mesh.slice(gpus=slice(2, 4))
+
+    # Trigger supervision error on gpus=2, 3, 4
+    with pytest.raises(SupervisionError):
+        await slice_1.fail_with_supervision_error.call()
+
+    # Newly created slice containing gpu=3 is unhealthy
+    slice_2 = error_mesh.slice(gpus=3)
+    with pytest.raises(SupervisionError):
+        await slice_2.check.call()
+
+    # Newly created slice containing gpu=1 is healthy
+    slice_3 = error_mesh.slice(gpus=1)
+    check = await slice_3.check.call()
+    for _, item in check.items():
+        assert item == "this is a healthy check"
+
+    await pm.stop()
