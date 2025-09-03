@@ -614,7 +614,7 @@ pub(crate) mod testing {
                 client,
                 rank,
                 router_channel_addr,
-                supervison_port.bind(),
+                Some(supervison_port.bind()),
                 HashMap::new(),
                 config_handle.bind(),
             )
