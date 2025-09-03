@@ -7,7 +7,6 @@
  */
 
 use std::collections::HashMap;
-
 use std::fmt;
 use std::ops::Deref;
 use std::panic::Location;
@@ -37,7 +36,6 @@ use hyperactor::mailbox;
 use hyperactor::mailbox::BoxableMailboxSender;
 use hyperactor::mailbox::BoxedMailboxSender;
 use hyperactor::mailbox::DialMailboxRouter;
-
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::PortHandle;
@@ -46,7 +44,6 @@ use hyperactor::mailbox::Undeliverable;
 use hyperactor::metrics;
 use hyperactor::proc::Proc;
 use hyperactor::reference::ProcId;
-
 use hyperactor::supervision::ActorSupervisionEvent;
 use ndslice::Range;
 use ndslice::Shape;
@@ -66,8 +63,8 @@ use crate::alloc::ProcStopReason;
 use crate::assign::Ranks;
 use crate::comm::CommActorMode;
 use crate::proc_mesh::mesh_agent::GspawnResult;
-use crate::proc_mesh::mesh_agent::MeshAgent;
 use crate::proc_mesh::mesh_agent::MeshAgentMessageClient;
+use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::proc_mesh::mesh_agent::StopActorResult;
 use crate::reference::ProcMeshId;
 use crate::router;
@@ -194,7 +191,7 @@ pub struct ProcMesh {
     event_state: Option<EventState>,
     actor_event_router: ActorEventRouter,
     shape: Shape,
-    ranks: Vec<(ProcId, (ChannelAddr, ActorRef<MeshAgent>))>,
+    ranks: Vec<(ProcId, (ChannelAddr, ActorRef<ProcMeshAgent>))>,
     #[allow(dead_code)] // will be used in subsequent diff
     client_proc: Proc,
     client: Mailbox,
@@ -331,7 +328,6 @@ impl ProcMesh {
 
         // 6. Configure the mesh agents. This transmits the address book to all agents,
         //    so that they can resolve and route traffic to all nodes in the mesh.
-
         let address_book: HashMap<_, _> = running
             .iter()
             .map(
@@ -378,7 +374,7 @@ impl ProcMesh {
         // unification!
         //
         // Baffling and unsettling.
-        fn project_mesh_agent_ref(allocated_proc: &AllocatedProc) -> ActorRef<MeshAgent> {
+        fn project_mesh_agent_ref(allocated_proc: &AllocatedProc) -> ActorRef<ProcMeshAgent> {
             allocated_proc.mesh_agent.clone()
         }
 
@@ -432,7 +428,7 @@ impl ProcMesh {
 
     async fn spawn_on_procs<A: Actor + RemoteActor>(
         cx: &(impl cap::CanSend + cap::CanOpenPort),
-        agents: impl IntoIterator<Item = ActorRef<MeshAgent>> + '_,
+        agents: impl IntoIterator<Item = ActorRef<ProcMeshAgent>> + '_,
         actor_name: &str,
         params: &A::Params,
     ) -> Result<Vec<ActorRef<A>>, anyhow::Error>
@@ -491,7 +487,7 @@ impl ProcMesh {
             .collect())
     }
 
-    fn agents(&self) -> impl Iterator<Item = ActorRef<MeshAgent>> + '_ {
+    fn agents(&self) -> impl Iterator<Item = ActorRef<ProcMeshAgent>> + '_ {
         self.ranks.iter().map(|(_, (_, agent))| agent.clone())
     }
 
