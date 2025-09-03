@@ -280,7 +280,7 @@ impl<'a, A: RemoteActor> RootActorMesh<'a, A> {
     }
 
     /// Open a port on this ActorMesh.
-    pub(crate) fn open_port<M: Message>(&self) -> (PortHandle<M>, PortReceiver<M>) {
+    pub fn open_port<M: Message>(&self) -> (PortHandle<M>, PortReceiver<M>) {
         self.proc_mesh.client().open_port()
     }
 
@@ -476,7 +476,7 @@ pub(crate) mod test_util {
     // be an entry in the spawnable actor registry in the executable
     // 'hyperactor_mesh_test_bootstrap' for the `tests::process` actor
     // mesh test suite.
-    #[derive(Debug)]
+    #[derive(Debug, Default, Actor)]
     #[hyperactor::export(
         spawn = true,
         handlers = [
@@ -487,15 +487,6 @@ pub(crate) mod test_util {
         ],
     )]
     pub struct TestActor;
-
-    #[async_trait]
-    impl Actor for TestActor {
-        type Params = ();
-
-        async fn new(_params: Self::Params) -> Result<Self, anyhow::Error> {
-            Ok(Self)
-        }
-    }
 
     /// Request message to retrieve the actor's rank.
     ///
@@ -517,8 +508,8 @@ pub(crate) mod test_util {
             cx: &Context<Self>,
             GetRank(ok, reply): GetRank,
         ) -> Result<(), anyhow::Error> {
-            let (rank, _) = cx.cast_info();
-            reply.send(cx, rank)?;
+            let point = cx.cast_info();
+            reply.send(cx, point.rank())?;
             anyhow::ensure!(ok, "intentional error!"); // If `!ok` exit with `Err()`.
             Ok(())
         }
@@ -677,7 +668,7 @@ mod tests {
     // These tests are parametric over allocators.
     #[macro_export]
     macro_rules! actor_mesh_test_suite {
-        ($allocator:expr_2021) => {
+        ($allocator:expr) => {
             use std::assert_matches::assert_matches;
 
             use ndslice::extent;
@@ -1002,13 +993,18 @@ mod tests {
 
             #[tokio::test]
             async fn test_send_with_headers() {
+                let extent = extent!(replica = 3);
                 let alloc = $allocator
                     .allocate(AllocSpec {
-                        extent: extent!(replica = 1 ),
+                        extent: extent.clone(),
                         constraints: Default::default(),
                     })
                     .await
                     .unwrap();
+                // TODO: Replace `Shape` with `Extent` in
+                // `set_cast_info_on_headers` (and wherever else - it
+                // is to be retired).
+                let shape = Shape::new(extent.labels().to_vec(), extent.to_slice()).unwrap();
 
                 let mesh = ProcMesh::allocate(alloc).await.unwrap();
                 let (reply_port_handle, mut reply_port_receiver) = mesh.client().open_port::<usize>();
@@ -1017,17 +1013,17 @@ mod tests {
                 let actor_mesh: RootActorMesh<TestActor> = mesh.spawn("test", &()).await.unwrap();
                 let actor_ref = actor_mesh.get(0).unwrap();
                 let mut headers = Attrs::new();
-                set_cast_info_on_headers(&mut headers, 0, Shape::unity(), mesh.client().actor_id().clone());
+                set_cast_info_on_headers(&mut headers, 0, shape.clone(), mesh.client().actor_id().clone());
                 actor_ref.send_with_headers(mesh.client(), headers.clone(), GetRank(true, reply_port.clone())).unwrap();
                 assert_eq!(0, reply_port_receiver.recv().await.unwrap());
 
-                set_cast_info_on_headers(&mut headers, 1, Shape::unity(), mesh.client().actor_id().clone());
+                set_cast_info_on_headers(&mut headers, 1, shape.clone(), mesh.client().actor_id().clone());
                 actor_ref.port()
                     .send_with_headers(mesh.client(), headers.clone(), GetRank(true, reply_port.clone()))
                     .unwrap();
                 assert_eq!(1, reply_port_receiver.recv().await.unwrap());
 
-                set_cast_info_on_headers(&mut headers, 2, Shape::unity(), mesh.client().actor_id().clone());
+                set_cast_info_on_headers(&mut headers, 2, shape.clone(), mesh.client().actor_id().clone());
                 actor_ref.actor_id()
                     .port_id(GetRank::port())
                     .send_with_headers(

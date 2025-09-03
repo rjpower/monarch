@@ -9,6 +9,21 @@
 //! This module contains core traits and implementation to manage remote data
 //! types in Hyperactor.
 
+use std::any::TypeId;
+use std::collections::HashMap;
+use std::fmt;
+use std::io::Cursor;
+use std::sync::LazyLock;
+
+use enum_as_inner::EnumAsInner;
+use serde::Deserialize;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+// use strum::EnumIter;
+use crate as hyperactor;
+use crate::config;
+
 /// A [`Named`] type is a type that has a globally unique name.
 pub trait Named: Sized + 'static {
     /// The globally unique type name for the type.
@@ -105,12 +120,18 @@ impl Named for std::time::Duration {
     }
 }
 
+impl Named for bytes::Bytes {
+    fn typename() -> &'static str {
+        "bytes::Bytes"
+    }
+}
+
 // A macro that implements type-keyed interning of typenames. This is useful
 // for implementing [`Named`] for generic types.
 #[doc(hidden)] // not part of the public API
 #[macro_export]
 macro_rules! intern_typename {
-    ($key:ty, $format_string:expr_2021, $($args:ty),+) => {
+    ($key:ty, $format_string:expr, $($args:ty),+) => {
         {
             static CACHE: std::sync::LazyLock<$crate::dashmap::DashMap<std::any::TypeId, &'static str>> =
               std::sync::LazyLock::new($crate::dashmap::DashMap::new);
@@ -126,16 +147,7 @@ macro_rules! intern_typename {
         }
     };
 }
-use std::any::TypeId;
-use std::collections::HashMap;
-use std::fmt;
-use std::io::Cursor;
-use std::sync::LazyLock;
-
 pub use intern_typename;
-use serde::Deserialize;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 macro_rules! tuple_format_string {
     ($a:ident,) => { "{}" };
@@ -290,11 +302,121 @@ macro_rules! register_type {
     };
 }
 
-/// The encoding used for a serialized value.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-enum SerializedEncoding {
+/// An enumeration containing the supported encodings of Serialized
+/// values.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    crate::Named,
+    strum::EnumIter,
+    strum::Display,
+    strum::EnumString
+)]
+pub enum Encoding {
+    /// Serde bincode encoding.
+    #[strum(to_string = "bincode")]
     Bincode,
+    /// Serde JSON encoding.
+    #[strum(to_string = "serde_json")]
     Json,
+    /// Serde multipart encoding.
+    #[strum(to_string = "serde_multipart")]
+    Multipart,
+}
+
+/// The encoding used for a serialized value.
+#[derive(Clone, Serialize, Deserialize, PartialEq, EnumAsInner)]
+enum Encoded {
+    Bincode(bytes::Bytes),
+    Json(bytes::Bytes),
+    Multipart(serde_multipart::Message),
+}
+
+impl Encoded {
+    /// The length of the underlying serialized message
+    pub fn len(&self) -> usize {
+        match &self {
+            Encoded::Bincode(data) => data.len(),
+            Encoded::Json(data) => data.len(),
+            Encoded::Multipart(message) => message.len(),
+        }
+    }
+
+    /// Is the message empty. This should always return false.
+    pub fn is_empty(&self) -> bool {
+        match &self {
+            Encoded::Bincode(data) => data.is_empty(),
+            Encoded::Json(data) => data.is_empty(),
+            Encoded::Multipart(message) => message.is_empty(),
+        }
+    }
+
+    /// Returns the encoding of this serialized value.
+    pub fn encoding(&self) -> Encoding {
+        match &self {
+            Encoded::Bincode(_) => Encoding::Bincode,
+            Encoded::Json(_) => Encoding::Json,
+            Encoded::Multipart(_) => Encoding::Multipart,
+        }
+    }
+
+    /// Computes the 32bit crc of the encoded data
+    pub fn crc(&self) -> u32 {
+        match &self {
+            Encoded::Bincode(data) => crc32fast::hash(data),
+            Encoded::Json(data) => crc32fast::hash(data),
+            Encoded::Multipart(message) => {
+                let mut hasher = crc32fast::Hasher::new();
+                hasher.update(message.body().as_ref());
+                for part in message.parts() {
+                    hasher.update(part.as_ref());
+                }
+                hasher.finalize()
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for Encoded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Encoded::Bincode(data) => write!(f, "Encoded::Bincode({})", HexFmt(data)),
+            Encoded::Json(data) => write!(f, "Encoded::Json({})", HexFmt(data)),
+            Encoded::Multipart(message) => {
+                write!(
+                    f,
+                    "Encoded::Multipart(illegal?={} body={}",
+                    message.is_illegal(),
+                    HexFmt(message.body())
+                )?;
+                for (index, part) in message.parts().iter().enumerate() {
+                    write!(f, ", part[{}]={}", index, HexFmt(part))?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
+/// The type of error returned by operations on [`Serialized`].
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// Errors returned from serde bincode.
+    #[error(transparent)]
+    Bincode(#[from] bincode::Error),
+
+    /// Errors returned from serde JSON.
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+
+    /// The encoding was not recognized.
+    #[error("unknown encoding: {0}")]
+    InvalidEncoding(String),
 }
 
 /// Represents a serialized value, wrapping the underlying serialization
@@ -303,22 +425,13 @@ enum SerializedEncoding {
 ///
 /// Currently, Serialized passes through to bincode, but in the future we may include
 /// content-encoding information to allow for other codecs as well.
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Serialized {
-    encoding: SerializedEncoding,
-
-    /// The encoded data for the serialized value.
-    #[serde(with = "serde_bytes")]
-    data: Vec<u8>,
-    /// The typehash of the serialized value, if available. This is used to provide
+    /// The encoded data
+    encoded: Encoded,
+    /// The typehash of the serialized value. This is used to provide
     /// typed introspection of the value.
-    typehash: Option<u64>,
-}
-
-impl std::fmt::Debug for Serialized {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Serialized({})", HexFmt(self.data.as_slice()),)
-    }
+    typehash: u64,
 }
 
 impl std::fmt::Display for Serialized {
@@ -331,38 +444,77 @@ impl std::fmt::Display for Serialized {
                 let basename = typename.split("::").last().unwrap_or(typename);
                 write!(f, "{}{}", basename, JsonFmt(&value))
             }
-            Err(_) => write!(f, "{}", HexFmt(self.data.as_slice())),
+            Err(_) => write!(f, "{:?}", self.encoded),
         }
     }
 }
 
 impl Serialized {
     /// Construct a new serialized value by serializing the provided T-typed value.
-    pub fn serialize<T: Serialize + Named>(value: &T) -> Result<Self, bincode::Error> {
-        Ok(Self {
-            encoding: SerializedEncoding::Bincode,
-            data: bincode::serialize(value)?,
-            typehash: Some(T::typehash()),
-        })
+    /// Serialize uses the default encoding defined by the configuration key
+    /// [`config::DEFAULT_ENCODING`] in the global configuration; use [`serialize_with_encoding`]
+    /// to serialize values with a specific encoding.
+    pub fn serialize<T: Serialize + Named>(value: &T) -> Result<Self, Error> {
+        Self::serialize_with_encoding(config::global::get(config::DEFAULT_ENCODING), value)
     }
 
-    /// Construct a new anonymous (unnamed) serialized value by serializing the provided T-typed value.
-    pub fn serialize_anon<T: Serialize>(value: &T) -> Result<Self, bincode::Error> {
+    /// Serialize U-typed value as a T-typed value. This should be used with care
+    /// (typically only in testing), as the value's representation may be illegally
+    /// coerced.
+    pub fn serialize_as<T: Named, U: Serialize>(value: &U) -> Result<Self, Error> {
+        Self::serialize_with_encoding_as::<T, U>(
+            config::global::get(config::DEFAULT_ENCODING),
+            value,
+        )
+    }
+
+    /// Serialize the value with the using the provided encoding.
+    pub fn serialize_with_encoding<T: Serialize + Named>(
+        encoding: Encoding,
+        value: &T,
+    ) -> Result<Self, Error> {
+        Self::serialize_with_encoding_as::<T, T>(encoding, value)
+    }
+
+    /// Serialize U-typed value as a T-typed value. This should be used with care
+    /// (typically only in testing), as the value's representation may be illegally
+    /// coerced.
+    pub fn serialize_with_encoding_as<T: Named, U: Serialize>(
+        encoding: Encoding,
+        value: &U,
+    ) -> Result<Self, Error> {
         Ok(Self {
-            encoding: SerializedEncoding::Bincode,
-            data: bincode::serialize(value)?,
-            typehash: None,
+            encoded: match encoding {
+                Encoding::Bincode => Encoded::Bincode(bincode::serialize(value)?.into()),
+                Encoding::Json => Encoded::Json(serde_json::to_vec(value)?.into()),
+                Encoding::Multipart => {
+                    Encoded::Multipart(serde_multipart::serialize_bincode(value)?)
+                }
+            },
+            typehash: T::typehash(),
         })
     }
 
     /// Deserialize a value to the provided type T.
-    pub fn deserialized<T: DeserializeOwned>(&self) -> Result<T, anyhow::Error> {
-        match self.encoding {
-            SerializedEncoding::Bincode => {
-                bincode::deserialize(&self.data).map_err(anyhow::Error::from)
-            }
-            SerializedEncoding::Json => {
-                serde_json::from_slice(&self.data).map_err(anyhow::Error::from)
+    pub fn deserialized<T: DeserializeOwned + Named>(&self) -> Result<T, anyhow::Error> {
+        anyhow::ensure!(
+            self.is::<T>(),
+            "attempted to serialize {}-typed serialized into type {}",
+            self.typename().unwrap_or("unknown"),
+            T::typename()
+        );
+        self.deserialized_unchecked()
+    }
+
+    /// Deserialize a value to the provided type T, without checking for type conformance.
+    /// This should be used carefully, only when you know that the dynamic type check is
+    /// not needed.
+    pub fn deserialized_unchecked<T: DeserializeOwned>(&self) -> Result<T, anyhow::Error> {
+        match &self.encoded {
+            Encoded::Bincode(data) => bincode::deserialize(data).map_err(anyhow::Error::from),
+            Encoded::Json(data) => serde_json::from_slice(data).map_err(anyhow::Error::from),
+            Encoded::Multipart(message) => {
+                serde_multipart::deserialize_bincode(message.clone()).map_err(anyhow::Error::from)
             }
         }
     }
@@ -370,8 +522,8 @@ impl Serialized {
     /// Transcode the serialized value to JSON. This operation will succeed if the type hash
     /// is embedded in the value, and the corresponding type is available in this binary.
     pub fn transcode_to_json(self) -> Result<Self, Self> {
-        match self.encoding {
-            SerializedEncoding::Bincode => {
+        match self.encoded {
+            Encoded::Bincode(_) | Encoded::Multipart(_) => {
                 let json_value = match self.dump() {
                     Ok(json_value) => json_value,
                     Err(_) => return Err(self),
@@ -381,43 +533,43 @@ impl Serialized {
                     Err(_) => return Err(self),
                 };
                 Ok(Self {
-                    encoding: SerializedEncoding::Json,
-                    data: json_data,
+                    encoded: Encoded::Json(json_data.into()),
                     typehash: self.typehash,
                 })
             }
-            SerializedEncoding::Json => Ok(self),
+            Encoded::Json(_) => Ok(self),
         }
     }
 
     /// Dump the Serialized message into a JSON value. This will succeed if: 1) the typehash is embedded
     /// in the serialized value; 2) the named type is linked into the binary.
     pub fn dump(&self) -> Result<serde_json::Value, anyhow::Error> {
-        match self.encoding {
-            SerializedEncoding::Bincode => {
-                let Some(typehash) = self.typehash() else {
-                    anyhow::bail!("serialized value does not contain a typehash");
-                };
-                let Some(typeinfo) = TYPE_INFO.get(&typehash) else {
-                    anyhow::bail!("binary does not have typeinfo for {}", typehash);
+        match &self.encoded {
+            Encoded::Bincode(_) | Encoded::Multipart(_) => {
+                let Some(typeinfo) = TYPE_INFO.get(&self.typehash) else {
+                    anyhow::bail!("binary does not have typeinfo for {}", self.typehash);
                 };
                 typeinfo.dump(self.clone())
             }
-            SerializedEncoding::Json => {
-                serde_json::from_slice(&self.data).map_err(anyhow::Error::from)
-            }
+            Encoded::Json(data) => serde_json::from_slice(data).map_err(anyhow::Error::from),
         }
     }
 
-    /// The typehash of the serialized value, if available.
-    pub fn typehash(&self) -> Option<u64> {
+    /// The encoding used by this serialized value.
+    pub fn encoding(&self) -> Encoding {
+        self.encoded.encoding()
+    }
+
+    /// The typehash of the serialized value.
+    pub fn typehash(&self) -> u64 {
         self.typehash
     }
 
     /// The typename of the serialized value, if available.
     pub fn typename(&self) -> Option<&'static str> {
-        self.typehash
-            .and_then(|typehash| TYPE_INFO.get(&typehash).map(|typeinfo| typeinfo.typename()))
+        TYPE_INFO
+            .get(&self.typehash)
+            .map(|typeinfo| typeinfo.typename())
     }
 
     /// Deserialize a prefix of the value. This is currently only supported
@@ -425,11 +577,10 @@ impl Serialized {
     // TODO: we should support this by formalizing the notion of a 'prefix'
     // serialization, and generalize it to other codecs as well.
     pub fn prefix<T: DeserializeOwned>(&self) -> Result<T, anyhow::Error> {
-        anyhow::ensure!(
-            self.encoding == SerializedEncoding::Bincode,
-            "only bincode supports prefix emplacement"
-        );
-        bincode::deserialize(&self.data).map_err(anyhow::Error::from)
+        match &self.encoded {
+            Encoded::Bincode(data) => bincode::deserialize(data).map_err(anyhow::Error::from),
+            _ => anyhow::bail!("only bincode supports prefix emplacement"),
+        }
     }
 
     /// Emplace a new prefix to this value. This is currently only supported
@@ -438,38 +589,45 @@ impl Serialized {
         &mut self,
         prefix: T,
     ) -> Result<(), anyhow::Error> {
-        anyhow::ensure!(
-            self.encoding == SerializedEncoding::Bincode,
-            "only bincode supports prefix emplacement"
-        );
+        let data = match &self.encoded {
+            Encoded::Bincode(data) => data,
+            _ => anyhow::bail!("only bincode supports prefix emplacement"),
+        };
 
         // This is a bit ugly, but: we first deserialize out the old prefix,
         // then serialize the new prefix, then splice the two together.
         // This is safe because we know that the prefix is the first thing
         // in the serialized value, and that the serialization format is stable.
-        let mut cursor = Cursor::new(self.data.clone());
+        let mut cursor = Cursor::new(data.clone());
         let _prefix: T = bincode::deserialize_from(&mut cursor).unwrap();
         let position = cursor.position() as usize;
         let suffix = &cursor.into_inner()[position..];
-        self.data = bincode::serialize(&prefix)?;
-        self.data.extend_from_slice(suffix);
+        let mut data = bincode::serialize(&prefix)?;
+        data.extend_from_slice(suffix);
+        self.encoded = Encoded::Bincode(data.into());
 
         Ok(())
     }
 
     /// The length of the underlying serialized message
     pub fn len(&self) -> usize {
-        self.data.len()
+        self.encoded.len()
     }
 
     /// Is the message empty. This should always return false.
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.encoded.is_empty()
     }
 
     /// Returns the 32bit crc of the serialized data
     pub fn crc(&self) -> u32 {
-        crc32fast::hash(&self.data)
+        self.encoded.crc()
+    }
+
+    /// Returns whether this value contains a serialized M-typed value. Returns None
+    /// when type information is unavailable.
+    pub fn is<M: Named>(&self) -> bool {
+        self.typehash == M::typehash()
     }
 }
 
@@ -555,6 +713,8 @@ mod tests {
 
     use serde::Deserialize;
     use serde::Serialize;
+    use serde_multipart::Part;
+    use strum::IntoEnumIterator;
 
     use super::*;
     use crate as hyperactor; // for macros
@@ -602,6 +762,7 @@ mod tests {
         a: String,
         b: u64,
         c: Option<i32>,
+        d: Option<Part>,
     }
     crate::register_type!(TestDumpStruct);
 
@@ -611,16 +772,21 @@ mod tests {
             a: "hello".to_string(),
             b: 1234,
             c: Some(5678),
+            d: None,
         };
         let serialized = Serialized::serialize(&data).unwrap();
         let serialized_json = serialized.clone().transcode_to_json().unwrap();
 
-        assert_eq!(serialized.encoding, SerializedEncoding::Bincode);
-        assert_eq!(serialized_json.encoding, SerializedEncoding::Json);
+        assert!(serialized.encoded.is_bincode());
+        assert!(serialized_json.encoded.is_json());
 
-        let json_string = String::from_utf8(serialized_json.data.clone()).unwrap();
+        let json_string =
+            String::from_utf8(serialized_json.encoded.as_json().unwrap().to_vec().clone()).unwrap();
         // The serialized data for JSON is just the (compact) JSON string.
-        assert_eq!(json_string, "{\"a\":\"hello\",\"b\":1234,\"c\":5678}");
+        assert_eq!(
+            json_string,
+            "{\"a\":\"hello\",\"b\":1234,\"c\":5678,\"d\":null}"
+        );
 
         for serialized in [serialized, serialized_json] {
             // Note, at this point, serialized has no knowledge other than its embedded typehash.
@@ -637,12 +803,13 @@ mod tests {
                     "a": "hello",
                     "b": 1234,
                     "c": 5678,
+                    "d": null,
                 })
             );
 
             assert_eq!(
                 format!("{}", serialized),
-                "TestDumpStruct{\"a\":\"hello\",\"b\":1234,\"c\":5678}",
+                "TestDumpStruct{\"a\":\"hello\",\"b\":1234,\"c\":5678,\"d\":null}",
             );
         }
     }
@@ -653,6 +820,7 @@ mod tests {
             a: "hello".to_string(),
             b: 1234,
             c: Some(5678),
+            d: None,
         };
 
         let mut ser = Serialized::serialize(&data).unwrap();
@@ -667,6 +835,7 @@ mod tests {
                 a: "hello, world, 123!".to_string(),
                 b: 1234,
                 c: Some(5678),
+                d: None,
             }
         );
     }
@@ -768,5 +937,20 @@ mod tests {
             format!("{}", JsonFmt(&nested_json)),
             "{\"outer\":{\"inner\":{\"simple_value\":\"short\"},\"long_array\":\"[1,2,3,4[...28 chars] CRC:e5c881af 5b 31 2c 32 2c 33 2c 34 [...20 bytes]\",\"long_string\":\"aaaaaaaa[...18 chars] CRC:b8ac0e31 61 61 61 61 61 61 61 61 [...10 bytes]\"},\"simple_bool\":true,\"simple_number\":42}",
         );
+    }
+
+    #[test]
+    fn test_encodings() {
+        let value = TestDumpStruct {
+            a: "hello, world".to_string(),
+            b: 123,
+            c: Some(321),
+            d: Some(Part::from("hello, world, again")),
+        };
+        for enc in Encoding::iter() {
+            let ser = Serialized::serialize_with_encoding(enc, &value).unwrap();
+            assert_eq!(ser.encoding(), enc);
+            assert_eq!(ser.deserialized::<TestDumpStruct>().unwrap(), value);
+        }
     }
 }

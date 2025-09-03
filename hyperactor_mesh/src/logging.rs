@@ -12,25 +12,26 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::task::Context as TaskContext;
 use std::task::Poll;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use anyhow::Error;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::DateTime;
 use chrono::Local;
 use hyperactor::Actor;
 use hyperactor::ActorRef;
+use hyperactor::Bind;
 use hyperactor::Context;
 use hyperactor::HandleClient;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
+use hyperactor::OncePortRef;
 use hyperactor::RefClient;
+use hyperactor::Unbind;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::channel::ChannelRx;
@@ -42,18 +43,13 @@ use hyperactor::channel::TxStatus;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
 use hyperactor::data::Serialized;
-use hyperactor::message::Bind;
-use hyperactor::message::Bindings;
-use hyperactor::message::Unbind;
 use hyperactor_telemetry::env;
 use hyperactor_telemetry::log_file_path;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io;
-use tokio::sync::mpsc;
-use tokio::sync::watch;
+use tokio::sync::Mutex;
 use tokio::sync::watch::Receiver;
-use tokio::task::JoinHandle;
 
 use crate::bootstrap::BOOTSTRAP_LOG_CHANNEL;
 
@@ -264,6 +260,13 @@ pub enum LogMessage {
         /// The log payload as bytes
         payload: Serialized,
     },
+
+    /// Flush the log
+    Flush {
+        /// Indicate if the current flush is synced or non-synced.
+        /// If synced, a version number is available. Otherwise, none.
+        sync_version: Option<u64>,
+    },
 }
 
 /// Messages that can be sent to the LogClient locally.
@@ -282,6 +285,16 @@ pub enum LogClientMessage {
         /// The time window in seconds to aggregate logs. If None, aggregation is disabled.
         aggregate_window_sec: Option<u64>,
     },
+
+    /// Synchronously flush all the logs from all the procs. This is for client to call.
+    StartSyncFlush {
+        /// Expect these many procs to ack the flush message.
+        expected_procs: usize,
+        /// Return once we have received the acks from all the procs
+        reply: OncePortRef<()>,
+        /// Return to the caller the current flush version
+        version: OncePortRef<u64>,
+    },
 }
 
 /// Trait for sending logs
@@ -289,6 +302,10 @@ pub enum LogClientMessage {
 pub trait LogSender: Send + Sync {
     /// Send a log payload in bytes
     fn send(&mut self, target: OutputTarget, payload: Vec<u8>) -> anyhow::Result<()>;
+
+    /// Flush the log channel, ensuring all messages are delivered
+    /// Returns when the flush message has been acknowledged
+    fn flush(&mut self) -> anyhow::Result<()>;
 }
 
 /// Represents the target output stream (stdout or stderr)
@@ -301,11 +318,10 @@ pub enum OutputTarget {
 }
 
 /// Write the log to a local unix channel so some actors can listen to it and stream the log back.
-#[derive(Clone)]
 pub struct LocalLogSender {
     hostname: String,
     pid: u32,
-    tx: Arc<ChannelTx<LogMessage>>,
+    tx: ChannelTx<LogMessage>,
     status: Receiver<TxStatus>,
 }
 
@@ -321,28 +337,44 @@ impl LocalLogSender {
         Ok(Self {
             hostname,
             pid,
-            tx: Arc::new(tx),
+            tx,
             status,
         })
     }
 }
 
+#[async_trait]
 impl LogSender for LocalLogSender {
     fn send(&mut self, target: OutputTarget, payload: Vec<u8>) -> anyhow::Result<()> {
         if TxStatus::Active == *self.status.borrow() {
+            // Do not use tx.send, it will block the allocator as the child process state is unknown.
             self.tx.post(LogMessage::Log {
                 hostname: self.hostname.clone(),
                 pid: self.pid,
                 output_target: target,
-                payload: Serialized::serialize_anon(&payload)?,
+                payload: Serialized::serialize(&payload)?,
             });
         } else {
-            tracing::trace!(
+            tracing::debug!(
                 "log sender {} is not active, skip sending log",
                 self.tx.addr()
             )
         }
 
+        Ok(())
+    }
+
+    fn flush(&mut self) -> anyhow::Result<()> {
+        // send will make sure message is delivered
+        if TxStatus::Active == *self.status.borrow() {
+            // Do not use tx.send, it will block the allocator as the child process state is unknown.
+            self.tx.post(LogMessage::Flush { sync_version: None });
+        } else {
+            tracing::debug!(
+                "log sender {} is not active, skip sending flush message",
+                self.tx.addr()
+            );
+        }
         Ok(())
     }
 }
@@ -367,7 +399,18 @@ fn create_file_writer(
     let (path, filename) = log_file_path(env)?;
     let path = Path::new(&path);
     let mut full_path = PathBuf::from(path);
-    full_path.push(format!("{}_{}.{}", filename, local_rank, suffix));
+
+    // This is the PID of the "owner" of the proc mesh, the proc mesh
+    // this proc "belongs" to. In other words,the PID of the process
+    // that invokes `cmd.spawn()` (where `cmd: &mut
+    // tokio::process::Command`) to start the process that will host
+    // the proc that this file writer relates to.
+    let file_created_by_pid = std::process::id();
+
+    full_path.push(format!(
+        "{}_{}_{}.{}",
+        filename, file_created_by_pid, local_rank, suffix
+    ));
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -383,11 +426,11 @@ fn get_local_log_destination(
 ) -> Result<Box<dyn io::AsyncWrite + Send + Unpin>> {
     let env: env::Env = env::Env::current();
     Ok(match env {
-        env::Env::Test => match output_target {
+        env::Env::Test | env::Env::Local => match output_target {
             OutputTarget::Stdout => Box::new(LinePrefixingWriter::new(local_rank, io::stdout())),
             OutputTarget::Stderr => Box::new(LinePrefixingWriter::new(local_rank, io::stderr())),
         },
-        env::Env::Local | env::Env::MastEmulator | env::Env::Mast => {
+        env::Env::MastEmulator | env::Env::Mast => {
             create_file_writer(local_rank, output_target, env)?
         }
     })
@@ -414,13 +457,17 @@ pub fn create_log_writers(
     ),
     anyhow::Error,
 > {
-    let log_sender = LocalLogSender::new(log_channel, pid)?;
-
     // Create LogWriter instances for stdout and stderr using the shared log sender
-    let stdout_writer =
-        LogWriter::with_default_writer(local_rank, OutputTarget::Stdout, log_sender.clone())?;
-    let stderr_writer =
-        LogWriter::with_default_writer(local_rank, OutputTarget::Stderr, log_sender)?;
+    let stdout_writer = LogWriter::with_default_writer(
+        local_rank,
+        OutputTarget::Stdout,
+        LocalLogSender::new(log_channel.clone(), pid)?,
+    )?;
+    let stderr_writer = LogWriter::with_default_writer(
+        local_rank,
+        OutputTarget::Stderr,
+        LocalLogSender::new(log_channel, pid)?,
+    )?;
 
     Ok((Box::new(stdout_writer), Box::new(stderr_writer)))
 }
@@ -497,7 +544,16 @@ impl<T: LogSender + Unpin + 'static, S: io::AsyncWrite + Send + Unpin + 'static>
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Result<(), io::Error>> {
         let this = self.get_mut();
-        Pin::new(&mut this.std_writer).poll_flush(cx)
+
+        match Pin::new(&mut this.std_writer).poll_flush(cx) {
+            Poll::Ready(Ok(())) => {
+                if let Err(e) = this.log_sender.flush() {
+                    tracing::error!("error sending flush: {}", e);
+                }
+                Poll::Ready(Ok(()))
+            }
+            other => other, // Propagate any errors or Pending state from the std_writer flush
+        }
     }
 
     fn poll_shutdown(
@@ -518,7 +574,9 @@ impl<T: LogSender + Unpin + 'static, S: io::AsyncWrite + Send + Unpin + 'static>
     Named,
     Handler,
     HandleClient,
-    RefClient
+    RefClient,
+    Bind,
+    Unbind
 )]
 pub enum LogForwardMessage {
     /// Receive the log from the parent process and forward ti to the client.
@@ -526,18 +584,9 @@ pub enum LogForwardMessage {
 
     /// If to stream the log back to the client.
     SetMode { stream_to_client: bool },
-}
 
-impl Bind for LogForwardMessage {
-    fn bind(&mut self, _bindings: &mut Bindings) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-
-impl Unbind for LogForwardMessage {
-    fn unbind(&self, _bindings: &mut Bindings) -> anyhow::Result<()> {
-        Ok(())
-    }
+    /// Flush the log with a version number.
+    ForceSyncFlush { version: u64 },
 }
 
 /// A log forwarder that receives the log from its parent process and forward it back to the client
@@ -548,6 +597,8 @@ impl Unbind for LogForwardMessage {
 )]
 pub struct LogForwardActor {
     rx: ChannelRx<LogMessage>,
+    flush_tx: Arc<Mutex<ChannelTx<LogMessage>>>,
+    next_flush_deadline: SystemTime,
     logging_client_ref: ActorRef<LogClientActor>,
     stream_to_client: bool,
 }
@@ -590,8 +641,15 @@ impl Actor for LogForwardActor {
                     .1
             }
         };
+
+        // Dial the same channel to send flush message to drain the log queue.
+        let flush_tx = Arc::new(Mutex::new(channel::dial::<LogMessage>(log_channel)?));
+        let now = RealClock.system_time_now();
+
         Ok(Self {
             rx,
+            flush_tx,
+            next_flush_deadline: now,
             logging_client_ref,
             stream_to_client: true,
         })
@@ -599,6 +657,13 @@ impl Actor for LogForwardActor {
 
     async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
         this.self_message_with_delay(LogForwardMessage::Forward {}, Duration::from_secs(0))?;
+
+        // Make sure we start the flush loop periodically so the log channel will not deadlock.
+        self.flush_tx
+            .lock()
+            .await
+            .send(LogMessage::Flush { sync_version: None })
+            .await?;
         Ok(())
     }
 }
@@ -607,17 +672,48 @@ impl Actor for LogForwardActor {
 #[hyperactor::forward(LogForwardMessage)]
 impl LogForwardMessageHandler for LogForwardActor {
     async fn forward(&mut self, ctx: &Context<Self>) -> Result<(), anyhow::Error> {
-        if let Ok(LogMessage::Log {
-            hostname,
-            pid,
-            output_target,
-            payload,
-        }) = self.rx.recv().await
-        {
-            if self.stream_to_client {
-                self.logging_client_ref
-                    .log(ctx, hostname, pid, output_target, payload)
-                    .await?;
+        match self.rx.recv().await {
+            Ok(LogMessage::Flush { sync_version }) => {
+                let now = RealClock.system_time_now();
+                match sync_version {
+                    None => {
+                        // Schedule another flush to keep the log channel from deadlocking.
+                        let delay = Duration::from_secs(1);
+                        if now >= self.next_flush_deadline {
+                            self.next_flush_deadline = now + delay;
+                            let flush_tx = self.flush_tx.clone();
+                            tokio::spawn(async move {
+                                RealClock.sleep(delay).await;
+                                if let Err(e) = flush_tx
+                                    .lock()
+                                    .await
+                                    .send(LogMessage::Flush { sync_version: None })
+                                    .await
+                                {
+                                    tracing::error!("failed to send flush message: {}", e);
+                                }
+                            });
+                        }
+                    }
+                    version => {
+                        self.logging_client_ref.flush(ctx, version).await?;
+                    }
+                }
+            }
+            Ok(LogMessage::Log {
+                hostname,
+                pid,
+                output_target,
+                payload,
+            }) => {
+                if self.stream_to_client {
+                    self.logging_client_ref
+                        .log(ctx, hostname, pid, output_target, payload)
+                        .await?;
+                }
+            }
+            Err(e) => {
+                return Err(e.into());
             }
         }
 
@@ -634,6 +730,21 @@ impl LogForwardMessageHandler for LogForwardActor {
     ) -> Result<(), anyhow::Error> {
         self.stream_to_client = stream_to_client;
         Ok(())
+    }
+
+    async fn force_sync_flush(
+        &mut self,
+        _cx: &Context<Self>,
+        version: u64,
+    ) -> Result<(), anyhow::Error> {
+        self.flush_tx
+            .lock()
+            .await
+            .send(LogMessage::Flush {
+                sync_version: Some(version),
+            })
+            .await
+            .map_err(anyhow::Error::from)
     }
 }
 
@@ -653,7 +764,7 @@ fn deserialize_message_lines(
     }
 
     // If both fail, return an error
-    anyhow::bail!("Failed to deserialize message as either String or Vec<u8>")
+    anyhow::bail!("failed to deserialize message as either String or Vec<u8>")
 }
 
 /// A client to receive logs from remote processes
@@ -663,20 +774,20 @@ fn deserialize_message_lines(
     handlers = [LogMessage, LogClientMessage],
 )]
 pub struct LogClientActor {
-    log_tx: mpsc::Sender<(OutputTarget, String)>,
-    #[allow(unused)]
-    aggregator_handle: JoinHandle<Result<(), Error>>,
-    /// The watch sender for the aggregation window in seconds
-    aggregate_window_tx: watch::Sender<u64>,
-    should_aggregate: bool,
-    // Store aggregators directly in the actor for access in Drop
-    aggregators: Arc<RwLock<HashMap<OutputTarget, Aggregator>>>,
+    aggregate_window_sec: Option<u64>,
+    aggregators: HashMap<OutputTarget, Aggregator>,
+    last_flush_time: SystemTime,
+    next_flush_deadline: Option<SystemTime>,
+
+    // For flush sync barrier
+    current_flush_version: u64,
+    current_flush_port: Option<OncePortRef<()>>,
+    current_unflushed_procs: usize,
 }
 
 impl LogClientActor {
-    fn print_aggregators(aggregators: &RwLock<HashMap<OutputTarget, Aggregator>>) {
-        let mut aggregators_guard = aggregators.write().unwrap();
-        for (output_target, aggregator) in aggregators_guard.iter_mut() {
+    fn print_aggregators(&mut self) {
+        for (output_target, aggregator) in self.aggregators.iter_mut() {
             if aggregator.is_empty() {
                 continue;
             }
@@ -693,6 +804,20 @@ impl LogClientActor {
             aggregator.reset();
         }
     }
+
+    fn print_log_line(hostname: &str, pid: u32, output_target: OutputTarget, line: String) {
+        let message = format!("[{} {}] {}", hostname, pid, line);
+        match output_target {
+            OutputTarget::Stdout => println!("{}", message),
+            OutputTarget::Stderr => eprintln!("{}", message),
+        }
+    }
+
+    fn flush_internal(&mut self) {
+        self.print_aggregators();
+        self.last_flush_time = RealClock.system_time_now();
+        self.next_flush_deadline = None;
+    }
 }
 
 #[async_trait]
@@ -701,33 +826,19 @@ impl Actor for LogClientActor {
     type Params = ();
 
     async fn new(_: ()) -> Result<Self, anyhow::Error> {
-        // Create mpsc channel for log messages
-        let (log_tx, log_rx) = mpsc::channel::<(OutputTarget, String)>(1000);
-
-        // Create a watch channel for the aggregation window
-        let (aggregate_window_tx, aggregate_window_rx) =
-            watch::channel(DEFAULT_AGGREGATE_WINDOW_SEC);
-
         // Initialize aggregators
         let mut aggregators = HashMap::new();
         aggregators.insert(OutputTarget::Stderr, Aggregator::new());
         aggregators.insert(OutputTarget::Stdout, Aggregator::new());
-        let aggregators = Arc::new(RwLock::new(aggregators));
-
-        // Clone aggregators for the aggregator task
-        let aggregators_for_task = Arc::clone(&aggregators);
-
-        // Start the loggregator
-        let aggregator_handle = tokio::spawn(async move {
-            start_aggregator(log_rx, aggregate_window_rx, aggregators_for_task).await
-        });
 
         Ok(Self {
-            log_tx,
-            aggregator_handle,
-            aggregate_window_tx,
-            should_aggregate: true,
+            aggregate_window_sec: Some(DEFAULT_AGGREGATE_WINDOW_SEC),
             aggregators,
+            last_flush_time: RealClock.system_time_now(),
+            next_flush_deadline: None,
+            current_flush_version: 0,
+            current_flush_port: None,
+            current_unflushed_procs: 0,
         })
     }
 }
@@ -735,53 +846,8 @@ impl Actor for LogClientActor {
 impl Drop for LogClientActor {
     fn drop(&mut self) {
         // Flush the remaining logs before shutting down
-        Self::print_aggregators(&self.aggregators);
+        self.print_aggregators();
     }
-}
-
-async fn start_aggregator(
-    mut log_rx: mpsc::Receiver<(OutputTarget, String)>,
-    mut interval_sec_rx: watch::Receiver<u64>,
-    aggregators: Arc<RwLock<HashMap<OutputTarget, Aggregator>>>,
-) -> anyhow::Result<()> {
-    let mut interval =
-        tokio::time::interval(tokio::time::Duration::from_secs(*interval_sec_rx.borrow()));
-
-    // Start the event loop
-    loop {
-        tokio::select! {
-            // Process incoming log messages
-            Some((output_target, log_line)) = log_rx.recv() => {
-                let mut aggregators_guard = aggregators.write().unwrap();
-                if let Some(aggregator) = aggregators_guard.get_mut(&output_target) {
-                    if let Err(e) = aggregator.add_line(&log_line) {
-                        tracing::error!("error adding log line: {}", e);
-                    }
-                } else {
-                    tracing::error!("unknown output target: {:?}", output_target);
-                }
-            }
-            // Watch for changes in the interval
-            Ok(_) = interval_sec_rx.changed() => {
-                interval = tokio::time::interval(tokio::time::Duration::from_secs(*interval_sec_rx.borrow()));
-            }
-
-            // Every interval tick, print and reset the aggregator
-            _ = interval.tick() => {
-                LogClientActor::print_aggregators(&aggregators);
-            }
-
-            // Exit if the channel is closed
-            else => {
-                tracing::error!("log channel closed, exiting aggregator");
-                // Print final aggregated logs before shutting down
-                LogClientActor::print_aggregators(&aggregators);
-                break;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[async_trait]
@@ -789,7 +855,7 @@ async fn start_aggregator(
 impl LogMessageHandler for LogClientActor {
     async fn log(
         &mut self,
-        _cx: &Context<Self>,
+        cx: &Context<Self>,
         hostname: String,
         pid: u32,
         output_target: OutputTarget,
@@ -797,18 +863,103 @@ impl LogMessageHandler for LogClientActor {
     ) -> Result<(), anyhow::Error> {
         // Deserialize the message and process line by line with UTF-8
         let message_lines = deserialize_message_lines(&payload)?;
+        let hostname = hostname.as_str();
 
-        for line in message_lines {
-            if self.should_aggregate {
-                self.log_tx.send((output_target, line)).await?;
-            } else {
-                let message = format!("[{} {}] {}", hostname, pid, line);
-                match output_target {
-                    OutputTarget::Stdout => println!("{}", message),
-                    OutputTarget::Stderr => eprintln!("{}", message),
+        match self.aggregate_window_sec {
+            None => {
+                for line in message_lines {
+                    Self::print_log_line(hostname, pid, output_target, line);
+                }
+                self.last_flush_time = RealClock.system_time_now();
+            }
+            Some(window) => {
+                for line in message_lines {
+                    if let Some(aggregator) = self.aggregators.get_mut(&output_target) {
+                        if let Err(e) = aggregator.add_line(&line) {
+                            tracing::error!("error adding log line: {}", e);
+                            // For the sake of completeness, flush the log lines.
+                            Self::print_log_line(hostname, pid, output_target, line);
+                        }
+                    } else {
+                        tracing::error!("unknown output target: {:?}", output_target);
+                        // For the sake of completeness, flush the log lines.
+                        Self::print_log_line(hostname, pid, output_target, line);
+                    }
+                }
+
+                let new_deadline = self.last_flush_time + Duration::from_secs(window);
+                let now = RealClock.system_time_now();
+                if new_deadline <= now {
+                    self.flush_internal();
+                } else {
+                    let delay = new_deadline.duration_since(now)?;
+                    match self.next_flush_deadline {
+                        None => {
+                            self.next_flush_deadline = Some(new_deadline);
+                            cx.self_message_with_delay(
+                                LogMessage::Flush { sync_version: None },
+                                delay,
+                            )?;
+                        }
+                        Some(deadline) => {
+                            // Some early log lines have alrady triggered the flush.
+                            if new_deadline < deadline {
+                                // This can happen if the user has adjusted the aggregation window.
+                                self.next_flush_deadline = Some(new_deadline);
+                                cx.self_message_with_delay(
+                                    LogMessage::Flush { sync_version: None },
+                                    delay,
+                                )?;
+                            }
+                        }
+                    }
                 }
             }
         }
+
+        Ok(())
+    }
+
+    async fn flush(
+        &mut self,
+        cx: &Context<Self>,
+        sync_version: Option<u64>,
+    ) -> Result<(), anyhow::Error> {
+        match sync_version {
+            None => {
+                self.flush_internal();
+            }
+            Some(version) => {
+                if version != self.current_flush_version {
+                    tracing::error!(
+                        "found mismatched flush versions: got {}, expect {}; this can happen if some previous flush didn't finish fully",
+                        version,
+                        self.current_flush_version
+                    );
+                    return Ok(());
+                }
+
+                if self.current_unflushed_procs == 0 || self.current_flush_port.is_none() {
+                    // This is a serious issue; it's better to error out.
+                    anyhow::bail!("found no ongoing flush request");
+                }
+                self.current_unflushed_procs -= 1;
+
+                tracing::debug!(
+                    "ack sync flush: version {}; remaining procs: {}",
+                    self.current_flush_version,
+                    self.current_unflushed_procs
+                );
+
+                if self.current_unflushed_procs == 0 {
+                    self.flush_internal();
+                    let reply = self.current_flush_port.take().unwrap();
+                    self.current_flush_port = None;
+                    reply.send(cx, ()).map_err(anyhow::Error::from)?;
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -821,11 +972,39 @@ impl LogClientMessageHandler for LogClientActor {
         _cx: &Context<Self>,
         aggregate_window_sec: Option<u64>,
     ) -> Result<(), anyhow::Error> {
-        if let Some(window) = aggregate_window_sec {
-            // Send the new value through the watch channel
-            self.aggregate_window_tx.send(window)?;
+        if self.aggregate_window_sec.is_some() && aggregate_window_sec.is_none() {
+            // Make sure we flush whatever in the aggregators before disabling aggregation.
+            self.print_aggregators();
         }
-        self.should_aggregate = aggregate_window_sec.is_some();
+        self.aggregate_window_sec = aggregate_window_sec;
+        Ok(())
+    }
+
+    async fn start_sync_flush(
+        &mut self,
+        cx: &Context<Self>,
+        expected_procs_flushed: usize,
+        reply: OncePortRef<()>,
+        version: OncePortRef<u64>,
+    ) -> Result<(), anyhow::Error> {
+        if self.current_unflushed_procs > 0 || self.current_flush_port.is_some() {
+            tracing::warn!(
+                "found unfinished ongoing flush: version {}; {} unflushed procs",
+                self.current_flush_version,
+                self.current_unflushed_procs,
+            );
+        }
+
+        self.current_flush_version += 1;
+        tracing::debug!(
+            "start sync flush with version {}",
+            self.current_flush_version
+        );
+        self.current_flush_port = Some(reply.clone());
+        self.current_unflushed_procs = expected_procs_flushed;
+        version
+            .send(cx, self.current_flush_version)
+            .map_err(anyhow::Error::from)?;
         Ok(())
     }
 }
@@ -881,7 +1060,7 @@ mod tests {
             hostname: "my_host".into(),
             pid: 1,
             output_target: OutputTarget::Stderr,
-            payload: Serialized::serialize_anon(&"will not stream".to_string()).unwrap(),
+            payload: Serialized::serialize(&"will not stream".to_string()).unwrap(),
         });
 
         // Turn on streaming
@@ -890,7 +1069,7 @@ mod tests {
             hostname: "my_host".into(),
             pid: 1,
             output_target: OutputTarget::Stderr,
-            payload: Serialized::serialize_anon(&"will stream".to_string()).unwrap(),
+            payload: Serialized::serialize(&"will stream".to_string()).unwrap(),
         });
 
         // TODO: it is hard to test out anything meaningful here as the client flushes to stdout.
@@ -900,7 +1079,7 @@ mod tests {
     fn test_deserialize_message_lines_string() {
         // Test deserializing a String message with multiple lines
         let message = "Line 1\nLine 2\nLine 3".to_string();
-        let serialized = Serialized::serialize_anon(&message).unwrap();
+        let serialized = Serialized::serialize(&message).unwrap();
 
         let result = deserialize_message_lines(&serialized).unwrap();
 
@@ -908,7 +1087,7 @@ mod tests {
 
         // Test deserializing a Vec<u8> message with UTF-8 content
         let message_bytes = "Hello\nWorld\nUTF-8 \u{1F980}".as_bytes().to_vec();
-        let serialized = Serialized::serialize_anon(&message_bytes).unwrap();
+        let serialized = Serialized::serialize(&message_bytes).unwrap();
 
         let result = deserialize_message_lines(&serialized).unwrap();
 
@@ -916,7 +1095,7 @@ mod tests {
 
         // Test deserializing a single line message
         let message = "Single line message".to_string();
-        let serialized = Serialized::serialize_anon(&message).unwrap();
+        let serialized = Serialized::serialize(&message).unwrap();
 
         let result = deserialize_message_lines(&serialized).unwrap();
 
@@ -924,7 +1103,7 @@ mod tests {
 
         // Test deserializing an empty lines
         let message = "\n\n".to_string();
-        let serialized = Serialized::serialize_anon(&message).unwrap();
+        let serialized = Serialized::serialize(&message).unwrap();
 
         let result = deserialize_message_lines(&serialized).unwrap();
 
@@ -932,12 +1111,13 @@ mod tests {
 
         // Test error handling for invalid UTF-8 bytes
         let invalid_utf8_bytes = vec![0xFF, 0xFE, 0xFD]; // Invalid UTF-8 sequence
-        let serialized = Serialized::serialize_anon(&invalid_utf8_bytes).unwrap();
+        let serialized = Serialized::serialize_as::<Vec<u8>, _>(&invalid_utf8_bytes).unwrap();
 
         let result = deserialize_message_lines(&serialized);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid utf-8"));
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("invalid utf-8"), "{}", message);
     }
 
     // Mock implementation of AsyncWrite that captures written data
@@ -981,14 +1161,19 @@ mod tests {
     // Mock implementation of LogSender for testing
     struct MockLogSender {
         log_sender: mpsc::UnboundedSender<(OutputTarget, String)>, // (output_target, content)
+        flush_called: Arc<Mutex<bool>>,                            // Track if flush was called
     }
 
     impl MockLogSender {
         fn new(log_sender: mpsc::UnboundedSender<(OutputTarget, String)>) -> Self {
-            Self { log_sender }
+            Self {
+                log_sender,
+                flush_called: Arc::new(Mutex::new(false)),
+            }
         }
     }
 
+    #[async_trait]
     impl LogSender for MockLogSender {
         fn send(&mut self, output_target: OutputTarget, payload: Vec<u8>) -> anyhow::Result<()> {
             // For testing purposes, convert to string if it's valid UTF-8
@@ -1000,6 +1185,16 @@ mod tests {
             self.log_sender
                 .send((output_target, line))
                 .map_err(|e| anyhow::anyhow!("Failed to send log in test: {}", e))
+        }
+
+        fn flush(&mut self) -> anyhow::Result<()> {
+            // Mark that flush was called
+            let mut flush_called = self.flush_called.lock().unwrap();
+            *flush_called = true;
+
+            // For testing purposes, just return Ok
+            // In a real implementation, this would wait for all messages to be delivered
+            Ok(())
         }
     }
 
@@ -1113,6 +1308,32 @@ mod tests {
         // The content should be "Hello" followed by replacement characters for invalid bytes
         assert!(content.starts_with("Hello"));
         // The rest of the content will be replacement characters, but we don't care about the exact representation
+    }
+
+    #[tokio::test]
+    async fn test_log_writer_poll_flush() {
+        // Create a channel to receive logs
+        let (log_sender, _log_receiver) = mpsc::unbounded_channel();
+
+        // Create a mock log sender that tracks flush calls
+        let mock_log_sender = MockLogSender::new(log_sender);
+        let log_sender_flush_tracker = mock_log_sender.flush_called.clone();
+
+        // Create mock writers for stdout and stderr
+        let (stdout_mock_writer, _) = MockWriter::new();
+        let stdout_writer: Box<dyn io::AsyncWrite + Send + Unpin> = Box::new(stdout_mock_writer);
+
+        // Create a log writer with the mocks
+        let mut writer = LogWriter::new(OutputTarget::Stdout, stdout_writer, mock_log_sender);
+
+        // Call flush on the writer
+        writer.flush().await.unwrap();
+
+        // Verify that log sender's flush were called
+        assert!(
+            *log_sender_flush_tracker.lock().unwrap(),
+            "LogSender's flush was not called"
+        );
     }
 
     #[test]

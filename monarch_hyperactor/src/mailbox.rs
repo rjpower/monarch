@@ -9,8 +9,10 @@
 use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::ops::Deref;
 use std::sync::Arc;
 
+use hyperactor::ActorId;
 use hyperactor::Mailbox;
 use hyperactor::Named;
 use hyperactor::OncePortHandle;
@@ -33,8 +35,13 @@ use hyperactor::mailbox::monitored_return_handle;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;
 use hyperactor::message::Unbind;
+use hyperactor_mesh::comm::multicast::CastInfo;
 use hyperactor_mesh::comm::multicast::set_cast_info_on_headers;
+use hyperactor_mesh::proc_mesh::global_root_client;
 use monarch_types::PickledPyObject;
+use monarch_types::py_global;
+use ndslice::Extent;
+use ndslice::Point;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyEOFError;
 use pyo3::exceptions::PyRuntimeError;
@@ -51,6 +58,7 @@ use crate::proc::PyActorId;
 use crate::pytokio::PyPythonTask;
 use crate::pytokio::PythonTask;
 use crate::runtime::signal_safe_block_on;
+use crate::shape::PyPoint;
 use crate::shape::PyShape;
 #[derive(Clone, Debug)]
 #[pyclass(
@@ -69,12 +77,6 @@ impl PyMailbox {
 
 #[pymethods]
 impl PyMailbox {
-    #[staticmethod]
-    fn root_client_mailbox() -> PyMailbox {
-        PyMailbox {
-            inner: hyperactor_mesh::proc_mesh::global_mailbox(),
-        }
-    }
     fn open_port<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let (handle, receiver) = self.inner.open_port();
         let handle = Py::new(py, PythonPortHandle { inner: handle })?;
@@ -420,8 +422,53 @@ impl PythonPortReceiver {
     module = "monarch._rust_bindings.monarch_hyperactor.mailbox"
 )]
 pub(crate) struct PythonUndeliverableMessageEnvelope {
-    #[allow(dead_code)] // At this time, field `inner` isn't read.
-    pub(crate) inner: Undeliverable<MessageEnvelope>,
+    pub(crate) inner: Option<Undeliverable<MessageEnvelope>>,
+}
+
+impl PythonUndeliverableMessageEnvelope {
+    fn inner(&self) -> PyResult<&Undeliverable<MessageEnvelope>> {
+        self.inner.as_ref().ok_or_else(|| {
+            PyErr::new::<PyRuntimeError, _>(
+                "PythonUndeliverableMessageEnvelope was already consumed",
+            )
+        })
+    }
+
+    pub(crate) fn take(&mut self) -> anyhow::Result<Undeliverable<MessageEnvelope>> {
+        self.inner.take().ok_or_else(|| {
+            anyhow::anyhow!("PythonUndeliverableMessageEnvelope was already consumed")
+        })
+    }
+}
+
+#[pymethods]
+impl PythonUndeliverableMessageEnvelope {
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!(
+            "UndeliverableMessageEnvelope(sender={}, dest={}, error={})",
+            self.inner()?.0.sender(),
+            self.inner()?.0.dest(),
+            self.error_msg()?
+        ))
+    }
+
+    fn sender(&self) -> PyResult<PyActorId> {
+        Ok(PyActorId {
+            inner: self.inner()?.0.sender().clone(),
+        })
+    }
+
+    fn dest(&self) -> PyResult<PyPortId> {
+        Ok(self.inner()?.0.dest().clone().into())
+    }
+
+    fn error_msg(&self) -> PyResult<String> {
+        Ok(self
+            .inner()?
+            .0
+            .error_msg()
+            .unwrap_or_else(|| "None".to_string()))
+    }
 }
 
 #[derive(Debug)]
@@ -444,7 +491,9 @@ impl PythonUndeliverablePortReceiver {
                 .recv()
                 .await
                 .map_err(|err| PyErr::new::<PyEOFError, _>(format!("Port closed: {}", err)))?;
-            Ok(PythonUndeliverableMessageEnvelope { inner: message })
+            Ok(PythonUndeliverableMessageEnvelope {
+                inner: Some(message),
+            })
         })
     }
 
@@ -456,7 +505,9 @@ impl PythonUndeliverablePortReceiver {
         let message = signal_safe_block_on(py, async move { receiver.lock().await.recv().await })?
             .map_err(|err| PyErr::new::<PyEOFError, _>(format!("Port closed: {}", err)))?;
 
-        Ok(PythonUndeliverableMessageEnvelope { inner: message })
+        Ok(PythonUndeliverableMessageEnvelope {
+            inner: Some(message),
+        })
     }
 }
 
@@ -702,6 +753,99 @@ inventory::submit! {
     }
 }
 
+#[pyclass(name = "Instance", module = "monarch._src.actor.actor_mesh")]
+pub(crate) struct Instance {
+    mailbox: Mailbox,
+    actor_id: ActorId,
+    #[pyo3(get, set)]
+    proc_mesh: Option<PyObject>,
+    #[pyo3(get, set, name = "_controller_controller")]
+    controller_controller: Option<PyObject>,
+    #[pyo3(get, set)]
+    rank: PyPoint,
+    #[pyo3(get, set, name = "_children")]
+    children: Option<PyObject>,
+}
+#[pymethods]
+impl Instance {
+    #[getter]
+    fn _mailbox(&self) -> PyMailbox {
+        PyMailbox {
+            inner: self.mailbox.clone(),
+        }
+    }
+    #[getter]
+    fn actor_id(&self) -> PyActorId {
+        self.actor_id.clone().into()
+    }
+}
+
+impl<A: hyperactor::Actor> From<&hyperactor::proc::Instance<A>> for Instance {
+    fn from(ins: &hyperactor::proc::Instance<A>) -> Self {
+        Instance {
+            mailbox: ins.mailbox_for_py().clone(),
+            actor_id: ins.self_id().clone(),
+            proc_mesh: None,
+            controller_controller: None,
+            rank: PyPoint::new(0, Extent::unity().into()),
+            children: None,
+        }
+    }
+}
+impl<A: hyperactor::Actor> From<&hyperactor::proc::Context<'_, A>> for Instance {
+    fn from(cx: &hyperactor::proc::Context<A>) -> Self {
+        let ins: &hyperactor::proc::Instance<A> = cx.deref();
+        Instance {
+            mailbox: ins.mailbox_for_py().clone(),
+            actor_id: ins.self_id().clone(),
+            proc_mesh: None,
+            controller_controller: None,
+            rank: cx.cast_info().into(),
+            children: None,
+        }
+    }
+}
+
+#[pyclass(name = "Context", module = "monarch._src.actor.actor_mesh")]
+pub(crate) struct Context {
+    instance: Py<Instance>,
+    rank: Point,
+}
+
+py_global!(point, "monarch._src.actor.actor_mesh", "Point");
+
+#[pymethods]
+impl Context {
+    #[getter]
+    fn actor_instance(&self) -> &Py<Instance> {
+        &self.instance
+    }
+    #[getter]
+    fn message_rank<'py>(&self) -> PyPoint {
+        self.rank.clone().into()
+    }
+    #[staticmethod]
+    fn _root_client_context(py: Python<'_>) -> Context {
+        let instance: Instance = global_root_client().into();
+        Context {
+            instance: instance.into_pyobject(py).unwrap().into(),
+            rank: Extent::unity().point_of_rank(0).unwrap(),
+        }
+    }
+}
+
+impl Context {
+    pub(crate) fn new<T: hyperactor::actor::Actor>(
+        cx: &hyperactor::proc::Context<T>,
+        instance: Py<Instance>,
+    ) -> Context {
+        Context {
+            instance,
+            rank: cx.cast_info(),
+        }
+    }
+}
+
 pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResult<()> {
     hyperactor_mod.add_class::<PyMailbox>()?;
     hyperactor_mod.add_class::<PyPortId>()?;
@@ -713,5 +857,8 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     hyperactor_mod.add_class::<PythonOncePortHandle>()?;
     hyperactor_mod.add_class::<PythonOncePortRef>()?;
     hyperactor_mod.add_class::<PythonOncePortReceiver>()?;
+    hyperactor_mod.add_class::<Instance>()?;
+    hyperactor_mod.add_class::<Context>()?;
+    hyperactor_mod.add_class::<PythonUndeliverableMessageEnvelope>()?;
     Ok(())
 }

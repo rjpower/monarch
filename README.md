@@ -1,8 +1,39 @@
 # Monarch 🦋
 
-**Monarch** is a distributed execution engine for PyTorch. Our overall goal is
-to deliver the high-quality user experience that people get from single-GPU
-PyTorch, but at cluster scale.
+**Monarch** is a distributed programming framework for PyTorch based on scalable
+actor messaging. It provides:
+
+1. Remote actors with scalable messaging: Actors are grouped into collections called meshes and messages can be broadcast to all members.
+2. Fault tolerance through supervision trees: Actors and processes for a tree and failures propagate up the tree, providing good default error behavior and enabling fine-grained fault recovery.
+3. Point-to-point RDMA transfers: cheap registration of any GPU or CPU memory in a process, with the one-sided tranfers based on libibverbs
+4. Distributed tensors: actors can work with tensor objects sharded across processes
+
+Monarch code imperatively describes how to create processes and actors using a simple python API:
+
+    from monarch.actor import Actor, endpoint, this_host
+
+    # spawn 8 trainer processes one for each gpu
+    training_procs = this_host().spawn_procs({"gpus": 8})
+
+
+    # define the actor to run on each process
+    class Trainer(Actor):
+        @endpoint
+        def train(self, step: int): ...
+
+
+    # create the trainers
+    trainers = training_procs.spawn("trainers", Trainer)
+
+    # tell all the trainers to to take a step
+    fut = trainers.train.call(step=0)
+
+    # wait for all trainers to complete
+    fut.get()
+
+
+
+The [introduction to monarch concepts](getting_started.html) provides an introduction to using these features.
 
 > ⚠️ **Early Development Warning** Monarch is currently in an experimental
 > stage. You should expect bugs, incomplete features, and APIs that may change
@@ -12,6 +43,10 @@ PyTorch, but at cluster scale.
 > issue tracker, either by filing a new issue or by claiming an existing one.
 
 Note: Monarch is currently only supported on Linux systems
+
+## 📖 Documentation
+
+View Monarch's hosted documentation [at this link](https://meta-pytorch.org/monarch/).
 
 ## Installation
 
@@ -61,6 +96,47 @@ pip install --no-build-isolation -e .
 pytest python/tests/ -v -m "not oss_skip"
 ```
 
+### On Ubuntu distributions
+
+```sh
+# Clone the repository and navigate to it
+git clone https://github.com/meta-pytorch/monarch.git
+cd monarch
+
+# Install nightly rust toolchain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+rustup toolchain install nightly
+rustup default nightly
+
+# Install Ubuntu-specific system dependencies
+sudo apt install -y ninja-build
+sudo apt install -y libunwind-dev
+sudo apt install -y clang
+
+# Set clang as the default C/C++ compiler
+export CC=clang
+export CXX=clang++
+
+# Install build dependencies
+pip install -r build-requirements.txt
+# Install test dependencies
+pip install -r python/tests/requirements.txt
+
+# Build and install Monarch (with tensor engine support)
+pip install --no-build-isolation .
+
+# or
+# Build and install Monarch (without tensor engine support)
+USE_TENSOR_ENGINE=0 pip install --no-build-isolation .
+
+# or setup for development
+pip install --no-build-isolation -e .
+
+# Verify installation
+pip list | grep monarch
+```
+
 ### On MacOS
 
 You can also build Monarch to run locally on a MacOS system.
@@ -101,21 +177,3 @@ We'll be adding more examples as we stabilize and polish functionality!
 ## License
 
 Monarch is BSD-3 licensed, as found in the [LICENSE](LICENSE) file.
-
-## Meta Internal
-
-### Run `pip install`
-
-For internal users, make sure activate conda before running `pip install`. For
-example, using
-
-```
-source /data/users/$USER/fbsource/genai/xlformers/dev/xl_conda.sh activate torchtitan_conda_prod:latest_conveyor_build
-```
-
-In addition, you likely need to set up the pip proxy too:
-
-```
-export http_proxy="http://fwdproxy:8080"
-export https_proxy="http://fwdproxy:8080"
-```

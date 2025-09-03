@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from monarch.actor import ProcMesh
 
 from monarch._rust_bindings.monarch_hyperactor.shape import Point
+from monarch._src.actor.device_utils import _local_device_count
 
 from monarch.common.client import Client
 from monarch.common.controller_api import LogMessage, MessageResult
@@ -121,9 +122,18 @@ def _initialize_env(worker_point: Point, proc_id: str) -> None:
     worker_rank = worker_point.rank
     try:
         _, worker_env = _get_worker_exec_info()
-        local_rank = worker_point["gpus"]
-        gpus_per_host = worker_point.size("gpus")
-        num_worker_procs = len(worker_point.shape)
+
+        if "gpus" in worker_point:
+            local_rank = worker_point["gpus"]
+            gpus_per_host = worker_point.size("gpus")
+        elif "gpu" in worker_point:
+            local_rank = worker_point["gpu"]
+            gpus_per_host = worker_point.size("gpu")
+        else:
+            gpus_per_host = _local_device_count()
+            local_rank = worker_rank % gpus_per_host
+
+        num_worker_procs = worker_point.extent.nelements
         process_env = {
             **worker_env,
             "CUDA_VISIBLE_DEVICES": str(local_rank),
@@ -202,6 +212,14 @@ class MeshClient(Client):
         # waited for the responses
         self.inner.drain_and_stop()
 
+    def _atexit(self) -> None:
+        # Calling self.shutdown may cause a deadlock if something is wrong with
+        # the networking. Or should we make shutdown() not wait indefinitely?
+        self._shutdown = True
+
+        # send shutdown message to stop other processes.
+        self.inner.stop_mesh()
+
     @property
     def _mesh_controller(self) -> Controller:
         return cast(Controller, self.inner)
@@ -277,7 +295,7 @@ class RemoteException(Exception):
 
 def _cast_call_method_indirect(
     endpoint: ActorEndpoint,
-    selection: Selection,
+    selection: str,
     client: MeshClient,
     seq: Seq,
     args_kwargs_tuple: bytes,
@@ -303,7 +321,7 @@ def actor_send(
     args_kwargs_tuple: bytes,
     refs: Sequence[Any],
     port: Optional[Port[Any]],
-    selection: Selection,
+    selection: str,
 ):
     tensors = [ref for ref in refs if isinstance(ref, Tensor)]
     # we have some monarch references, we need to ensure their
@@ -352,7 +370,7 @@ def _actor_send(
     args_kwargs_tuple: bytes,
     refs: Sequence[Any],
     port: Optional[Port[Any]],
-    selection: Selection,
+    selection: str,
     client: MeshClient,
     mesh: DeviceMesh,
     tensors: List[Tensor],

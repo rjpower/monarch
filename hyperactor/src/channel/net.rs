@@ -6,45 +6,75 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-//! A simple socket channel implementation, using a simple framing
-//! protocol with no multiplexing. TCP channels serialize messages
-//! using bincode, and frames each message with a 32-bit length,
-//! followed by that many bytes of serialized data, e.g.:
+//! A simple socket channel implementation using a single-stream
+//! framing protocol. Each frame is encoded as an 8-byte
+//! **big-endian** length prefix (u64), followed by exactly that many
+//! bytes of payload.
 //!
+//! Message frames carry a `serde_multipart::Message` (not raw
+//! bincode). In compat mode (current default), this is encoded as a
+//! sentinel `u64::MAX` followed by a single bincode payload. Response frames
+//! are a bincode-serialized NetRxResponse enum, containing either the acked
+//! sequence number, or the Reject value indicating that the server rejected
+//! the connection.
+//!
+//! Message frame (compat/unipart) example:
 //! ```text
-//! +---- len: u32 ----+---- data --------------------+
-//! | \x00\x00\x00\x0b |  11-bytes of serialized data |
-//! +------------------+------------------------------+
+//! +------------------ len: u64 (BE) ------------------+----------------------- data -----------------------+
+//! | \x00\x00\x00\x00\x00\x00\x00\x10                  | \xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF | <bincode bytes> |
+//! |                       16                          |           u64::MAX             |                   |
+//! +---------------------------------------------------+-----------------------------------------------------+
 //! ```
 //!
-//! Thus, each socket connection is a sequence of such framed messages.
+//! Response frame (wire format):
+//! ```text
+//! +------------------ len: u64 (BE) ------------------+---------------- data ------------------+
+//! | \x00\x00\x00\x00\x00\x00\x00\x??                  | <bincode acked sequence num or reject> |
+//! +---------------------------------------------------+----------------------------------------+
+//! ```
+//!
+//! I/O is handled by `FrameReader`/`FrameWrite`, which are
+//! cancellation-safe and avoid extra copies. Helper fns
+//! `serialize_response(NetRxResponse) -> Result<Bytes, bincode::Error>`
+//! and `deserialize_response(Bytes) -> Result<NetRxResponse, bincode::Error>`
+//! convert to/from the response payload.
+//!
+//! ### Limits & EOF semantics
+//! * **Max frame size:** frames larger than
+//!   `config::CODEC_MAX_FRAME_LENGTH` are rejected with
+//!   `io::ErrorKind::InvalidData`.
+//! * **EOF handling:** `FrameReader::next()` returns `Ok(None)` only
+//!   when EOF occurs exactly on a frame boundary. If EOF happens
+//!   mid-frame, it returns `Err(io::ErrorKind::UnexpectedEof)`.
+
 use std::any::type_name;
 use std::collections::VecDeque;
 use std::fmt;
 use std::fmt::Debug;
 use std::future::Future;
 use std::io;
+use std::mem::replace;
 use std::mem::take;
 use std::net::ToSocketAddrs;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
 
+use anyhow::Context;
 use backoff::ExponentialBackoffBuilder;
 use backoff::backoff::Backoff;
-use bytes::BufMut;
+use bytes::Buf;
 use bytes::Bytes;
-use bytes::BytesMut;
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
+use derivative::Derivative;
 use enum_as_inner::EnumAsInner;
-use futures::Sink;
-use futures::SinkExt;
-use futures::stream::SplitSink;
-use futures::stream::SplitStream;
 use serde::de::Error;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
+use tokio::io::AsyncWriteExt;
+use tokio::io::ReadHalf;
+use tokio::io::WriteHalf;
 use tokio::sync::Mutex;
 use tokio::sync::MutexGuard;
 use tokio::sync::watch;
@@ -53,10 +83,6 @@ use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
 use tokio::time::Duration;
 use tokio::time::Instant;
-use tokio_util::codec::Decoder;
-use tokio_util::codec::Encoder;
-use tokio_util::codec::Framed;
-use tokio_util::codec::length_delimited::LengthDelimitedCodec;
 use tokio_util::net::Listener;
 use tokio_util::sync::CancellationToken;
 
@@ -66,7 +92,12 @@ use crate::RemoteMessage;
 use crate::clock::Clock;
 use crate::clock::RealClock;
 use crate::config;
+use crate::config::CHANNEL_MULTIPART;
 use crate::metrics;
+
+mod framed;
+use framed::FrameReader;
+use framed::FrameWrite;
 
 /// Use to prevent [futures::Stream] objects using the wrong next() method by
 /// accident. Bascially, we want to use [tokio_stream::StreamExt::next] since it
@@ -115,60 +146,30 @@ enum Frame<M> {
     Message(u64, M),
 }
 
-#[derive(thiserror::Error, Debug)]
-enum FrameError<E> {
-    #[error(transparent)]
-    Bincode(#[from] bincode::Error),
-    #[error("framer: {0}")]
-    Framer(E),
-    #[error("eof")]
-    Eof,
+#[derive(Debug, Serialize, Deserialize, EnumAsInner)]
+enum NetRxResponse {
+    Ack(u64),
+    Reject,
 }
 
-impl<M: RemoteMessage> Frame<M> {
-    async fn send<T, I, U>(&self, framer: &mut Framed<T, U>) -> Result<(), FrameError<U::Error>>
-    where
-        T: AsyncWrite + std::marker::Unpin,
-        U: Encoder<I>,
-        I: From<Vec<u8>>,
-        U::Error: From<io::Error>,
-    {
-        let data = bincode::serialize(self).expect("unexpected serialization error");
-        framer.send(data.into()).await.map_err(FrameError::Framer)
+fn serialize_response(response: NetRxResponse) -> Result<Bytes, bincode::Error> {
+    bincode::serialize(&response).map(|bytes| bytes.into())
+}
+
+fn deserialize_response(data: Bytes) -> Result<NetRxResponse, bincode::Error> {
+    bincode::deserialize(&data)
+}
+
+/// Serializes using the "illegal" multipart encoding whenever multipart
+/// is not enabled.
+fn serialize_bincode<S: ?Sized + serde::Serialize>(
+    value: &S,
+) -> Result<serde_multipart::Message, bincode::Error> {
+    if config::global::get(CHANNEL_MULTIPART) {
+        serde_multipart::serialize_bincode(value)
+    } else {
+        serde_multipart::serialize_illegal_bincode(value)
     }
-
-    async fn next<T, U>(
-        stream: &mut SplitStream<Framed<T, U>>,
-    ) -> Result<Self, FrameError<U::Error>>
-    where
-        T: AsyncRead + std::marker::Unpin,
-        U: Decoder,
-        U::Item: Into<Vec<u8>>,
-    {
-        match tokio_stream::StreamExt::next(stream).await {
-            Some(Ok(data)) => Ok(bincode::deserialize(&data.into())?),
-            Some(Err(error)) => Err(FrameError::Framer(error)),
-            None => Err(FrameError::Eof),
-        }
-    }
-}
-
-fn serialize_ack(seq: u64) -> Bytes {
-    let mut data = BytesMut::with_capacity(8);
-    data.put_slice(&seq.to_be_bytes());
-    data.freeze()
-}
-
-fn deserialize_ack(data: BytesMut) -> Result<u64, usize> {
-    let slice = data.as_ref();
-    let array: [u8; 8] = slice.try_into().map_err(|_| slice.len())?;
-    Ok(u64::from_be_bytes(array))
-}
-
-fn build_codec() -> LengthDelimitedCodec {
-    LengthDelimitedCodec::builder()
-        .max_frame_length(config::global::get(config::CODEC_MAX_FRAME_LENGTH))
-        .new_codec()
 }
 
 /// A Tx implemented on top of a Link. The Tx manages the link state,
@@ -206,21 +207,28 @@ impl<M: RemoteMessage> NetTx<M> {
         // If we can't deliver a message within this limit consider
         // `link` broken and return.
 
-        #[derive(Debug)]
         struct QueuedMessage<M: RemoteMessage> {
             seq: u64,
-            data: Bytes,
+            message: serde_multipart::Message,
             received_at: Instant,
             return_channel: oneshot::Sender<M>,
         }
 
-        #[derive(Debug)]
+        impl<M: RemoteMessage> fmt::Debug for QueuedMessage<M> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.seq.fmt(f)
+            }
+        }
+
+        #[derive(Derivative)]
+        #[derivative(Debug)]
         struct Outbox<'a, M: RemoteMessage> {
             // The seq number of the next new message put into outbox. Requeued
             // unacked messages should still use their already assigned seq
             // numbers.
             next_seq: u64,
             deque: VecDeque<QueuedMessage<M>>,
+            #[derivative(Debug = "ignore")]
             log_id: &'a str,
         }
 
@@ -247,29 +255,12 @@ impl<M: RemoteMessage> NetTx<M> {
                 self.deque.is_empty()
             }
 
-            // Send the oldest message in the outbox, but do not remove it from
-            // the outbox. Return error if the outbox is empty.
-            async fn send_message<T: Sink<Bytes> + Unpin>(&self, sink: &mut T) -> Result<(), String>
-            where
-                T::Error: fmt::Display,
-            {
-                let data = self
-                    .deque
-                    .front()
-                    .ok_or_else(|| {
-                        format!(
-                            "{}: unexpected: send_message cannot be used when outbox is empty",
-                            self.log_id,
-                        )
-                    })?
-                    .data
-                    .clone();
-                sink.send(data).await.map_err(|e| e.to_string())?;
-                Ok(())
+            fn front_message(&self) -> Option<serde_multipart::Message> {
+                self.deque.front().map(|msg| msg.message.clone())
             }
 
             fn front_size(&self) -> Option<usize> {
-                self.deque.front().map(|msg| msg.data.len())
+                self.deque.front().map(|msg| msg.message.frame_len())
             }
 
             fn pop_front(&mut self) -> Option<QueuedMessage<M>> {
@@ -289,14 +280,13 @@ impl<M: RemoteMessage> NetTx<M> {
                 );
 
                 let frame = Frame::Message(self.next_seq, message);
-                let data: Bytes = bincode::serialize(&frame)
-                    .map_err(|e| format!("serialization error: {e}"))?
-                    .into();
-                metrics::REMOTE_MESSAGE_SEND_SIZE.record(data.len() as f64, &[]);
+                let message =
+                    serialize_bincode(&frame).map_err(|e| format!("serialization error: {e}"))?;
+                metrics::REMOTE_MESSAGE_SEND_SIZE.record(message.frame_len() as f64, &[]);
 
                 self.deque.push_back(QueuedMessage {
                     seq: self.next_seq,
-                    data,
+                    message,
                     received_at,
                     return_channel,
                 });
@@ -324,10 +314,12 @@ impl<M: RemoteMessage> NetTx<M> {
             }
         }
 
-        #[derive(Debug)]
+        #[derive(Derivative)]
+        #[derivative(Debug)]
         struct Unacked<'a, M: RemoteMessage> {
             deque: VecDeque<QueuedMessage<M>>,
             largest_acked: Option<u64>,
+            #[derivative(Debug = "ignore")]
             log_id: &'a str,
         }
 
@@ -476,8 +468,8 @@ impl<M: RemoteMessage> NetTx<M> {
             Disconnected(Box<dyn Backoff + Send>),
             /// Connected and ready to go.
             Connected {
-                sink: SplitSink<Framed<S, LengthDelimitedCodec>, Bytes>,
-                stream: SplitStream<Framed<S, LengthDelimitedCodec>>,
+                reader: FrameReader<ReadHalf<S>>,
+                write_state: WriteState<WriteHalf<S>, serde_multipart::Frame, ()>,
             },
         }
 
@@ -520,12 +512,8 @@ impl<M: RemoteMessage> NetTx<M> {
                             (running, conn)
                         }
                         Err(err) => {
-                            let error_msg = format!(
-                                "session {}.{}: failed to push message to outbox: {}",
-                                link.dest(),
-                                session_id,
-                                err
-                            );
+                            let error_msg =
+                                format!("{log_id}: failed to push message to outbox: {err}");
                             tracing::error!(error_msg);
                             (
                                 State::Closing {
@@ -545,45 +533,74 @@ impl<M: RemoteMessage> NetTx<M> {
                     ),
                 },
                 (
+                    State::Running(Deliveries { outbox, unacked }),
+                    Conn::Connected {
+                        reader,
+                        write_state: WriteState::Idle(writer),
+                        ..
+                    },
+                ) if !outbox.is_empty() => {
+                    let message = outbox.front_message().unwrap();
+                    (
+                        State::Running(Deliveries { outbox, unacked }),
+                        Conn::Connected {
+                            reader,
+                            // Dequeue the next message to be sent:
+                            write_state: WriteState::Writing(
+                                FrameWrite::new(writer, message.framed()),
+                                (),
+                            ),
+                        },
+                    )
+                }
+                (
                     State::Running(Deliveries {
                         mut outbox,
                         mut unacked,
                     }),
                     Conn::Connected {
-                        mut sink,
-                        mut stream,
+                        mut reader,
+                        mut write_state,
                     },
                 ) => {
                     tokio::select! {
                         // If acking message takes too long, consider the link broken.
                         _ = unacked.wait_for_timeout(), if !unacked.is_empty() => {
                             let error_msg = format!(
-                                "session {}.{}: failed to receive ack within timeout {} secs; link is currently connected",
-                                link.dest(),
-                                session_id,
+                                "{log_id}: failed to receive ack within timeout {} secs; link is currently connected",
                                 config::global::get(config::MESSAGE_DELIVERY_TIMEOUT).as_secs(),
                             );
                             tracing::error!(error_msg);
                             (State::Closing {
                                 deliveries: Deliveries{outbox, unacked},
                                 reason: error_msg,
-                            }, Conn::Connected { sink, stream })
+                            }, Conn::Connected { reader, write_state })
                         }
-                        // tokio_stream::StreamExt::next is cancel safe.
-                        ack_result = tokio_stream::StreamExt::next(&mut stream) => {
+                        ack_result = reader.next() => {
                             match ack_result {
-                                Some(Ok(data)) => {
-                                    match deserialize_ack(data) {
-                                        Ok(ack) => {
-                                            unacked.prune(ack);
-                                            (State::Running(Deliveries { outbox, unacked }), Conn::Connected { sink, stream })
+                                Ok(Some(buffer)) => {
+                                    match deserialize_response(buffer) {
+                                        Ok(response) => {
+                                            match response {
+                                                NetRxResponse::Ack(ack) => {
+                                                    unacked.prune(ack);
+                                                    (State::Running(Deliveries { outbox, unacked }), Conn::Connected { reader, write_state })
+                                                }
+                                                NetRxResponse::Reject => {
+                                                    let error_msg = format!(
+                                                        "{log_id}: server rejected connection.",
+                                                    );
+                                                    tracing::error!(error_msg);
+                                                    (State::Closing {
+                                                        deliveries: Deliveries{outbox, unacked},
+                                                        reason: error_msg,
+                                                    }, Conn::reconnect_with_default())
+                                                }
+                                            }
                                         }
-                                        Err(len) => {
+                                        Err(err) => {
                                             let error_msg = format!(
-                                                "session {}.{}: ack message size is not 8 bytes. It is {} bytes",
-                                                link.dest(),
-                                                session_id,
-                                                len,
+                                                "{log_id}: failed deserializing response: {err}",
                                             );
                                             tracing::error!(error_msg);
                                             // Similar to the message flow, we always close the
@@ -591,44 +608,36 @@ impl<M: RemoteMessage> NetTx<M> {
                                             (State::Closing {
                                                 deliveries: Deliveries{outbox, unacked},
                                                 reason: error_msg,
-                                            }, Conn::Connected { sink, stream })
+                                            }, Conn::Connected { reader, write_state })
                                         }
                                     }
-                                },
-                                Some(Err(err)) => {
+                                }
+                                Ok(None) => {
+                                  // Graceful of stream: reconnect
+                                  (State::Running(Deliveries { outbox, unacked }), Conn::reconnect_with_default())
+                                }
+                                Err(err) => {
                                         tracing::error!(
-                                            "session {}.{}: failed to receiving ack: {}",
-                                            link.dest(),
-                                            session_id,
-                                            err
+                                            "{log_id}: failed while receiving ack: {err}",
                                         );
                                         // Reconnect and wish the error will go away.
                                         (State::Running(Deliveries { outbox, unacked }), Conn::reconnect_with_default())
                                 }
-                                None => {
-                                    // None means connection is closed. Reconnect.
-                                    (State::Running(Deliveries { outbox, unacked }), Conn::reconnect_with_default())
-                                }
                             }
                         },
-                        // It does matter whether `fn send_message` is cancel safe or not. Since
-                        // `fn send_message` does not remove the message from outbox, when it is
-                        // canceled, the message will not be dropped. In the worst case, the same
-                        // message would get sent multiple times. But that is okay. The seq order is
-                        // still preserved.
-                        send_result = outbox.send_message(&mut sink), if !outbox.is_empty() => {
+
+                        // We have to be careful to manage outgoing write states, so that we never write
+                        // partial frames in the presence cancellation.
+                        send_result = write_state.send() => {
                             match send_result {
                                 Ok(()) => {
                                     let message = outbox.pop_front().expect("outbox should not be empty");
                                     unacked.push_back(message);
-                                    (State::Running(Deliveries { outbox, unacked }), Conn::Connected { sink, stream })
+                                    (State::Running(Deliveries { outbox, unacked }), Conn::Connected { reader, write_state })
                                 }
                                 Err(err) => {
                                     tracing::info!(
-                                        "session {}.{}: outbox send error: {}; message size: {}",
-                                        link.dest(),
-                                        session_id,
-                                        err,
+                                        "{log_id}: outbox send error: {err}; message size: {}",
                                         outbox.front_size().expect("outbox should not be empty"),
                                     );
                                     (State::Running(Deliveries { outbox, unacked }), Conn::reconnect_with_default())
@@ -647,27 +656,24 @@ impl<M: RemoteMessage> NetTx<M> {
                                                 outbox,
                                                 unacked,
                                             });
-                                            (running, Conn::Connected { sink, stream })
+                                            (running, Conn::Connected { reader, write_state })
                                         }
                                         Err(err) => {
                                             let error_msg = format!(
-                                                "session {}.{}: failed to push message to outbox: {}",
-                                                link.dest(),
-                                                session_id,
-                                                err
+                                                "{log_id}: failed to push message to outbox: {err}",
                                             );
                                             tracing::error!(error_msg);
                                             (State::Closing {
                                                 deliveries: Deliveries {outbox, unacked},
                                                 reason: error_msg,
-                                            }, Conn::Connected { sink, stream })
+                                            }, Conn::Connected { reader, write_state })
                                         }
                                     }
                                 }
                                 None => (State::Closing {
                                     deliveries: Deliveries{outbox, unacked},
                                     reason: "NetTx is dropped".to_string(),
-                                }, Conn::Connected { sink, stream }),
+                                }, Conn::Connected { reader, write_state }),
                             }
                         },
                     }
@@ -684,11 +690,8 @@ impl<M: RemoteMessage> NetTx<M> {
                     // If delivering this message is taking too long,
                     // consider the link broken.
                     if outbox.is_expired() {
-                        let error_msg = format!(
-                            "session {}.{}: failed to deliver message within timeout",
-                            link.dest(),
-                            session_id,
-                        );
+                        let error_msg =
+                            format!("{log_id}: failed to deliver message within timeout");
                         tracing::error!(error_msg);
                         (
                             State::Closing {
@@ -699,9 +702,7 @@ impl<M: RemoteMessage> NetTx<M> {
                         )
                     } else if unacked.is_expired() {
                         let error_msg = format!(
-                            "session {}.{}: failed to receive ack within timeout {} secs; link is currently broken",
-                            link.dest(),
-                            session_id,
+                            "{log_id}: failed to receive ack within timeout {} secs; link is currently broken",
                             config::global::get(config::MESSAGE_DELIVERY_TIMEOUT).as_secs(),
                         );
                         tracing::error!(error_msg);
@@ -715,11 +716,12 @@ impl<M: RemoteMessage> NetTx<M> {
                     } else {
                         match link.connect().await {
                             Ok(stream) => {
-                                let framed = Framed::new(stream, build_codec());
-                                let (mut sink, stream) = futures::StreamExt::split(framed);
-                                let data = bincode::serialize(&Frame::<M>::Init(session_id))
-                                    .expect("unexpected serialization error");
-                                let initialized = sink.send(data.into()).await.is_ok();
+                                let message =
+                                    serialize_bincode(&Frame::<M>::Init(session_id)).unwrap();
+
+                                let mut write = FrameWrite::new(stream, message.framed());
+                                let initialized = write.send().await.is_ok();
+                                let stream = write.complete();
 
                                 metrics::CHANNEL_CONNECTIONS.add(
                                     1,
@@ -742,7 +744,14 @@ impl<M: RemoteMessage> NetTx<M> {
                                     }),
                                     if initialized {
                                         backoff.reset();
-                                        Conn::Connected { sink, stream }
+                                        let (reader, writer) = tokio::io::split(stream);
+                                        Conn::Connected {
+                                            reader: FrameReader::new(
+                                                reader,
+                                                config::global::get(config::CODEC_MAX_FRAME_LENGTH),
+                                            ),
+                                            write_state: WriteState::Idle(writer),
+                                        }
                                     } else {
                                         Conn::reconnect(backoff)
                                     },
@@ -776,6 +785,7 @@ impl<M: RemoteMessage> NetTx<M> {
                 }
             }
         }; // loop
+        tracing::debug!("{log_id}: NetRx exited its loop with state: {state:?}");
 
         match state {
             State::Closing {
@@ -794,7 +804,7 @@ impl<M: RemoteMessage> NetTx<M> {
                     .drain(..)
                     .chain(outbox.deque.drain(..))
                     .filter_map(|queued_msg| {
-                        bincode::deserialize(&queued_msg.data)
+                        serde_multipart::deserialize_bincode(queued_msg.message.clone())
                             .ok()
                             .and_then(|frame| match frame {
                                 Frame::Message(_, msg) => Some((queued_msg.return_channel, msg)),
@@ -813,30 +823,22 @@ impl<M: RemoteMessage> NetTx<M> {
 
         // Notify senders that this link is no longer usable
         if let Err(err) = notify.send(TxStatus::Closed) {
-            tracing::debug!(
-                "session {}.{}: tx status update error: {}",
-                link.dest(),
-                session_id,
-                err
-            );
+            tracing::debug!("{log_id}: tx status update error: {err}");
         }
 
         if let Conn::Connected {
-            mut sink,
-            stream: _,
+            write_state: WriteState::Writing(mut frame_writer, ()),
+            ..
         } = conn
         {
-            if let Err(err) = sink.flush().await {
-                tracing::info!(
-                    "session {}.{}: flush error: {}",
-                    link.dest(),
-                    session_id,
-                    err
-                );
+            if let Err(err) = frame_writer.send().await {
+                tracing::info!("{log_id}: write error: {err}",);
+            } else if let Err(err) = frame_writer.complete().flush().await {
+                tracing::info!("{log_id}: flush error: {err}",);
             }
         }
 
-        tracing::debug!("session {}.{}: NetTx::run exits", link.dest(), session_id);
+        tracing::debug!("{log_id}: NetTx::run exits");
     }
 }
 
@@ -1000,20 +1002,47 @@ pub enum ClientError {
     Serialize(ChannelAddr, bincode::ErrorKind),
 }
 
+#[derive(EnumAsInner)]
+enum WriteState<W, F, T> {
+    /// No frame being written.
+    Idle(W),
+    /// Currently writing a frame, with associated T-typed value.
+    Writing(FrameWrite<W, F>, T),
+
+    /// Internal state to manage completions.
+    Broken,
+}
+
+impl<W: AsyncWrite + Unpin, F: Buf, T> WriteState<W, F, T> {
+    async fn send(&mut self) -> io::Result<T> {
+        match self {
+            Self::Idle(_) => futures::future::pending().await,
+            Self::Writing(fw, _value) => {
+                fw.send().await?;
+                let Ok((fw, value)) = replace(self, Self::Broken).into_writing() else {
+                    panic!("illegal state");
+                };
+                *self = Self::Idle(fw.complete());
+                Ok(value)
+            }
+            Self::Broken => panic!("illegal state"),
+        }
+    }
+}
+
 struct ServerConn<S> {
-    sink: SplitSink<Framed<S, LengthDelimitedCodec>, Bytes>,
-    stream: SplitStream<Framed<S, LengthDelimitedCodec>>,
+    reader: FrameReader<ReadHalf<S>>,
+    write_state: WriteState<WriteHalf<S>, Bytes, u64>,
     source: ChannelAddr,
     dest: ChannelAddr,
 }
 
 impl<S: AsyncRead + AsyncWrite> ServerConn<S> {
     fn new(stream: S, source: ChannelAddr, dest: ChannelAddr) -> Self {
-        let framed = Framed::new(stream, build_codec());
-        let (sink, stream) = futures::StreamExt::split(framed);
+        let (reader, writer) = tokio::io::split(stream);
         Self {
-            sink,
-            stream,
+            reader: FrameReader::new(reader, config::global::get(config::CODEC_MAX_FRAME_LENGTH)),
+            write_state: WriteState::Idle(writer),
             source,
             dest,
         }
@@ -1022,7 +1051,12 @@ impl<S: AsyncRead + AsyncWrite> ServerConn<S> {
 
 impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
     async fn handshake<M: RemoteMessage>(&mut self) -> Result<u64, anyhow::Error> {
-        let Frame::Init(session_id) = Frame::<M>::next(&mut self.stream).await? else {
+        let Some(frame) = self.reader.next().await? else {
+            anyhow::bail!("end of stream before first frame from {}", self.source);
+        };
+        let message = serde_multipart::Message::from_framed(frame)?;
+        let Frame::Init(session_id) = serde_multipart::deserialize_bincode::<Frame<M>>(message)?
+        else {
             anyhow::bail!("unexpected initial frame from {}", self.source);
         };
         Ok(session_id)
@@ -1036,121 +1070,253 @@ impl<S: AsyncRead + AsyncWrite + Send + 'static + Unpin> ServerConn<S> {
         cancel_token: CancellationToken,
         mut next: Next,
     ) -> (Next, Result<(), anyhow::Error>) {
-        use anyhow::Context;
+        let log_id = format!("session {}.{}<-{}", self.dest, session_id, self.source);
+        let initial_next: Next = next.clone();
+        let mut rcv_raw_frame_count = 0u64;
         let mut last_ack_time = RealClock.now();
 
         let ack_time_interval = config::global::get(config::MESSAGE_ACK_TIME_INTERVAL);
         let ack_msg_interval = config::global::get(config::MESSAGE_ACK_EVERY_N_MESSAGES);
 
-        let (mut final_next, final_result) = loop {
-            tokio::select! {
-                // tokio_stream::StreamExt::next is cancel safe.
-                rcv_result = tokio_stream::StreamExt::next(&mut self.stream) => {
-                    match rcv_result {
-                        Some(Ok(data)) => {
-                            match bincode::deserialize(&data) {
-                                Ok(Frame::Init(_)) => {
-                                    break (next, Err(anyhow::anyhow!("unexpected init frame from {}", self.source)))
-                                },
-                                // Ignore retransmits.
-                                Ok(Frame::Message(seq, _)) if seq < next.seq => (),
-                                // The following segment ensures exactly-once semantics.
-                                // That means No out-of-order delivery and no duplicate delivery.
-                                Ok(Frame::Message(seq, message)) => {
-                                    // received seq should be equal to next seq. Else error out!
-                                    if seq > next.seq {
-                                        tracing::error!("out-of-sequence message from {}", self.source);
-                                        let next_seq = next.seq;
-                                        break (next, Err(anyhow::anyhow!("out-of-sequence message from {}, expected seq {}, got {}", self.source, next_seq, seq)))
-                                    }
-                                    match tx.send(message).await {
-                                        Ok(()) => {
-                                            // In channel's contract, "delivered" means the message
-                                            // is sent to the NetRx object. Therefore, we could bump
-                                            // `next_seq` as far as the message is put on the mspc
-                                            // channel.
-                                            //
-                                            // Note that when/how the messages in NetRx are processed
-                                            // is not covered by channel's contract. For example,
-                                            // the message might never be taken out of netRx, but
-                                            // channel still considers those messages delivered.
-                                            next.seq = seq+1;
-                                        }
-                                        Err(err) => {
-                                            break (next, Err::<(), anyhow::Error>(err.into()).context(format!("error relaying message to mspc channel for {:?}", self.source)))
-                                        }
-                                    }
-                                },
-                                Err(err) => break (
-                                    next,
-                                    Err::<(), anyhow::Error>(err.into()).context(
-                                        format!(
-                                            "error deserializing into Frame with M = {} for data from {:?}",
-                                            type_name::<M>(),
-                                            self.source,
-                                        )
-                                    )
-                                ),
-                            }
-                        }
-                        Some(Err(err)) => {
-                            break (next, Err::<(), anyhow::Error>(err.into()).context(format!("error receiving peer message from {:?}", self.source)))
-                        }
-
-                        None => break (next, Ok(()))
+        let (mut final_next, final_result, reject_conn) = loop {
+            if self.write_state.is_idle()
+                && (next.ack + ack_msg_interval <= next.seq
+                    || (next.ack < next.seq && last_ack_time.elapsed() > ack_time_interval))
+            {
+                let Ok(writer) = replace(&mut self.write_state, WriteState::Broken).into_idle()
+                else {
+                    panic!("illegal state");
+                };
+                let ack = match serialize_response(NetRxResponse::Ack(next.seq - 1)) {
+                    Ok(ack) => ack,
+                    Err(err) => {
+                        break (
+                            next,
+                            Err::<(), anyhow::Error>(err.into())
+                                .context(format!("{log_id}: error serializing ack",)),
+                            false,
+                        );
                     }
-                }
-                // It does matter whether send_ack is cancel safe. If it is not,
-                // the same seq might get acked multiple times. But that is okay.
-                ack_result = Self::send_ack(&mut self.sink, next.seq), if next.ack + ack_msg_interval <= next.seq ||
-                    (next.ack < next.seq && last_ack_time.elapsed() > ack_time_interval) => {
+                };
+                self.write_state = WriteState::Writing(FrameWrite::new(writer, ack), next.seq);
+            }
+
+            tokio::select! {
+                bytes_result = self.reader.next() => {
+                    rcv_raw_frame_count += 1;
+                    // First handle transport-level I/O errors, and EOFs.
+                    let bytes = match bytes_result {
+                        Ok(Some(bytes)) => bytes,
+                        Ok(None) => {
+                            tracing::debug!("{log_id}: reader returns None, meaning EOF");
+                            break (next, Ok(()), false);
+                        }
+                        Err(err) => break (
+                            next,
+                            Err::<(), anyhow::Error>(err.into()).context(
+                                format!(
+                                    "{log_id}: error reading into Frame with M = {}",
+                                    type_name::<M>(),
+                                )
+                            ),
+                            false
+                        ),
+                    };
+
+                    // De-frame the multi-part message.
+                    let message = match serde_multipart::Message::from_framed(bytes) {
+                        Ok(message) => message,
+                        Err(err) => break (
+                            next,
+                            Err::<(), anyhow::Error>(err.into()).context(
+                                format!(
+                                    "{log_id}: failed to de-frame message with M = {}",
+                                    type_name::<M>(),
+                                )
+                            ),
+                            false
+                        ),
+                    };
+
+                    // Finally decode the message. This assembles the M-typed message
+                    // from its constituent parts.
+                    match serde_multipart::deserialize_bincode(message) {
+                        Ok(Frame::Init(_)) => {
+                            break (next, Err(anyhow::anyhow!("{log_id}: unexpected init frame")), true)
+                        },
+                        // Ignore retransmits.
+                        Ok(Frame::Message(seq, _)) if seq < next.seq => {
+                            tracing::debug!(
+                                "{log_id}: ignoring retransmit; retransmit seq: {}; expected next seq: {}",
+                                seq,
+                                next.seq,
+                            );
+                        },
+                        // The following segment ensures exactly-once semantics.
+                        // That means No out-of-order delivery and no duplicate delivery.
+                        Ok(Frame::Message(seq, message)) => {
+                            // received seq should be equal to next seq. Else error out!
+                            if seq > next.seq {
+                                let msg = format!("{log_id}: out-of-sequence message, expected seq {}, got {}", next.seq, seq);
+                                tracing::error!(msg);
+                                break (next, Err(anyhow::anyhow!(msg)), true)
+                            }
+                            match self.send_with_buffer_metric(&log_id, &tx, message).await {
+                                Ok(()) => {
+                                    // In channel's contract, "delivered" means the message
+                                    // is sent to the NetRx object. Therefore, we could bump
+                                    // `next_seq` as far as the message is put on the mspc
+                                    // channel.
+                                    //
+                                    // Note that when/how the messages in NetRx are processed
+                                    // is not covered by channel's contract. For example,
+                                    // the message might never be taken out of netRx, but
+                                    // channel still considers those messages delivered.
+                                    next.seq = seq+1;
+                                }
+                                Err(err) => {
+                                    break (next, Err::<(), anyhow::Error>(err).context(format!("{log_id}: error relaying message to mspc channel")), false)
+                                }
+                            }
+                        },
+                        Err(err) => break (
+                            next,
+                            Err::<(), anyhow::Error>(err.into()).context(
+                                format!(
+                                    "{log_id}: failed to deserialize message with M = {}",
+                                    type_name::<M>(),
+                                )
+                            ),
+                            false
+                        ),
+                    }
+                },
+
+                // We have to be careful to manage the ack write state here, so that we do not
+                // write partial acks in the presence of cancellation.
+                ack_result = self.write_state.send() => {
                     match ack_result {
-                        Ok(()) => {
+                        Ok(acked_seq) => {
                             last_ack_time = RealClock.now();
-                            next.ack = next.seq;
+                            next.ack = acked_seq;
                         }
                         Err(err) => {
-                            break (next, Err::<(), anyhow::Error>(err.into()).context(format!("error acking peer message from {:?}", self.source)))
+                            break (next, Err::<(), anyhow::Error>(err.into()).context(format!("{log_id}: error acking peer message")), false)
                         }
                     }
-                }
+                },
                 // Have a tick to abort select! call to make sure the ack for the last message can get the chance
                 // to be sent as a result of time interval being reached.
                 _ = RealClock.sleep_until(last_ack_time + ack_time_interval), if next.ack < next.seq => {},
-                _ = cancel_token.cancelled() => break (next, Ok(()))
+                _ = cancel_token.cancelled() => break (next, Ok(()), false)
             }
         };
+        // Note:
+        //   1. processed seq/ack is Next-1;
+        //   2. rcv_raw_frame_count contains the last frame which might not be
+        //      desrializable, e.g. EOF, error, etc.
+        tracing::debug!(
+            "{log_id}: NetRx exited its loop with states: initial Netx was \
+            {initial_next:?}; final Next is {final_next:?} ; rcv raw frame \
+            count is {rcv_raw_frame_count}.",
+        );
+
+        let mut final_ack = final_next.ack;
+        // Flush any ongoing write.
+        if self.write_state.is_writing() {
+            match self.write_state.send().await {
+                Ok(acked_seq) => {
+                    if acked_seq > final_ack {
+                        final_ack = acked_seq;
+                    }
+                }
+                Err(_) => (),
+            };
+        }
         // best effort: "flush" any remaining ack before closing this session
-        if final_next.ack < final_next.seq {
-            match Self::send_ack(&mut self.sink, final_next.seq).await {
-                Ok(()) => {
-                    final_next.ack = final_next.seq;
+        if self.write_state.is_idle() && final_ack < final_next.seq {
+            let Ok(writer) = replace(&mut self.write_state, WriteState::Broken).into_idle() else {
+                panic!("illegal state");
+            };
+            let result = async {
+                let ack = serialize_response(NetRxResponse::Ack(final_next.seq - 1))
+                    .map_err(anyhow::Error::from)?;
+                self.write_state =
+                    WriteState::Writing(FrameWrite::new(writer, ack), final_next.seq);
+                self.write_state.send().await.map_err(anyhow::Error::from)
+            };
+
+            match result.await {
+                Ok(acked_seq) => {
+                    final_next.ack = acked_seq;
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "session {}:{} failed to flush acks for connection from \
-                        {} due to error : {:?}. Normally, this is okay because \
-                        Tx will reconnect, and acks will be resent in the next \
-                        connection. However, if either Tx or Rx is dropped, the \
-                        reconnection will not happen, and subsequently the \
-                        pending ack will never be sent out.",
-                        self.dest,
-                        session_id,
-                        self.source,
-                        e
+                    tracing::debug!(
+                        "{log_id}: failed to flush acks due to error : {e}. \
+                        Normally, this is okay because Tx will reconnect, and \
+                        acks will be resent in the next connection. However, if \
+                        either Tx or Rx is dropped, the reconnection will not \
+                        happen, and subsequently the pending ack will never be sent out.",
                     );
                 }
             }
         }
+
+        if self.write_state.is_idle() && reject_conn {
+            let Ok(writer) = replace(&mut self.write_state, WriteState::Broken).into_idle() else {
+                panic!("illegal state");
+            };
+            match serialize_response(NetRxResponse::Reject) {
+                Ok(data) => {
+                    self.write_state = WriteState::Writing(FrameWrite::new(writer, data), 0);
+                    let _ = self.write_state.send().await;
+                }
+                Err(_) => (),
+            };
+        }
+
         (final_next, final_result)
     }
 
-    async fn send_ack(
-        sink: &mut SplitSink<Framed<S, LengthDelimitedCodec>, bytes::Bytes>,
-        next_seq: u64,
-    ) -> Result<(), std::io::Error> {
-        let serialized = serialize_ack(next_seq - 1);
-        futures::SinkExt::send(sink, serialized).await
+    // NetRx's buffer, i.e. the mspc channel between NetRx and its
+    // client, should rarely be full for long. But when it is full, it
+    // will block NetRx from taking more messages, sending back ack,
+    // and subsequently lead to uncommon behaviors such as ack
+    // timeout, backpressure on NetTx, etc. In order to aid debugging,
+    // it is important to add a metric measuring full buffer
+    // occurences.
+    async fn send_with_buffer_metric<M: RemoteMessage>(
+        &mut self,
+        log_id: &str,
+        tx: &mpsc::Sender<M>,
+        message: M,
+    ) -> anyhow::Result<()> {
+        let start = RealClock.now();
+        loop {
+            tokio::select! {
+                biased;
+                permit_result = tx.reserve() => {
+                    permit_result?.send(message);
+                    return Ok(())
+                }
+                _ = RealClock.sleep(config::global::get(config::CHANNEL_NET_RX_BUFFER_FULL_CHECK_INTERVAL)) => {
+                    // When buffer is full too long, we log it.
+                    metrics::CHANNEL_NET_RX_BUFFER_FULL.add(
+                        1,
+                        hyperactor_telemetry::kv_pairs!(
+                            "dest" => self.dest.to_string(),
+                            "source" => self.source.to_string(),
+                        ),
+                    );
+                    // Full buffer should happen rarely. So we also add a log
+                    // here to make debugging easy.
+                    tracing::debug!(
+                        "{log_id}: encountered full mspc channel for {} secs",
+                        start.elapsed().as_secs(),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1232,7 +1398,7 @@ impl<T> MVar<T> {
 }
 
 /// Used to bookkeep message processing states.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct Next {
     // The last received message's seq number + 1.
     seq: u64,
@@ -1264,7 +1430,10 @@ impl SessionManager {
         S: AsyncRead + AsyncWrite + Send + 'static + Unpin,
         M: RemoteMessage,
     {
-        let session_id = conn.handshake::<M>().await?;
+        let session_id = conn
+            .handshake::<M>()
+            .await
+            .context("error occoured when serving handshake")?;
 
         let session_var = match self.sessions.entry(session_id) {
             Entry::Occupied(entry) => entry.get().clone(),
@@ -1746,7 +1915,6 @@ pub(crate) mod meta {
     use std::io::BufReader;
     use std::sync::Arc;
 
-    use anyhow::Context;
     use anyhow::Result;
     use tokio::net::TcpListener;
     use tokio::net::TcpStream;
@@ -1994,10 +2162,12 @@ mod tests {
 
     #[cfg(target_os = "linux")] // uses abstract names
     use anyhow::Result;
+    use bytes::Bytes;
     use rand::Rng;
     use rand::SeedableRng;
     use rand::distributions::Alphanumeric;
     use timed_test::async_timed_test;
+    use tokio::io::AsyncWrite;
     use tokio::io::DuplexStream;
 
     use super::*;
@@ -2103,8 +2273,7 @@ mod tests {
         }
     }
 
-    // The message size is limited by CODEC_MAX_FRAME_LENGTH due to LengthDelimitedCodec
-    // is used.
+    // The message size is limited by CODEC_MAX_FRAME_LENGTH.
     #[async_timed_test(timeout_secs = 5)]
     async fn test_tcp_message_size() {
         let default_size_in_bytes = 100 * 1024 * 1024;
@@ -2157,11 +2326,10 @@ mod tests {
         assert!(rx.await.is_err());
     }
 
-    #[ignore = "fix problem in Sandcastle T208303369"]
     #[tracing_test::traced_test]
     #[tokio::test]
     async fn test_meta_tls_basic() {
-        let addr = ChannelAddr::any(ChannelTransport::MetaTls);
+        let addr = ChannelAddr::any(ChannelTransport::MetaTls(TlsMode::IpV6));
         let (hostname, port) = match addr {
             ChannelAddr::MetaTls(hostname, port) => (hostname, port),
             _ => ("".to_string(), 0),
@@ -2340,8 +2508,9 @@ mod tests {
                 ));
             }
 
-            // Add relays between server and client streams. The relays provides
-            // the place to inject network flakiness. The message flow looks like:
+            // Add relays between server and client streams. The
+            // relays provides the place to inject network flakiness.
+            // The message flow looks like:
             //
             // server <-> server relay <-> injection logic <-> client relay <-> client
             async fn relay_message<M: RemoteMessage>(
@@ -2349,18 +2518,21 @@ mod tests {
                 network_flakiness: NetworkFlakiness,
                 disconnected_count: Arc<AtomicU64>,
                 prev_diconnected_at: Arc<RwLock<Instant>>,
-                mut this_half_stream: SplitStream<Framed<DuplexStream, LengthDelimitedCodec>>,
-                mut other_half_sink: SplitSink<Framed<DuplexStream, LengthDelimitedCodec>, Bytes>,
-                // Used by client and server tokio tasks to coordinate stopping together.
+                mut reader: FrameReader<ReadHalf<DuplexStream>>,
+                mut writer: WriteHalf<DuplexStream>,
+                // Used by client and server tokio tasks to coordinate
+                // stopping together.
                 task_coordination_token: CancellationToken,
                 debug_log_sampling_rate: Option<u64>,
-                // Whether the relayed message is from client to server.
+                // Whether the relayed message is from client to
+                // server.
                 is_from_client: bool,
             ) {
-                // Used to simulate latency. Breifly, messages are buffered in
-                // the queue and wait for the expected latency elapse.
+                // Used to simulate latency. Briefly, messages are
+                // buffered in the queue and wait for the expected
+                // latency elapse.
                 async fn wait_for_latency_elapse(
-                    queue: &VecDeque<(BytesMut, Instant)>,
+                    queue: &VecDeque<(Bytes, Instant)>,
                     network_flakiness: &NetworkFlakiness,
                     rng: &mut impl rand::Rng,
                 ) {
@@ -2375,20 +2547,21 @@ mod tests {
                 }
 
                 let mut rng = rand::rngs::SmallRng::from_entropy();
-                let mut queue: VecDeque<(BytesMut, Instant)> = VecDeque::new();
+                let mut queue: VecDeque<(Bytes, Instant)> = VecDeque::new();
                 let mut send_count = 0u64;
+
                 loop {
                     tokio::select! {
-                        server_result = tokio_stream::StreamExt::next(&mut this_half_stream) => {
-                            match server_result {
-                                    Some(Ok(data)) => {
-                                        queue.push_back((data, RealClock.now()));
-                                    },
-                                    Some(Err(_)) | None => {
+                        read_res = reader.next() => {
+                            match read_res {
+                                Ok(Some(data)) => {
+                                    queue.push_back((data, RealClock.now()));
+                                }
+                                Ok(None) | Err(_) => {
                                         tracing::debug!("The upstream is closed or dropped. MockLink disconnects");
                                         break;
-                                    }
-                            };
+                                }
+                            }
                         }
                         _ = wait_for_latency_elapse(&queue, &network_flakiness, &mut rng), if !queue.is_empty() => {
                             let count = disconnected_count.load(Ordering::Relaxed);
@@ -2416,33 +2589,40 @@ mod tests {
                                         tracing::debug!("MockLink relays a msg from client. msg: {:?}", msg);
                                     }
                                 } else {
-                                    let result = deserialize_ack(data.clone());
-                                    if let Ok(seq) = result {
+                                    let result = deserialize_response(data.clone());
+                                    if let Ok(NetRxResponse::Ack(seq)) = result {
                                         tracing::debug!("MockLink relays an ack from server. seq: {:?}", seq);
                                     }
                                 }
                             }
-                            if other_half_sink.send(data.into()).await.is_err() {
+                            let mut fw  = FrameWrite::new(writer, data);
+                            if fw.send().await.is_err() {
                                 break;
                             }
+                            writer = fw.complete();
                             send_count += 1;
                         }
                         _ = task_coordination_token.cancelled() => break,
-                        disconnect_result = disconnect_signal.changed() => {
-                            tracing::debug!("MockLink disconnects per disconnect_signal {:?}", disconnect_result);
+
+                        changed = disconnect_signal.changed() => {
+                            tracing::debug!("MockLink disconnects per disconnect_signal {:?}", changed);
                             break;
                         }
                     }
                 }
+
                 task_coordination_token.cancel();
             }
 
             let (server, server_relay) = tokio::io::duplex(self.buffer_size);
             let (client, client_relay) = tokio::io::duplex(self.buffer_size);
-            let (server_relay_sink, server_relay_stream) =
-                futures::StreamExt::split(Framed::new(server_relay, build_codec()));
-            let (client_relay_sink, client_relay_stream) =
-                futures::StreamExt::split(Framed::new(client_relay, build_codec()));
+
+            let (server_r, server_writer) = tokio::io::split(server_relay);
+            let (client_r, client_writer) = tokio::io::split(client_relay);
+
+            let max_len = config::global::get(config::CODEC_MAX_FRAME_LENGTH);
+            let server_reader = FrameReader::new(server_r, max_len);
+            let client_reader = FrameReader::new(client_r, max_len);
 
             let task_coordination_token = CancellationToken::new();
             let _server_relay_task_handle = tokio::spawn(relay_message::<M>(
@@ -2450,8 +2630,8 @@ mod tests {
                 self.network_flakiness.clone(),
                 self.disconnected_count.clone(),
                 self.prev_diconnected_at.clone(),
-                server_relay_stream,
-                client_relay_sink,
+                server_reader,
+                client_writer,
                 task_coordination_token.clone(),
                 self.debug_log_sampling_rate.clone(),
                 /*is_from_client*/ false,
@@ -2461,8 +2641,8 @@ mod tests {
                 self.network_flakiness.clone(),
                 self.disconnected_count.clone(),
                 self.prev_diconnected_at.clone(),
-                client_relay_stream,
-                server_relay_sink,
+                client_reader,
+                server_writer,
                 task_coordination_token,
                 self.debug_log_sampling_rate.clone(),
                 /*is_from_client*/ true,
@@ -2522,7 +2702,8 @@ mod tests {
         manager: &SessionManager,
     ) -> (
         JoinHandle<std::result::Result<(), anyhow::Error>>,
-        Framed<DuplexStream, LengthDelimitedCodec>,
+        FrameReader<ReadHalf<DuplexStream>>,
+        WriteHalf<DuplexStream>,
         mpsc::Receiver<M>,
         CancellationToken,
     )
@@ -2530,9 +2711,9 @@ mod tests {
         M: RemoteMessage,
     {
         let cancel_token = CancellationToken::new();
-        // When testing ServerConn, we do not need a Link object, but only a
-        // duplex stream. Therefore, we create them directly so the test will
-        // not have dependence on Link.
+        // When testing ServerConn, we do not need a Link object, but
+        // only a duplex stream. Therefore, we create them directly so
+        // the test will not have dependence on Link.
         let (sender, receiver) = tokio::io::duplex(5000);
         let source = ChannelAddr::Local(u64::MAX);
         let dest = ChannelAddr::Local(u64::MAX);
@@ -2542,37 +2723,39 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         let join_handle =
             tokio::spawn(async move { manager1.serve(conn, tx, cancel_token_1).await });
-        let framed = Framed::new(sender, build_codec());
-        (join_handle, framed, rx, cancel_token)
+        let (r, writer) = tokio::io::split(sender);
+        let reader = FrameReader::new(r, config::global::get(config::CODEC_MAX_FRAME_LENGTH));
+        (join_handle, reader, writer, rx, cancel_token)
     }
 
-    async fn write_stream<M: RemoteMessage + std::cmp::PartialEq + Clone>(
-        framed: &mut Framed<DuplexStream, LengthDelimitedCodec>,
+    async fn write_stream<M, W>(
+        mut writer: W,
         session_id: u64,
         messages: &[(u64, M)],
         init: bool,
-    ) {
+    ) -> W
+    where
+        M: RemoteMessage + PartialEq + Clone,
+        W: AsyncWrite + Unpin,
+    {
         if init {
-            framed
-                .send(
-                    bincode::serialize(&Frame::<u64>::Init(session_id))
-                        .unwrap()
-                        .into(),
-                )
-                .await
-                .unwrap();
+            let message =
+                serde_multipart::serialize_bincode(&Frame::<u64>::Init(session_id)).unwrap();
+            let mut fw = FrameWrite::new(writer, message.framed());
+            fw.send().await.unwrap();
+            writer = fw.complete();
         }
 
         for (seq, message) in messages {
-            framed
-                .send(
-                    bincode::serialize(&Frame::Message(*seq, message.clone()))
-                        .unwrap()
-                        .into(),
-                )
-                .await
-                .unwrap();
+            let message =
+                serde_multipart::serialize_bincode(&Frame::<M>::Message(*seq, message.clone()))
+                    .unwrap();
+            let mut fw = FrameWrite::new(writer, message.framed());
+            fw.send().await.unwrap();
+            writer = fw.complete();
         }
+
+        writer
     }
 
     #[async_timed_test(timeout_secs = 60)]
@@ -2580,20 +2763,12 @@ mod tests {
         // Use temporary config for this test
         let config = config::global::lock();
         let _guard = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
-        async fn verify_ack(
-            framed: &mut Framed<DuplexStream, LengthDelimitedCodec>,
-            expected_last: u64,
-        ) {
+
+        async fn verify_ack(reader: &mut FrameReader<ReadHalf<DuplexStream>>, expected_last: u64) {
             let mut last_acked: i128 = -1;
             loop {
-                let acked = deserialize_ack(
-                    tokio_stream::StreamExt::next(framed)
-                        .await
-                        .unwrap()
-                        .unwrap(),
-                )
-                .unwrap();
-
+                let bytes = reader.next().await.unwrap().unwrap();
+                let acked = deserialize_response(bytes).unwrap().into_ack().unwrap();
                 assert!(
                     acked as i128 > last_acked,
                     "acks should be delivered in ascending order"
@@ -2610,11 +2785,17 @@ mod tests {
         let session_id = 123;
 
         {
-            let (handle, mut framed, mut rx, _cancel_token) = serve(&manager).await;
-            write_stream(
-                &mut framed,
+            let (handle, mut reader, mut writer, mut rx, _cancel_token) =
+                serve::<u64>(&manager).await;
+            writer = write_stream(
+                writer,
                 session_id,
-                &[(0, 100), (1, 101), (2, 102), (3, 103)],
+                &[
+                    (0u64, 100u64),
+                    (1u64, 101u64),
+                    (2u64, 102u64),
+                    (3u64, 103u64),
+                ],
                 /*init*/ true,
             )
             .await;
@@ -2629,10 +2810,11 @@ mod tests {
             // server side might or might not ack seq<3 depending on the order
             // of execution introduced by tokio::select. But it definitely would
             // ack 3.
-            verify_ack(&mut framed, 3).await;
+            verify_ack(&mut reader, 3).await;
 
-            // Drop the sender side and cause the connection to close.
-            drop(framed);
+            // Drop the reader and writer to cause the connection to close.
+            drop(reader);
+            drop(writer);
             handle.await.unwrap().unwrap();
             // mspc is closed too and there should be no unread message left.
             assert_eq!(rx.recv().await, Some(103));
@@ -2641,11 +2823,22 @@ mod tests {
 
         // Now, create a new connection with the same session.
         {
-            let (handle, mut framed, mut rx, cancel_token) = serve(&manager).await;
-            write_stream(
-                &mut framed,
+            let (handle, mut reader, writer, mut rx, cancel_token) = serve::<u64>(&manager).await;
+            let handle = tokio::spawn(async move {
+                let result = handle.await.unwrap();
+                eprintln!("handle joined with: {:?}", result);
+                result
+            });
+
+            let _ = write_stream(
+                writer,
                 session_id,
-                &[(2, 102), (3, 103), (4, 104), (5, 105)],
+                &[
+                    (2u64, 102u64),
+                    (3u64, 103u64),
+                    (4u64, 104u64),
+                    (5u64, 105u64),
+                ],
                 /*init*/ true,
             )
             .await;
@@ -2655,7 +2848,7 @@ mod tests {
             assert_eq!(rx.recv().await, Some(104));
             assert_eq!(rx.recv().await, Some(105));
 
-            verify_ack(&mut framed, 5).await;
+            verify_ack(&mut reader, 5).await;
 
             // Wait long enough to ensure server processed everything.
             RealClock.sleep(Duration::from_secs(5)).await;
@@ -2665,7 +2858,7 @@ mod tests {
             // mspc is closed too and there should be no unread message left.
             assert!(rx.recv().await.is_none());
             // No more acks from server.
-            assert!(tokio_stream::StreamExt::next(&mut framed).await.is_none());
+            assert!(reader.next().await.unwrap().is_none());
         };
     }
 
@@ -2674,25 +2867,20 @@ mod tests {
         let config = config::global::lock();
         let _guard = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
         let manager = SessionManager::new();
-        let session_id = 123;
+        let session_id = 123u64;
 
-        let (handle, mut framed, mut rx, cancel_token) = serve(&manager).await;
-        for i in 0..100 {
-            write_stream(
-                &mut framed,
+        let (handle, mut reader, mut writer, mut rx, cancel_token) = serve::<u64>(&manager).await;
+        for i in 0u64..100u64 {
+            writer = write_stream(
+                writer,
                 session_id,
-                &[(i, 100 + i)],
-                /*init*/ i == 0,
+                &[(i, 100u64 + i)],
+                /*init*/ i == 0u64,
             )
             .await;
-            assert_eq!(rx.recv().await, Some(100 + i));
-            let acked = deserialize_ack(
-                tokio_stream::StreamExt::next(&mut framed)
-                    .await
-                    .unwrap()
-                    .unwrap(),
-            )
-            .unwrap();
+            assert_eq!(rx.recv().await, Some(100u64 + i));
+            let bytes = reader.next().await.unwrap().unwrap();
+            let acked = deserialize_response(bytes).unwrap().into_ack().unwrap();
             assert_eq!(acked, i);
         }
 
@@ -2704,7 +2892,7 @@ mod tests {
         // mspc is closed too and there should be no unread message left.
         assert!(rx.recv().await.is_none());
         // No more acks from server.
-        assert!(tokio_stream::StreamExt::next(&mut framed).await.is_none());
+        assert!(reader.next().await.unwrap().is_none());
     }
 
     #[tracing_test::traced_test]
@@ -2746,33 +2934,36 @@ mod tests {
 
     async fn take_receiver(
         receiver_storage: &MVar<DuplexStream>,
-    ) -> (
-        SplitSink<Framed<DuplexStream, LengthDelimitedCodec>, Bytes>,
-        SplitStream<Framed<DuplexStream, LengthDelimitedCodec>>,
-    ) {
-        let client = receiver_storage.take().await;
-        let framed = Framed::new(client, build_codec());
-        futures::StreamExt::split(framed)
+    ) -> (FrameReader<ReadHalf<DuplexStream>>, WriteHalf<DuplexStream>) {
+        let receiver = receiver_storage.take().await;
+        let (r, writer) = tokio::io::split(receiver);
+        let reader = FrameReader::new(r, config::global::get(config::CODEC_MAX_FRAME_LENGTH));
+        (reader, writer)
     }
 
-    async fn verify_message<M: RemoteMessage + std::cmp::PartialEq>(
-        stream: &mut SplitStream<Framed<DuplexStream, LengthDelimitedCodec>>,
+    async fn verify_message<M: RemoteMessage + PartialEq>(
+        reader: &mut FrameReader<ReadHalf<DuplexStream>>,
         expect: (u64, M),
         loc: u32,
     ) {
         let expected = Frame::Message(expect.0, expect.1);
-        let frame = Frame::<M>::next(stream).await.unwrap();
+        let bytes = reader.next().await.unwrap().expect("unexpected EOF");
+        let message = serde_multipart::Message::from_framed(bytes).unwrap();
+        let frame: Frame<M> = serde_multipart::deserialize_bincode(message).unwrap();
+
         assert_eq!(frame, expected, "from ln={loc}");
     }
 
-    async fn verify_stream<M: RemoteMessage + std::cmp::PartialEq + Clone>(
-        stream: &mut SplitStream<Framed<DuplexStream, LengthDelimitedCodec>>,
+    async fn verify_stream<M: RemoteMessage + PartialEq + Clone>(
+        reader: &mut FrameReader<ReadHalf<DuplexStream>>,
         expects: &[(u64, M)],
         expect_session_id: Option<u64>,
         loc: u32,
     ) -> u64 {
         let session_id = {
-            let frame = Frame::<M>::next(stream).await.unwrap();
+            let bytes = reader.next().await.unwrap().expect("unexpected EOF");
+            let message = serde_multipart::Message::from_framed(bytes).unwrap();
+            let frame: Frame<M> = serde_multipart::deserialize_bincode(message).unwrap();
             match frame {
                 Frame::Init(session_id) => session_id,
                 _ => panic!("the 1st frame is not Init: {:?}. from ln={loc}", frame),
@@ -2784,7 +2975,7 @@ mod tests {
         }
 
         for expect in expects {
-            verify_message(stream, expect.clone(), loc).await;
+            verify_message(reader, expect.clone(), loc).await;
         }
 
         session_id
@@ -2806,30 +2997,44 @@ mod tests {
         // Send some messages, but not acking any of them.
         net_tx_send(&tx, &[100, 101, 102, 103, 104]).await;
         let session_id = {
-            let (mut sink, mut stream) = take_receiver(&receiver_storage).await;
+            let (mut reader, mut writer) = take_receiver(&receiver_storage).await;
             let id = verify_stream(
-                &mut stream,
-                &[(0, 100), (1, 101), (2, 102), (3, 103), (4, 104)],
+                &mut reader,
+                &[
+                    (0u64, 100u64),
+                    (1u64, 101u64),
+                    (2u64, 102u64),
+                    (3u64, 103u64),
+                    (4u64, 104u64),
+                ],
                 None,
                 line!(),
             )
             .await;
 
-            for i in 0..5 {
-                sink.send(serialize_ack(i)).await.unwrap();
+            for i in 0u64..5u64 {
+                writer = FrameWrite::write_frame(
+                    writer,
+                    serialize_response(NetRxResponse::Ack(i)).unwrap(),
+                )
+                .await
+                .unwrap();
             }
             // Wait for the acks to be processed by NetTx.
             RealClock.sleep(Duration::from_secs(3)).await;
-            // client DuplexStream is dropped here. This breaks the connection.
+            // Drop both halves to break the in-memory connection (parity with old drop of DuplexStream).
+            drop(reader);
+            drop(writer);
+
             id
         };
 
         // Sent a new message to verify all sent messages will not be resent.
-        net_tx_send(&tx, &[105]).await;
+        net_tx_send(&tx, &[105u64]).await;
         {
-            let (_sink, mut stream) = take_receiver(&receiver_storage).await;
-            verify_stream(&mut stream, &[(5, 105)], Some(session_id), line!()).await;
-            // client DuplexStream is dropped here. This breaks the connection.
+            let (mut reader, _writer) = take_receiver(&receiver_storage).await;
+            verify_stream(&mut reader, &[(5u64, 105u64)], Some(session_id), line!()).await;
+            // Reader/writer dropped here. This breaks the connection.
         };
     }
 
@@ -2852,10 +3057,16 @@ mod tests {
         // because none of them is acked.
         for i in 0..n {
             {
-                let (mut sink, mut stream) = take_receiver(&receiver_storage).await;
+                let (mut reader, mut writer) = take_receiver(&receiver_storage).await;
                 let id = verify_stream(
-                    &mut stream,
-                    &[(0, 100), (1, 101), (2, 102), (3, 103), (4, 104)],
+                    &mut reader,
+                    &[
+                        (0u64, 100u64),
+                        (1u64, 101u64),
+                        (2u64, 102u64),
+                        (3u64, 103u64),
+                        (4u64, 104u64),
+                    ],
                     session_id,
                     line!(),
                 )
@@ -2868,51 +3079,56 @@ mod tests {
                 // In the last iteration, ack part of the messages. This should
                 // prune them from future resent.
                 if i == n - 1 {
-                    sink.send(serialize_ack(1)).await.unwrap();
+                    writer = FrameWrite::write_frame(
+                        writer,
+                        serialize_response(NetRxResponse::Ack(1)).unwrap(),
+                    )
+                    .await
+                    .unwrap();
                     // Wait for the acks to be processed by NetTx.
                     RealClock.sleep(Duration::from_secs(3)).await;
                 }
                 // client DuplexStream is dropped here. This breaks the connection.
+                drop(reader);
+                drop(writer);
             };
         }
 
         // Verify only unacked are resent.
         for _ in 0..n {
             {
-                let client = receiver_storage.take().await;
-                let framed = Framed::new(client, build_codec());
-                let (_sink, mut stream) = futures::StreamExt::split(framed);
+                let (mut reader, mut _writer) = take_receiver(&receiver_storage).await;
                 verify_stream(
-                    &mut stream,
-                    &[(2, 102), (3, 103), (4, 104)],
+                    &mut reader,
+                    &[(2u64, 102u64), (3u64, 103u64), (4u64, 104u64)],
                     session_id,
                     line!(),
                 )
                 .await;
-                // client DuplexStream is dropped here. This breaks the connection.
+                // drop(reader/_writer) at scope end
             };
         }
 
         // Now send more messages.
-        net_tx_send(&tx, &[105, 106, 107, 108, 109]).await;
+        net_tx_send(&tx, &[105u64, 106u64, 107u64, 108u64, 109u64]).await;
         // Verify the unacked messages from the 1st send will be grouped with
         // the 2nd send.
         for i in 0..n {
             {
-                let (mut sink, mut stream) = take_receiver(&receiver_storage).await;
+                let (mut reader, mut writer) = take_receiver(&receiver_storage).await;
                 verify_stream(
-                    &mut stream,
+                    &mut reader,
                     &[
                         // From the 1st send.
-                        (2, 102),
-                        (3, 103),
-                        (4, 104),
+                        (2u64, 102u64),
+                        (3u64, 103u64),
+                        (4u64, 104u64),
                         // From the 2nd send.
-                        (5, 105),
-                        (6, 106),
-                        (7, 107),
-                        (8, 108),
-                        (9, 109),
+                        (5u64, 105u64),
+                        (6u64, 106u64),
+                        (7u64, 107u64),
+                        (8u64, 108u64),
+                        (9u64, 109u64),
                     ],
                     session_id,
                     line!(),
@@ -2924,30 +3140,47 @@ mod tests {
                 if i == n - 1 {
                     // Intentionally ack 1 again to verify it is okay to ack
                     // messages that was already acked.
-                    sink.send(serialize_ack(1)).await.unwrap();
-                    sink.send(serialize_ack(2)).await.unwrap();
-                    sink.send(serialize_ack(3)).await.unwrap();
+                    writer = FrameWrite::write_frame(
+                        writer,
+                        serialize_response(NetRxResponse::Ack(1)).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                    writer = FrameWrite::write_frame(
+                        writer,
+                        serialize_response(NetRxResponse::Ack(2)).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                    writer = FrameWrite::write_frame(
+                        writer,
+                        serialize_response(NetRxResponse::Ack(3)).unwrap(),
+                    )
+                    .await
+                    .unwrap();
                     // Wait for the acks to be processed by NetTx.
                     RealClock.sleep(Duration::from_secs(3)).await;
                 }
                 // client DuplexStream is dropped here. This breaks the connection.
+                drop(reader);
+                drop(writer);
             };
         }
 
         for i in 0..n {
             {
-                let (mut sink, mut stream) = take_receiver(&receiver_storage).await;
+                let (mut reader, mut writer) = take_receiver(&receiver_storage).await;
                 verify_stream(
-                    &mut stream,
+                    &mut reader,
                     &[
                         // From the 1st send.
-                        (4, 104),
+                        (4u64, 104),
                         // From the 2nd send.
-                        (5, 105),
-                        (6, 106),
-                        (7, 107),
-                        (8, 108),
-                        (9, 109),
+                        (5u64, 105u64),
+                        (6u64, 106u64),
+                        (7u64, 107u64),
+                        (8u64, 108u64),
+                        (9u64, 109u64),
                     ],
                     session_id,
                     line!(),
@@ -2956,29 +3189,38 @@ mod tests {
 
                 // In the last iteration, ack part of the messages from the 2nd send.
                 if i == n - 1 {
-                    sink.send(serialize_ack(7)).await.unwrap();
+                    writer = FrameWrite::write_frame(
+                        writer,
+                        serialize_response(NetRxResponse::Ack(7)).unwrap(),
+                    )
+                    .await
+                    .unwrap();
                     // Wait for the acks to be processed by NetTx.
                     RealClock.sleep(Duration::from_secs(3)).await;
                 }
                 // client DuplexStream is dropped here. This breaks the connection.
+                drop(reader);
+                drop(writer);
             };
         }
 
         for _ in 0..n {
             {
-                let (_sink, mut stream) = take_receiver(&receiver_storage).await;
+                let (mut reader, writer) = take_receiver(&receiver_storage).await;
                 verify_stream(
-                    &mut stream,
+                    &mut reader,
                     &[
                         // From the 2nd send.
-                        (8, 108),
-                        (9, 109),
+                        (8u64, 108u64),
+                        (9u64, 109u64),
                     ],
                     session_id,
                     line!(),
                 )
                 .await;
                 // client DuplexStream is dropped here. This breaks the connection.
+                drop(reader);
+                drop(writer);
             };
         }
     }
@@ -2993,10 +3235,13 @@ mod tests {
         // trigger a connection.
         let (return_channel_tx, return_channel_rx) = oneshot::channel();
         net_tx.try_post(100, return_channel_tx).unwrap();
-        let (mut sink, mut stream) = take_receiver(&receiver_storage).await;
-        verify_stream(&mut stream, &[(0, 100)], None, line!()).await;
+        let (mut reader, mut writer) = take_receiver(&receiver_storage).await;
+        verify_stream(&mut reader, &[(0u64, 100u64)], None, line!()).await;
         // ack it
-        sink.send(serialize_ack(0)).await.unwrap();
+        writer =
+            FrameWrite::write_frame(writer, serialize_response(NetRxResponse::Ack(0)).unwrap())
+                .await
+                .unwrap();
         // confirm Tx received ack
         //
         // Using `is_err` to confirm the message is delivered/acked is confusing,
@@ -3007,12 +3252,14 @@ mod tests {
         // Although Tx did not actually send seq=1, we still ack it from Rx to
         // pretend Tx already sent it, just it did not know it was sent
         // successfully.
-        sink.send(serialize_ack(1)).await.unwrap();
+        let _ = FrameWrite::write_frame(writer, serialize_response(NetRxResponse::Ack(1)).unwrap())
+            .await
+            .unwrap();
 
         let (return_channel_tx, return_channel_rx) = oneshot::channel();
         net_tx.try_post(101, return_channel_tx).unwrap();
         // Verify the message is sent to Rx.
-        verify_message(&mut stream, (1, 101), line!()).await;
+        verify_message(&mut reader, (1u64, 101u64), line!()).await;
         // although we did not ack the message after it is sent, since we already
         // acked it previously, Tx will treat it as acked, and considered the
         // message delivered successfully.
@@ -3035,11 +3282,13 @@ mod tests {
         let mut tx_status = tx.status().clone();
         // send a message
         tx.try_post(100, unused_return_channel()).unwrap();
-        let (mut sink, mut stream) = take_receiver(&receiver_storage).await;
+        let (mut reader, writer) = take_receiver(&receiver_storage).await;
         // Confirm message is sent to rx.
-        verify_stream(&mut stream, &[(0, 100)], None, line!()).await;
+        verify_stream(&mut reader, &[(0u64, 100u64)], None, line!()).await;
         // ack it
-        sink.send(serialize_ack(0)).await.unwrap();
+        let _ = FrameWrite::write_frame(writer, serialize_response(NetRxResponse::Ack(0)).unwrap())
+            .await
+            .unwrap();
         RealClock.sleep(Duration::from_secs(3)).await;
         // Channel should be still alive because ack was sent.
         assert!(!tx_status.has_changed().unwrap());
@@ -3047,7 +3296,7 @@ mod tests {
 
         tx.try_post(101, unused_return_channel()).unwrap();
         // Confirm message is sent to rx.
-        verify_message(&mut stream, (1, 101), line!()).await;
+        verify_message(&mut reader, (1u64, 101u64), line!()).await;
 
         if disconnect_before_ack {
             // Prevent link from reconnect
@@ -3271,5 +3520,53 @@ mod tests {
         for handle in tx_handles {
             handle.await.unwrap();
         }
+    }
+
+    #[tracing_test::traced_test]
+    #[async_timed_test(timeout_secs = 60)]
+    async fn test_net_tx_closed_on_server_reject() {
+        let link = MockLink::<u64>::new();
+        let receiver_storage = link.receiver_storage();
+        let mut tx = NetTx::<u64>::new(link);
+        net_tx_send(&tx, &[100]).await;
+
+        {
+            let (_reader, writer) = take_receiver(&receiver_storage).await;
+            let _ =
+                FrameWrite::write_frame(writer, serialize_response(NetRxResponse::Reject).unwrap())
+                    .await;
+            // Wait for response to be processed by NetTx before dropping reader/writer. Otherwise
+            // the channel will be closed and we will get the wrong error.
+            RealClock.sleep(tokio::time::Duration::from_secs(3)).await;
+        }
+
+        verify_tx_closed(&mut tx.status, "server rejected connection").await;
+    }
+
+    #[async_timed_test(timeout_secs = 60)]
+    async fn test_server_rejects_conn_on_out_of_sequence_message() {
+        let config = config::global::lock();
+        let _guard = config.override_key(config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
+        let manager = SessionManager::new();
+        let session_id = 123u64;
+
+        let (_handle, mut reader, writer, mut rx, _cancel_token) = serve::<u64>(&manager).await;
+        let _ = write_stream(
+            writer,
+            session_id,
+            &[(0, 100u64), (1, 101u64), (3, 103u64)],
+            true,
+        )
+        .await;
+        assert_eq!(rx.recv().await, Some(100u64));
+        assert_eq!(rx.recv().await, Some(101u64));
+        let bytes = reader.next().await.unwrap().unwrap();
+        let acked = deserialize_response(bytes).unwrap().into_ack().unwrap();
+        assert_eq!(acked, 0);
+        let bytes = reader.next().await.unwrap().unwrap();
+        let acked = deserialize_response(bytes).unwrap().into_ack().unwrap();
+        assert_eq!(acked, 1);
+        let bytes = reader.next().await.unwrap().unwrap();
+        assert!(deserialize_response(bytes).unwrap().is_reject());
     }
 }

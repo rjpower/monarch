@@ -15,13 +15,11 @@ import os
 import subprocess
 import sys
 import unittest
-from datetime import timedelta
 from time import sleep
 from typing import Generator, Optional
 from unittest import mock
 
 import cloudpickle
-import pytest
 
 import torch
 import torch.distributed as dist
@@ -54,8 +52,6 @@ from monarch.tools.network import get_sockaddr
 
 from torch.distributed.elastic.utils.distributed import get_free_port
 from torchx.specs import AppState
-
-_100_MILLISECONDS = timedelta(milliseconds=100)
 
 SERVER_READY = "monarch.tools.commands.server_ready"
 UNUSED = "__UNUSED__"
@@ -349,7 +345,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(
                 RuntimeError, msg="`ProcMesh` has already been stopped"
             ):
-                proc_mesh.spawn("test_actor", TestActor).get()
+                proc_mesh.spawn("test_actor", TestActor).initialized.get()
             del actor
 
     async def test_wrong_address(self) -> None:
@@ -415,7 +411,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(
                 RuntimeError, msg="`ProcMesh` has already been stopped"
             ):
-                await proc_mesh.spawn("test_actor", TestActor)
+                await proc_mesh.spawn("test_actor", TestActor).initialized
 
             # TODO(agallagher): It'd be nice to test that this just fails
             # immediately, trying to access the wrapped actor mesh, but right
@@ -442,7 +438,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(
                 RuntimeError, msg="`ProcMesh` has already been stopped"
             ):
-                await proc_mesh.spawn("test_actor", TestActor)
+                await proc_mesh.spawn("test_actor", TestActor).initialized
 
             # TODO(agallagher): It'd be nice to test that this just fails
             # immediately, trying to access the wrapped actor mesh, but right
@@ -503,7 +499,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(
                     RuntimeError, msg="`ProcMesh` has already been stopped"
                 ):
-                    await proc_mesh.spawn("test_actor", TestActor)
+                    await proc_mesh.spawn("test_actor", TestActor).initialized
                 # Exiting a second time should not raise an error.
 
             # TODO(agallagher): It'd be nice to test that this just fails
@@ -598,7 +594,6 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                     AllocSpec(AllocConstraints(), host=1, gpu=1)
                 ).initialized
 
-    @pytest.mark.oss_skip  # pyre-ignore[56] TODO T228752279
     async def test_torchx_remote_alloc_initializer_no_match_label_1_mesh(self) -> None:
         server = ServerSpec(
             name=UNUSED,
@@ -609,12 +604,12 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                     name="x",
                     num_hosts=1,
                     transport="tcp",
-                    hostnames=["localhost"],
+                    hostnames=["0.0.0.0"],
                 )
             ],
         )
         port = get_free_port()
-        with remote_process_allocator(addr=f"tcp!{get_sockaddr('localhost', port)}"):
+        with remote_process_allocator(addr=f"tcp!{get_sockaddr('0.0.0.0', port)}"):
             with mock.patch(SERVER_READY, return_value=server):
                 initializer = TorchXRemoteAllocInitializer("local:///test", port=port)
                 allocator = RemoteAllocator(
@@ -629,7 +624,6 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assert_computed_world_size(results, 4)  # 1x4 mesh
 
-    @pytest.mark.oss_skip  # pyre-ignore[56] TODO T228752279
     async def test_torchx_remote_alloc_initializer_with_match_label(self) -> None:
         server = ServerSpec(
             name=UNUSED,
@@ -640,12 +634,12 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                     name="x",
                     num_hosts=1,
                     transport="tcp",
-                    hostnames=["localhost"],
+                    hostnames=["0.0.0.0"],
                 )
             ],
         )
         port = get_free_port()
-        with remote_process_allocator(addr=f"tcp!{get_sockaddr('localhost', port)}"):
+        with remote_process_allocator(addr=f"tcp!{get_sockaddr('0.0.0.0', port)}"):
             with mock.patch(SERVER_READY, return_value=server):
                 initializer = TorchXRemoteAllocInitializer("local:///test", port=port)
                 allocator = RemoteAllocator(

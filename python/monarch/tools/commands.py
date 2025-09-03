@@ -11,9 +11,12 @@ import asyncio
 import inspect
 import logging
 import os
+import tempfile
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Union
 
+from monarch.tools.colors import CYAN, ENDC
 from monarch.tools.components.hyperactor import DEFAULT_NAME
 
 from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/config/meta:defaults
@@ -21,6 +24,8 @@ from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/con
     defaults,
 )
 from monarch.tools.mesh_spec import mesh_spec_from_metadata, ServerSpec
+from monarch.tools.utils import MONARCH_HOME
+
 from torchx.runner import Runner  # @manual=//torchx/runner:lib_core
 from torchx.specs import AppDef, AppDryRunInfo, AppState, CfgVal, parse_app_handle
 from torchx.specs.builders import parse_args
@@ -125,8 +130,18 @@ def create(
 
     with torchx_runner() as runner:
         appdef: AppDef = AppDef(name, config.appdef.roles, config.appdef.metadata)
+        if not config.workspace.dirs and not config.workspace.env:
+            info = runner.dryrun(appdef, scheduler, cfg, workspace=None)
+        else:
+            with tempfile.TemporaryDirectory(dir=MONARCH_HOME("out")) as tmpdir:
+                # multi-directory workspace is not supported natively in torchx; so merge into a single one
+                # TODO (kiuk@) may be able to delete bootstrap workspace copy (as the job is created)
+                #   since proc_mesh.sync_workspace() can do this without having to merge the workspace
+                workspace_out = Path(tmpdir) / "workspace"
+                config.workspace.merge(workspace_out)
+                config.workspace.set_env_vars(appdef)
 
-        info = runner.dryrun(appdef, scheduler, cfg, config.workspace)
+                info = runner.dryrun(appdef, scheduler, cfg, str(workspace_out))
 
         info_json_fmt = AppDryRunInfo(
             info.request,
@@ -173,19 +188,25 @@ def info(server_handle: str) -> Optional[ServerSpec]:
 
         # null-guard since some schedulers do not fill replica_status
         if host_status := replica_status.get(role.name):
-            spec.hostnames = [h.hostname for h in host_status]
+            # make sure the hostnames are sorted by their respective node indexes
+            # this makes ServerSpec.host0 return hostname of node 0
+            spec.hostnames = [
+                h.hostname for h in sorted(host_status, key=lambda h: h.id)
+            ]
             # the mesh status is based on the "least progressive" replica status
             spec.state = min(h.state for h in host_status)
 
         mesh_specs.append(spec)
 
     scheduler, namespace, _ = parse_app_handle(server_handle)
+
     return ServerSpec(
         name=appdef.name,
         state=status.state,
         meshes=mesh_specs,
         scheduler=scheduler,
         namespace=namespace,
+        ui_url=status.ui_url,
     )
 
 
@@ -263,6 +284,7 @@ async def get_or_create(
     name: str,
     config: Config,
     check_interval: timedelta = _5_SECONDS,
+    force_restart: bool = False,
 ) -> ServerSpec:
     """Waits for the server based on identity `name` in the scheduler specified in the `config`
     to be ready (e.g. RUNNING). If the server is not found then this function creates one
@@ -280,6 +302,12 @@ async def get_or_create(
         server_handle = get_or_create(name="my_job_name", config)
         server_info = info(server_handle)
 
+    Args:
+        name: the name of the server (job) to get or create
+        config: configs used to create the job if one does not exist
+        check_interval: how often to poll the status of the job when waiting for it to be ready
+        force_restart: if True kills and re-creates the job even if one exists
+
     Returns: A `ServerSpec` containing information about either the existing or the newly
         created server.
 
@@ -288,7 +316,6 @@ async def get_or_create(
 
     server_handle = f"{config.scheduler}:///{name}"
     server_info = await server_ready(server_handle, check_interval)
-
     if not server_info or not server_info.is_running:  # then create one
         logger.info(
             "no existing RUNNING server `%s` creating new one...", server_handle
@@ -311,11 +338,19 @@ async def get_or_create(
                 f"the new server `{new_server_handle}` has {server_info.state}"
             )
 
-        print(f"\x1b[36mNew job `{new_server_handle}` is ready to serve. \x1b[0m")
-        return server_info
+        print(f"{CYAN}New job `{new_server_handle}` is ready to serve.{ENDC}")
     else:
-        print(f"\x1b[36mFound existing job `{server_handle}` ready to serve. \x1b[0m")
-        return server_info
+        print(f"{CYAN}Found existing job `{server_handle}` ready to serve.{ENDC}")
+
+        if force_restart:
+            print(f"{CYAN}force_restart=True, restarting `{server_handle}`.{ENDC}")
+            kill(server_handle)
+            server_info = await get_or_create(name, config, check_interval)
+
+    if server_info.ui_url:  # not all schedulers have a UI URL
+        print(f"{CYAN}Job URL: {server_info.ui_url}{ENDC}")
+
+    return server_info
 
 
 def kill(server_handle: str) -> None:

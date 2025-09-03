@@ -7,8 +7,10 @@
 # pyre-strict
 
 import asyncio
+import tempfile
 import unittest
 from datetime import timedelta
+from pathlib import Path
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -19,11 +21,15 @@ from monarch.tools.config import (  # @manual=//monarch/python/monarch/tools/con
     Config,
     defaults,
 )
+from monarch.tools.config.workspace import Workspace
 from monarch.tools.mesh_spec import MeshSpec, ServerSpec
-from torchx.specs import AppDef, AppDryRunInfo, AppState, AppStatus, Role
+
+from torchx.specs import AppDef, AppDryRunInfo, AppState, AppStatus, Role, RoleStatus
+from torchx.specs.api import ReplicaState, ReplicaStatus
 
 CMD_INFO = "monarch.tools.commands.info"
 CMD_CREATE = "monarch.tools.commands.create"
+CMD_KILL = "monarch.tools.commands.kill"
 
 
 class TestCommands(unittest.TestCase):
@@ -39,14 +45,45 @@ class TestCommands(unittest.TestCase):
 
     def test_create_dryrun(self) -> None:
         scheduler = "slurm"
-        config = defaults.config(scheduler)
-        config.dryrun = True
-        config.appdef = defaults.component_fn(scheduler)()
+        config = Config(
+            scheduler,
+            dryrun=True,
+            appdef=defaults.component_fn(scheduler)(),
+        )
 
         dryrun_info = commands.create(config)
         # need only assert that the return type of dryrun is a dryrun info object
         # since we delegate to torchx for job submission
         self.assertIsInstance(dryrun_info, AppDryRunInfo)
+
+    def test_create_dryrun_with_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            (tmpdir / "github" / "torch").mkdir(parents=True)
+            (tmpdir / "github" / "torchtitan").mkdir(parents=True)
+
+            scheduler = "slurm"
+            config = Config(
+                scheduler,
+                dryrun=True,
+                appdef=defaults.component_fn(scheduler)(),
+                workspace=Workspace(
+                    dirs=[
+                        tmpdir / "github" / "torch",
+                        tmpdir / "github" / "torchtitan",
+                    ],
+                ),
+            )
+
+            dryrun_info = commands.create(config)
+            assert isinstance(dryrun_info, AppDryRunInfo)
+
+            app = dryrun_info._app
+            assert app is not None
+
+            for role in app.roles:
+                self.assertIn("WORKSPACE_DIR", role.env)
+                self.assertIn("PYTHONPATH", role.env)
 
     @mock.patch(
         "torchx.schedulers.slurm_scheduler.SlurmScheduler.schedule",
@@ -54,7 +91,7 @@ class TestCommands(unittest.TestCase):
     )
     def test_create(self, mock_schedule: mock.MagicMock) -> None:
         scheduler = "slurm"
-        config = defaults.config(scheduler)
+        config = Config(scheduler)
         config.appdef = defaults.component_fn(scheduler)()
         server_handle = commands.create(config)
 
@@ -76,7 +113,30 @@ class TestCommands(unittest.TestCase):
     def test_info(
         self, mock_status: mock.MagicMock, mock_describe: mock.MagicMock
     ) -> None:
-        appstatus = AppStatus(state=AppState.RUNNING)
+        def replica_status(idx: int, hostname: str) -> ReplicaStatus:
+            return ReplicaStatus(
+                role="trainer",
+                state=ReplicaState.RUNNING,
+                id=idx,
+                hostname=hostname,
+            )
+
+        appstatus = AppStatus(
+            state=AppState.RUNNING,
+            roles=[
+                RoleStatus(
+                    role="trainer",
+                    replicas=[
+                        # make hostname and id sort in reverse order so that
+                        # we can assert the hostnames are sorted in id order
+                        replica_status(idx=3, hostname="node_a"),
+                        replica_status(idx=2, hostname="node_b"),
+                        replica_status(idx=1, hostname="node_c"),
+                        replica_status(idx=0, hostname="node_d"),
+                    ],
+                )
+            ],
+        )
         mock_status.return_value = appstatus
 
         appdef = AppDef(
@@ -96,6 +156,8 @@ class TestCommands(unittest.TestCase):
         )
         mock_describe.return_value = appdef
 
+        server_info = commands.info("slurm:///job-id")
+
         self.assertEqual(
             ServerSpec(
                 name="monarch_test_123",
@@ -104,6 +166,8 @@ class TestCommands(unittest.TestCase):
                 meshes=[
                     MeshSpec(
                         name="trainer",
+                        state=ReplicaState.RUNNING,
+                        hostnames=["node_d", "node_c", "node_b", "node_a"],
                         num_hosts=4,
                         host_type="gpu.medium",
                         gpus=2,
@@ -111,8 +175,12 @@ class TestCommands(unittest.TestCase):
                     )
                 ],
             ),
-            commands.info("slurm:///job-id"),
+            server_info,
         )
+
+        # node_d is node 0
+        assert server_info
+        self.assertEqual("node_d", server_info.host0("trainer"))
 
 
 UNUSED = "__UNUSED__"
@@ -335,4 +403,46 @@ class TestCommandsAsync(unittest.IsolatedAsyncioTestCase):
                 name="123",
                 config=config,
                 check_interval=_5_MS,
+            )
+
+    async def test_get_or_create_force_restart(self) -> None:
+        with mock.patch(
+            CMD_INFO,
+            side_effect=[
+                # -- state for slurm:///123
+                server(AppState.RUNNING, name="123"),
+                # -- force_restart kills the server
+                server(AppState.CANCELLED, name="123"),
+                # -- states for (new) slurm:///456
+                server(AppState.SUBMITTED, name="456"),
+                server(AppState.PENDING, name="456"),
+                server(AppState.RUNNING, name="456"),
+            ],
+        ) as mock_info, mock.patch(
+            CMD_CREATE, return_value="slurm:///456"
+        ) as mock_create, mock.patch(CMD_KILL) as mock_kill:
+            config = Config(
+                scheduler="slurm",
+                scheduler_args={},
+                appdef=defaults.component_fn("slurm")(),
+            )
+            server_info = await commands.get_or_create(
+                name="123",
+                config=config,
+                check_interval=_5_MS,
+                force_restart=True,
+            )
+
+            mock_create.called_once_with(config, "123")
+            mock_kill.assert_called_once_with("slurm:///123")
+            self.assertEqual(server_info.server_handle, "slurm:///456")
+            self.assertListEqual(
+                mock_info.call_args_list,
+                [
+                    mock.call("slurm:///123"),
+                    mock.call("slurm:///123"),
+                    mock.call("slurm:///456"),
+                    mock.call("slurm:///456"),
+                    mock.call("slurm:///456"),
+                ],
             )

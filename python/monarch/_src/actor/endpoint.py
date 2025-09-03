@@ -30,6 +30,8 @@ from typing import (
     TypeVar,
 )
 
+from monarch._rust_bindings.monarch_hyperactor.shape import Extent
+
 from monarch._src.actor.future import Future
 from monarch._src.actor.tensor_engine_shim import _cached_propagation, fake_call
 
@@ -46,20 +48,7 @@ if TYPE_CHECKING:
 P = ParamSpec("P")
 R = TypeVar("R")
 
-Selection = Literal["all", "choose"] | int
-
-
-class Extent:
-    def __init__(self, labels: Sequence[str], sizes: Sequence[int]) -> None:
-        self.labels = labels
-        self.sizes = sizes
-
-    @property
-    def nelements(self) -> int:
-        return functools.reduce(mul, self.sizes, 1)
-
-    def __str__(self) -> str:
-        return str(dict(zip(self.labels, self.sizes)))
+Selection = Literal["all", "choose"]
 
 
 Propagator = Any
@@ -155,28 +144,24 @@ class Endpoint(ABC, Generic[P, R]):
 
         return Future(coro=process())
 
-    def _stream(
+    def stream(
         self, *args: P.args, **kwargs: P.kwargs
-    ) -> Generator[Coroutine[Any, Any, R], None, None]:
+    ) -> Generator[Future[R], None, None]:
         """
         Broadcasts to all actors and yields their responses as a stream / generator.
 
         This enables processing results from multiple actors incrementally as
         they become available. Returns an async generator of response values.
         """
-
         p, r = self._port()
-        # pyre-ignore
+        # type: ignore
         extent = self._send(args, kwargs, port=p)
-        for _ in range(extent.nelements):
-            # pyre-ignore
-            yield r._recv()
 
-    def stream(
-        self, *args: P.args, **kwargs: P.kwargs
-    ) -> Generator[Future[R], None, None]:
-        for coro in self._stream(*args, **kwargs):
-            yield Future(coro=coro)
+        def _stream():
+            for _ in range(extent.nelements):
+                yield r.recv()
+
+        return _stream()
 
     def broadcast(self, *args: P.args, **kwargs: P.kwargs) -> None:
         """

@@ -33,6 +33,8 @@ use hyperactor::sync::monitor;
 use ndslice::view::Extent;
 use nix::sys::signal;
 use nix::unistd::Pid;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::io;
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -55,6 +57,8 @@ use crate::shortuuid::ShortUuid;
 
 /// The maximum number of log lines to tail keep for managed processes.
 const MAX_TAIL_LOG_LINES: usize = 100;
+
+pub const CLIENT_TRACE_ID_LABEL: &str = "CLIENT_TRACE_ID";
 
 /// An allocator that allocates procs by executing managed (local)
 /// processes. ProcessAllocator is configured with a [`Command`] (template)
@@ -83,6 +87,7 @@ impl ProcessAllocator {
 impl Allocator for ProcessAllocator {
     type Alloc = ProcessAlloc;
 
+    #[hyperactor::instrument(fields(name = "process_allocate"))]
     async fn allocate(&mut self, spec: AllocSpec) -> Result<ProcessAlloc, AllocatorError> {
         let (bootstrap_addr, rx) = channel::serve(ChannelAddr::any(ChannelTransport::Unix))
             .await
@@ -102,8 +107,24 @@ impl Allocator for ProcessAllocator {
             children: JoinSet::new(),
             running: true,
             failed: false,
+            client_context: ClientContext {
+                trace_id: spec
+                    .constraints
+                    .match_labels
+                    .get(CLIENT_TRACE_ID_LABEL)
+                    .cloned()
+                    .unwrap_or_else(|| "".to_string()),
+            },
         })
     }
+}
+
+// Client Context is saved in ProcessAlloc, and is also passed in
+// the RemoteProcessAllocator's Allocate method
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientContext {
+    /// Trace ID for correlating logs across client and worker processes
+    pub trace_id: String,
 }
 
 /// An allocation produced by [`ProcessAllocator`].
@@ -121,6 +142,7 @@ pub struct ProcessAlloc {
     children: JoinSet<(usize, ProcStopReason)>,
     running: bool,
     failed: bool,
+    client_context: ClientContext,
 }
 
 #[derive(EnumAsInner)]
@@ -135,9 +157,10 @@ struct Child {
     channel: ChannelState,
     group: monitor::Group,
     exit_flag: Option<flag::Flag>,
-    stdout: LogTailer,
-    stderr: LogTailer,
+    stdout: Option<LogTailer>,
+    stderr: Option<LogTailer>,
     stop_reason: Arc<OnceLock<ProcStopReason>>,
+    process_pid: Arc<std::sync::Mutex<Option<i32>>>,
 }
 
 impl Child {
@@ -179,27 +202,23 @@ impl Child {
             stderr_tee,
         );
 
+        let process_pid = Arc::new(std::sync::Mutex::new(process.id().map(|id| id as i32)));
+
         let child = Self {
             local_rank,
             channel: ChannelState::NotConnected,
             group,
             exit_flag: Some(exit_flag),
-            stdout,
-            stderr,
+            stdout: Some(stdout),
+            stderr: Some(stderr),
             stop_reason: Arc::clone(&stop_reason),
+            process_pid: process_pid.clone(),
         };
 
         let monitor = async move {
             let reason = tokio::select! {
                 _ = handle => {
-                    let Some(id) = process.id() else {
-                        tracing::error!("could not get child process id");
-                        return ProcStopReason::Unknown;
-                    };
-                    if let Err(e) = signal::kill(Pid::from_raw(id as i32), signal::SIGTERM) {
-                        tracing::error!("failed to kill child process: {}", e);
-                        return ProcStopReason::Unknown;
-                    };
+                    Self::ensure_killed(process_pid);
                     Self::exit_status_to_reason(process.wait().await)
                 }
                 result = process.wait() => {
@@ -212,6 +231,25 @@ impl Child {
         };
 
         (child, monitor)
+    }
+
+    fn ensure_killed(pid: Arc<std::sync::Mutex<Option<i32>>>) {
+        match pid.lock().unwrap().take() {
+            Some(pid) => {
+                if let Err(e) = signal::kill(Pid::from_raw(pid), signal::SIGTERM) {
+                    match e {
+                        nix::errno::Errno::ESRCH => {
+                            // Process already gone.
+                            tracing::debug!("pid {} already exited", pid);
+                        }
+                        _ => {
+                            tracing::error!("failed to kill {}: {}", pid, e);
+                        }
+                    }
+                }
+            }
+            None => (),
+        }
     }
 
     fn exit_status_to_reason(result: io::Result<ExitStatus>) -> ProcStopReason {
@@ -300,6 +338,12 @@ impl Child {
     }
 }
 
+impl Drop for Child {
+    fn drop(&mut self) {
+        Self::ensure_killed(self.process_pid.clone());
+    }
+}
+
 impl ProcessAlloc {
     // Also implement exit (for graceful exit)
 
@@ -367,11 +411,14 @@ impl ProcessAlloc {
             bootstrap::BOOTSTRAP_ADDR_ENV,
             self.bootstrap_addr.to_string(),
         );
+        cmd.env(
+            bootstrap::CLIENT_TRACE_ID_ENV,
+            self.client_context.trace_id.as_str(),
+        );
         cmd.env(bootstrap::BOOTSTRAP_INDEX_ENV, index.to_string());
         cmd.env(bootstrap::BOOTSTRAP_LOG_CHANNEL, log_channel.to_string());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        cmd.kill_on_drop(true);
 
         let proc_id = ProcId::Ranked(WorldId(self.name.to_string()), index);
         tracing::debug!("Spawning process {:?}", cmd);
@@ -472,7 +519,9 @@ impl Alloc for ProcessAlloc {
                 },
 
                 Some(Ok((index, mut reason))) = self.children.join_next() => {
-                    let stderr_content = if let Some(Child { stdout, stderr, ..} ) = self.remove(index) {
+                    let stderr_content =  if let Some(mut child) = self.remove(index) {
+                        let stdout = child.stdout.take().unwrap();
+                        let stderr = child.stderr.take().unwrap();
                         stdout.abort();
                         stderr.abort();
                         let (_stdout, _) = stdout.join().await;
