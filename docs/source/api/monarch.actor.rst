@@ -39,8 +39,7 @@ Each publicly exposed function of the actor is annotated with `@endpoint`:
    :undoc-members:
    :show-inheritance:
    :inherited-members:
-
-    :exclude-members: __init__, get
+   :exclude-members: __init__, get
 
 .. autofunction:: endpoint
 
