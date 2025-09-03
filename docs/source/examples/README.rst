@@ -19,3 +19,4 @@ These examples are formatted for sphinx-gallery and will be automatically conver
    ping_pong
    spmd_ddp
    grpo_actor
+   debugging
