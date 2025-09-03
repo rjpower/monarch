@@ -40,6 +40,7 @@ use serde::Serialize;
 use strum::AsRefStr;
 
 use crate::alloc::test_utils::MockAllocWrapper;
+use crate::assign::Ranks;
 use crate::proc_mesh::mesh_agent::MeshAgent;
 use crate::shortuuid::ShortUuid;
 
@@ -253,6 +254,108 @@ pub trait Alloc {
             tracing::debug!("drained event: {:?}", event);
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct AllocatedProc {
+    pub proc_id: ProcId,
+    pub addr: ChannelAddr,
+    pub mesh_agent: ActorRef<MeshAgent>,
+}
+
+#[async_trait]
+pub(crate) trait AllocExt {
+    /// Perform initial allocation, consuming events until the alloc is fully
+    /// running. Returns the ranked procs.
+    async fn initialize(&mut self) -> Result<Vec<AllocatedProc>, AllocatorError>;
+}
+
+#[async_trait]
+impl<A: ?Sized + Send + Alloc> AllocExt for A {
+    async fn initialize(&mut self) -> Result<Vec<AllocatedProc>, AllocatorError> {
+        // We wait for the full allocation to be running before returning the mesh.
+        let shape = self.shape().clone();
+
+        let mut created = Ranks::new(shape.slice().len());
+        let mut running = Ranks::new(shape.slice().len());
+
+        while !running.is_full() {
+            let Some(state) = self.next().await else {
+                // Alloc finished before it was fully allocated.
+                return Err(AllocatorError::Incomplete(self.extent().clone()));
+            };
+
+            match state {
+                ProcState::Created {
+                    create_key, point, ..
+                } => {
+                    let rank = point.rank();
+                    if let Some(old_create_key) = created.insert(rank, create_key.clone()) {
+                        tracing::warn!(
+                            "rank {rank} reassigned from {old_create_key} to {create_key}"
+                        );
+                    }
+                    tracing::info!("created: {} rank {}: created", create_key, rank);
+                }
+                ProcState::Running {
+                    create_key,
+                    proc_id,
+                    mesh_agent,
+                    addr,
+                } => {
+                    let Some(rank) = created.rank(&create_key) else {
+                        tracing::warn!(
+                            "proc id {proc_id} ({}) running, but not created",
+                            create_key
+                        );
+                        continue;
+                    };
+
+                    if let Some(AllocatedProc {
+                        proc_id: old_proc_id,
+                        addr: old_addr,
+                        mesh_agent: old_mesh_agent,
+                    }) = running.insert(
+                        *rank,
+                        AllocatedProc {
+                            proc_id: proc_id.clone(),
+                            addr: addr.clone(),
+                            mesh_agent: mesh_agent.clone(),
+                        },
+                    ) {
+                        tracing::warn!(
+                            "duplicate running notifications for {rank}: \
+                            old:{old_proc_id},{old_addr},{old_mesh_agent}; \
+                            new: {proc_id},{addr},{mesh_agent}"
+                        )
+                    }
+                    tracing::info!(
+                        "proc {} rank {}: running at addr:{addr} mesh_agent:{mesh_agent}",
+                        proc_id,
+                        rank
+                    );
+                }
+                // TODO: We should push responsibility to the allocator, which
+                // can choose to either provide a new proc or emit a
+                // ProcState::Failed to fail the whole allocation.
+                ProcState::Stopped { proc_id, reason } => {
+                    tracing::error!("allocation failed for proc_id {}: {}", proc_id, reason);
+                    return Err(AllocatorError::Other(anyhow::Error::msg(reason)));
+                }
+                ProcState::Failed {
+                    world_id,
+                    description,
+                } => {
+                    tracing::error!("allocation failed for world {}: {}", world_id, description);
+                    return Err(AllocatorError::Other(anyhow::Error::msg(description)));
+                }
+            }
+        }
+
+        // We collect all the ranks at this point of completion, so that we can
+        // avoid holding Rcs across awaits.
+        Ok(running.into_iter().map(Option::unwrap).collect())
     }
 }
 
