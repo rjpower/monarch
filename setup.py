@@ -141,7 +141,7 @@ if USE_TENSOR_ENGINE:
     )
 
 package_name = os.environ.get("MONARCH_PACKAGE_NAME", "monarch")
-package_version = os.environ.get("MONARCH_VERSION", "0.0.1")
+package_version = os.environ.get("MONARCH_VERSION", "0.0.0")
 
 setup(
     name=package_name,
