@@ -10,7 +10,7 @@ Debugging Python Actors with pdb in Monarch
 
 Monarch supports ``pdb`` debugging for python actor meshes. This guide demonstrates
 how to debug distributed actors using Python's built-in debugger with breakpoints,
-step-through debugging, and interactive debugging sessions.
+step-through debugging, and interactive debugging sessions. It includes:
 
 - Setting up actors with breakpoints for debugging
 - Accessing the Monarch debugger and listing active breakpoints
@@ -67,13 +67,15 @@ class DebugeeActor(Actor):
 # ----------------------------
 # The monarch debug server listens for breakpoints at a TCP address
 # determined by these environment variables:
+#
 # - ``MONARCH_DEBUG_SERVER_HOST`` (default ``localhost``, must be on the root client host where you run your monarch program)
 # - ``MONARCH_DEBUG_SERVER_PORT`` (default ``27000``)
+#
 # Simply run your monarch program as usual with the desired values for host and port.
 
 if __name__ == "__main__":
     # Create a mesh with 4 "hosts" and 4 gpus per "host"
-    process_mesh = this_host().spawn_procs(per_host={"hosts": 4, "gpus": 4})
+    process_mesh = this_host().spawn_procs(per_host={"host": 4, "gpu": 4})
 
     # Spawn the actor you want to debug on the mesh
     debugee_mesh = process_mesh.spawn("debugee", DebugeeActor)
@@ -86,11 +88,13 @@ if __name__ == "__main__":
 # Using the Monarch Debugger
 # ---------------------------
 # To access the debugger, from a separate terminal, run:
+#
 # .. code-block:: sh
 #
 #     python -m monarch.debug_cli
 #
 # There are two optional flags:
+#
 # - ``--host``: the value of ``MONARCH_DEBUG_SERVER_HOST`` in your program (same default as before)
 # - ``--port``: the value of ``MONARCH_DEBUG_SERVER_PORT`` in your program (same default as before)
 #
@@ -157,15 +161,15 @@ if __name__ == "__main__":
 # - ``ranks(<rank>)``: sends a command to a single rank without attaching
 # - ``ranks(<r1>,<r2>,<r3>)``: sends to comma-separated list of ranks
 # - ``ranks(<r_start>:<r_stop>:<r_step>)``: like python list indexing syntax
-# - ``ranks(hosts=<...>, gpus=<...>)``: sends to specified coordinates
+# - ``ranks(<dim1>=<...>, <dim2>=<...>)``: sends to specified coordinates
 #
 # Example commands:
 #
 # .. code-block:: text
 #
-#     monarch_dbg> cast debugee ranks(0,1) n
-#     monarch_dbg> cast debugee ranks(2:7:2) s
-#     monarch_dbg> cast debugee ranks(hosts=2:, gpus=1:) c
+#     monarch_dbg> cast debugee ranks(0,1) n                 # casts `n` to ranks 0 and 1
+#     monarch_dbg> cast debugee ranks(2:7:2) s               # casts `s` to ranks 2, 4 and 6
+#     monarch_dbg> cast debugee ranks(host=2:4, gpus=1:3) c  # casts `c` to ranks where host dimension is 2 or 3 and gpu dimension is 1 or 2
 
 
 # %%
