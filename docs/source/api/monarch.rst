@@ -1,85 +1,46 @@
 monarch
 =======
 
+These API functions define monarch's distributed tensor computation API. See :doc:`../generated/examples/distributed_tensors` for an overview.
+
 .. currentmodule:: monarch
 
-The main Monarch module provides access to all public APIs for distributed computation.
+.. autoclass:: Tensor
+   :members:
+   :show-inheritance:
+   :exclude-members: __init__, get
 
-Core Classes
-------------
+.. autoclass:: Stream
+   :members:
+   :undoc-members:
+   :show-inheritance:
 
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
+.. autofunction:: remote
 
-   DeviceMesh
-   RemoteProcessGroup
-   Future
-   RemoteException
-   Shape
-   NDSlice
-   Selection
-   Tensor
-   OpaqueRef
-   Stream
-   Pipe
-   ProcessAllocator
-   LocalAllocator
-   SimAllocator
-   ActorFuture
-   Simulator
+.. autofunction:: coalescing
 
-Core Functions
---------------
+.. autofunction:: get_active_mesh
 
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
+.. autofunction:: no_mesh
 
-   remote
-   coalescing
-   get_active_mesh
-   no_mesh
-   to_mesh
-   slice_mesh
-   create_pipe
-   remote_generator
-   get_active_stream
-   reduce
-   reduce_
-   call_on_shard_and_fetch
-   fetch_shard
-   inspect
-   show
-   grad_function
-   grad_generator
+.. autofunction:: to_mesh
 
-Mesh Creation Functions
------------------------
+.. autofunction:: slice_mesh
 
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
+.. autofunction:: get_active_stream
 
-   python_local_mesh
-   mast_mesh
-   mast_reserve
-   rust_backend_mesh
-   rust_backend_meshes
-   local_mesh
-   local_meshes
-   rust_mast_mesh
-   world_mesh
+.. autofunction:: reduce
 
-Utilities
----------
+.. autofunction:: reduce_
 
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
+.. autofunction:: call_on_shard_and_fetch
 
-   timer
-   SocketType
-   set_meta
-   builtins
-   function_resolvers
+.. autofunction:: fetch_shard
+
+.. autofunction:: inspect
+
+.. autofunction:: show
+
+.. autofunction:: grad_function
+
+.. autofunction:: grad_generator

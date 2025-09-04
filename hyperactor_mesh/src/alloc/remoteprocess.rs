@@ -19,7 +19,6 @@ use futures::FutureExt;
 use futures::future::join_all;
 use futures::future::select_all;
 use hyperactor::Named;
-use hyperactor::ProcId;
 use hyperactor::WorldId;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
@@ -41,7 +40,6 @@ use hyperactor::reference::Reference;
 use hyperactor::serde_json;
 use mockall::automock;
 use ndslice::Region;
-use ndslice::View;
 use ndslice::ViewExt;
 use ndslice::view::Extent;
 use ndslice::view::Point;
@@ -237,6 +235,8 @@ impl RemoteProcessAllocator {
                                     "allocating...",
                                 );
                             }
+
+
                             let spec = AllocSpec {
                                 extent,
                                 constraints,
