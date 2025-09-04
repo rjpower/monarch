@@ -235,6 +235,7 @@ impl ProcMesh {
         let alloc_id = Self::alloc_counter().fetch_add(1, Ordering::Relaxed) + 1;
         let world = alloc.world_id().name().to_string();
         tracing::info!(
+            name = "ProcMesh::Allocate::Attempt",
             %world,
             alloc_id,
             caller = %format!("{}:{}", loc.file(), loc.line()),
@@ -262,7 +263,11 @@ impl ProcMesh {
         let (client_proc_addr, client_rx) = channel::serve(ChannelAddr::any(alloc.transport()))
             .await
             .map_err(|err| AllocatorError::Other(err.into()))?;
-        tracing::info!("client proc started listening on addr: {client_proc_addr}");
+        tracing::info!(
+            name = "ProcMesh::Allocate::ChannelServe",
+            alloc_id = alloc_id,
+            "client proc started listening on addr: {client_proc_addr}"
+        );
         let client_proc = Proc::new(
             client_proc_id.clone(),
             BoxedMailboxSender::new(router.clone()),
