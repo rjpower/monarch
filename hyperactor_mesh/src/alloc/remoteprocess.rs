@@ -35,7 +35,8 @@ use hyperactor::clock::RealClock;
 use hyperactor::config;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxServer;
-use hyperactor::observe;
+use hyperactor::observe_async;
+use hyperactor::observe_result;
 use hyperactor::reference::Reference;
 use hyperactor::serde_json;
 use mockall::automock;
@@ -187,7 +188,7 @@ impl RemoteProcessAllocator {
             handle: JoinHandle<()>,
             cancel_token: CancellationToken,
         }
-        #[observe("remote_process")]
+        #[observe_async("RemoteProcessAllocator")]
         async fn ensure_previous_alloc_stopped(active_allocation: &mut Option<ActiveAllocation>) {
             if let Some(active_allocation) = active_allocation.take() {
                 tracing::info!("previous alloc found, stopping");
@@ -301,7 +302,7 @@ impl RemoteProcessAllocator {
         Ok(())
     }
 
-    #[observe("remote_process")]
+    #[observe_async("RemoteProcessAllocator")]
     async fn handle_allocation_request(
         alloc: Box<dyn Alloc + Send + Sync>,
         alloc_key: ShortUuid,
@@ -398,7 +399,7 @@ impl RemoteProcessAllocator {
             return;
         }
 
-        let mut mesh_agents_by_proc_id = HashMap::new();
+        let mut mesh_agents_by_create_key = HashMap::new();
         let mut running = true;
         let tx_status = tx.status().clone();
         let mut tx_watcher = WatchStream::new(tx_status);
@@ -433,22 +434,22 @@ impl RemoteProcessAllocator {
                                 ProcState::Running { create_key, proc_id, mesh_agent, addr } => {
                                     // TODO(meriksen, direct addressing): disable remapping in direct addressing mode
                                     tracing::debug!("remapping mesh_agent {}: addr {} -> {}", mesh_agent, addr, forward_addr);
-                                    mesh_agents_by_proc_id.insert(proc_id.clone(), mesh_agent.clone());
+                                    mesh_agents_by_create_key.insert(create_key.clone(), mesh_agent.clone());
                                     router.bind(mesh_agent.actor_id().proc_id().clone().into(), addr);
                                     ProcState::Running { create_key, proc_id, mesh_agent, addr: forward_addr.clone() }
                                 },
-                                ProcState::Stopped { proc_id, reason } => {
-                                    match mesh_agents_by_proc_id.remove(&proc_id) {
+                                ProcState::Stopped { create_key, reason } => {
+                                    match mesh_agents_by_create_key.remove(&create_key) {
                                         Some(mesh_agent) => {
                                             tracing::debug!("unmapping mesh_agent {}", mesh_agent);
                                             let agent_ref: Reference = mesh_agent.actor_id().proc_id().clone().into();
                                             router.unbind(&agent_ref);
                                         },
                                         None => {
-                                            tracing::warn!("mesh_agent not found for proc_id: {}", proc_id);
+                                            tracing::warn!("mesh_agent not found for create key {}", create_key);
                                         }
                                     }
-                                    ProcState::Stopped { proc_id, reason }
+                                    ProcState::Stopped { create_key, reason }
                                 },
                                 ProcState::Failed { ref world_id, ref description } => {
                                     tracing::error!("allocation failed for {}: {}", world_id, description);
@@ -507,7 +508,7 @@ struct RemoteProcessAllocHostState {
     /// TX channel to the remote host allocator.
     tx: ChannelTx<RemoteProcessAllocatorMessage>,
     /// Set of active processes on this host.
-    active_procs: HashSet<ProcId>,
+    active_procs: HashSet<ShortUuid>,
     /// Region allocated by host.
     region: Region,
     /// World ID for this host as indicated from Allocated message.
@@ -613,7 +614,7 @@ impl RemoteProcessAlloc {
     /// to obtain a list of allocate hosts. Then Allocate message will be sent to all
     /// RemoteProcessAllocator on all hosts. Heartbeats will be used to maintain health
     /// status of remote hosts.
-    #[observe("remote_process")]
+    #[observe_result("RemoteProcessAlloc")]
     pub async fn new(
         spec: AllocSpec,
         world_id: WorldId,
@@ -887,12 +888,12 @@ impl RemoteProcessAlloc {
     fn add_proc_id_to_host_state(
         &mut self,
         alloc_key: &ShortUuid,
-        proc_id: &ProcId,
+        create_key: &ShortUuid,
     ) -> Result<(), anyhow::Error> {
         let task_state = self.get_host_state_mut(alloc_key)?;
-        if !task_state.active_procs.insert(proc_id.clone()) {
+        if !task_state.active_procs.insert(create_key.clone()) {
             // Should not happen but we can ignore
-            tracing::error!("proc id already in host state: {}", proc_id);
+            tracing::error!("proc with create key {} already in host state", create_key);
         }
         task_state.allocated = true;
         Ok(())
@@ -901,12 +902,12 @@ impl RemoteProcessAlloc {
     fn remove_proc_from_host_state(
         &mut self,
         alloc_key: &ShortUuid,
-        proc_id: &ProcId,
+        create_key: &ShortUuid,
     ) -> Result<(), anyhow::Error> {
         let task_state = self.get_host_state_mut(alloc_key)?;
-        if !task_state.active_procs.remove(proc_id) {
+        if !task_state.active_procs.remove(create_key) {
             // Should not happen but we can ignore
-            tracing::error!("proc id already in host state: {}", proc_id);
+            tracing::error!("proc with create_key already in host state: {}", create_key);
         }
         Ok(())
     }
@@ -935,7 +936,7 @@ impl RemoteProcessAlloc {
     fn cleanup_host_channel_closed(
         &mut self,
         host_id: HostId,
-    ) -> Result<Vec<ProcId>, anyhow::Error> {
+    ) -> Result<Vec<ShortUuid>, anyhow::Error> {
         let state = match self.host_states.remove(&host_id) {
             Some(state) => state,
             None => {
@@ -951,9 +952,9 @@ impl RemoteProcessAlloc {
         if let Some(world_id) = state.world_id {
             self.world_offsets.remove(&world_id);
         }
-        let proc_ids = state.active_procs.iter().cloned().collect();
+        let create_keys = state.active_procs.iter().cloned().collect();
 
-        Ok(proc_ids)
+        Ok(create_keys)
     }
 }
 
@@ -1003,15 +1004,15 @@ impl Alloc for RemoteProcessAlloc {
                             }
                             Ok(RemoteProcessProcStateMessage::Update(alloc_key, proc_state)) => {
                                 let update = match proc_state {
-                                    ProcState::Running { ref proc_id, .. } => {
-                                        if let Err(e) = self.add_proc_id_to_host_state(&alloc_key, proc_id) {
-                                            tracing::error!("failed to add proc id to host state: {}", e);
+                                    ProcState::Created { ref create_key, .. } => {
+                                        if let Err(e) = self.add_proc_id_to_host_state(&alloc_key, create_key) {
+                                            tracing::error!("failed to add proc with create key {} host state: {}", create_key, e);
                                         }
                                         proc_state
                                     }
-                                    ProcState::Stopped{ ref proc_id, ..} => {
-                                        if let Err(e) = self.remove_proc_from_host_state(&alloc_key, proc_id) {
-                                            tracing::error!("failed to remove proc id from host state: {}", e);
+                                    ProcState::Stopped{ ref create_key, ..} => {
+                                        if let Err(e) = self.remove_proc_from_host_state(&alloc_key, create_key) {
+                                            tracing::error!("failed to remove proc with create key {} host state: {}", create_key, e);
                                         }
                                         proc_state
                                     }
@@ -1080,16 +1081,21 @@ impl Alloc for RemoteProcessAlloc {
                                         )}));
                                 }
                             }
-                            let proc_ids = match self.cleanup_host_channel_closed(closed_host_id) {
-                                Ok(proc_ids) => proc_ids,
+                            let create_keys = match self.cleanup_host_channel_closed(closed_host_id) {
+                                Ok(create_keys) => create_keys,
                                 Err(err) => {
                                     tracing::error!("failed to cleanup disconnected host: {}", err);
                                     continue;
                                 }
                             };
-                            for proc_id in proc_ids {
-                                tracing::debug!("queuing Stopped state for {}", proc_id);
-                                self.event_queue.push_back(ProcState::Stopped{proc_id, reason: ProcStopReason::HostWatchdog});
+                            for create_key in create_keys {
+                                tracing::debug!("queuing Stopped state for proc with create key {}", create_key);
+                                self.event_queue.push_back(
+                                    ProcState::Stopped {
+                                        create_key,
+                                        reason: ProcStopReason::HostWatchdog
+                                    }
+                                );
                             }
                             // Check if there are any hosts left
                             if self.host_states.is_empty() {
@@ -1248,10 +1254,10 @@ mod test {
 
     fn set_procstate_expectations(alloc: &mut MockAlloc, extent: Extent) {
         alloc.expect_extent().return_const(extent.clone());
-        let mut create_keys = VecDeque::new();
+        let mut create_keys = Vec::new();
         for (i, point) in extent.points().enumerate() {
             let create_key = ShortUuid::generate();
-            create_keys.push_back(create_key.clone());
+            create_keys.push(create_key.clone());
             alloc.expect_next().times(1).return_once(move || {
                 Some(ProcState::Created {
                     create_key: create_key.clone(),
@@ -1265,10 +1271,10 @@ mod test {
             let mesh_agent = ActorRef::<ProcMeshAgent>::attest(
                 format!("test[{}].mesh_agent[{}]", i, i).parse().unwrap(),
             );
-            let create_key = create_keys.pop_front().unwrap();
+            let create_key = create_keys[i].clone();
             alloc.expect_next().times(1).return_once(move || {
                 Some(ProcState::Running {
-                    create_key: create_key.clone(),
+                    create_key,
                     proc_id,
                     addr: ChannelAddr::Unix("/proc0".parse().unwrap()),
                     mesh_agent,
@@ -1276,10 +1282,10 @@ mod test {
             });
         }
         for i in 0..extent.num_ranks() {
-            let proc_id = format!("test[{}]", i).parse().unwrap();
+            let create_key = create_keys[i].clone();
             alloc.expect_next().times(1).return_once(|| {
                 Some(ProcState::Stopped {
-                    proc_id,
+                    create_key,
                     reason: ProcStopReason::Unknown,
                 })
             });
@@ -1354,7 +1360,7 @@ mod test {
 
         // All Created events
         let mut rank: usize = 0;
-        let mut create_keys = VecDeque::with_capacity(extent.num_ranks());
+        let mut create_keys = Vec::with_capacity(extent.num_ranks());
         while rank < extent.num_ranks() {
             let m = rx.recv().await.unwrap();
             match m {
@@ -1367,7 +1373,7 @@ mod test {
                     let expected_point = extent.point_of_rank(rank).unwrap();
                     assert_eq!(got_alloc_key, alloc_key);
                     assert_eq!(point, expected_point);
-                    create_keys.push_back(create_key);
+                    create_keys.push(create_key);
                     rank += 1;
                 }
                 RemoteProcessProcStateMessage::HeartBeat => {}
@@ -1389,7 +1395,7 @@ mod test {
                     },
                 ) => {
                     assert_eq!(got_alloc_key, alloc_key);
-                    assert_eq!(create_key, create_keys.pop_front().unwrap());
+                    assert_eq!(create_key, create_keys[rank]);
                     let expected_proc_id = format!("test[{}]", rank).parse().unwrap();
                     let expected_mesh_agent = ActorRef::<ProcMeshAgent>::attest(
                         format!("test[{}].mesh_agent[{}]", rank, rank)
@@ -1412,13 +1418,12 @@ mod test {
                 RemoteProcessProcStateMessage::Update(
                     got_alloc_key,
                     ProcState::Stopped {
-                        proc_id,
+                        create_key,
                         reason: ProcStopReason::Unknown,
                     },
                 ) => {
                     assert_eq!(got_alloc_key, alloc_key);
-                    let expected_proc_id = format!("test[{}]", rank).parse().unwrap();
-                    assert_eq!(proc_id, expected_proc_id);
+                    assert_eq!(create_key, create_keys[rank]);
                     rank += 1;
                 }
                 RemoteProcessProcStateMessage::HeartBeat => {}
@@ -2100,7 +2105,7 @@ mod test_alloc {
                     ..
                 } => {
                     assert!(created.remove(&create_key));
-                    running_procs.insert(proc_id);
+                    running_procs.insert(create_key);
                 }
                 _ => panic!("expected Created or Running"),
             }
@@ -2126,8 +2131,10 @@ mod test_alloc {
             let proc_state = alloc.next().await.unwrap();
             tracing::info!("test received next proc_state: {:?}", proc_state);
             match proc_state {
-                ProcState::Stopped { proc_id, reason } => {
-                    assert!(running_procs.remove(&proc_id));
+                ProcState::Stopped {
+                    create_key, reason, ..
+                } => {
+                    assert!(running_procs.remove(&create_key));
                     assert_eq!(reason, ProcStopReason::Stopped);
                 }
                 _ => panic!("expected stopped"),
@@ -2237,7 +2244,7 @@ mod test_alloc {
             let proc_state = alloc.next().await.unwrap();
             tracing::info!("test received next proc_state: {:?}", proc_state);
             match proc_state {
-                ProcState::Stopped { proc_id: _, reason } => {
+                ProcState::Stopped { reason, .. } => {
                     assert_eq!(reason, ProcStopReason::HostWatchdog);
                 }
                 _ => panic!("expected stopped"),
@@ -2261,7 +2268,7 @@ mod test_alloc {
             let proc_state = alloc.next().await.unwrap();
             tracing::info!("test received next proc_state: {:?}", proc_state);
             match proc_state {
-                ProcState::Stopped { proc_id: _, reason } => {
+                ProcState::Stopped { reason, .. } => {
                     assert_eq!(reason, ProcStopReason::HostWatchdog);
                 }
                 _ => panic!("expected stopped"),
@@ -2359,7 +2366,7 @@ mod test_alloc {
                     ..
                 } => {
                     assert!(created.remove(&create_key));
-                    started_procs.insert(proc_id);
+                    started_procs.insert(create_key);
                 }
                 ProcState::Failed { .. } => {
                     failed += 1;
@@ -2389,8 +2396,10 @@ mod test_alloc {
             let proc_state = alloc.next().await.unwrap();
             tracing::info!("test received next proc_state: {:?}", proc_state);
             match proc_state {
-                ProcState::Stopped { proc_id, reason } => {
-                    assert!(started_procs.remove(&proc_id));
+                ProcState::Stopped {
+                    create_key, reason, ..
+                } => {
+                    assert!(started_procs.remove(&create_key));
                     assert_eq!(reason, ProcStopReason::Stopped);
                 }
                 _ => panic!("expected stopped"),
