@@ -286,8 +286,8 @@ impl ProcMesh {
                         name = state_str,
                         rank = rank,
                         alloc_id = alloc_id,
-                        "proc {} rank {}: created",
-                        proc_id,
+                        "proc with create key {} rank {}: created",
+                        create_key,
                         rank
                     );
                     tracing::info!("created: {} rank {}: created", create_key, rank);
@@ -342,8 +342,8 @@ impl ProcMesh {
                     tracing::error!(
                         name = state_str,
                         alloc_id = alloc_id,
-                        "allocation failed for proc_id {}: {}",
-                        proc_id,
+                        "allocation failed for proc with create key {}: {}",
+                        create_key,
                         reason
                     );
                     return Err(AllocatorError::Other(anyhow::Error::msg(reason)));
