@@ -547,8 +547,8 @@ impl Alloc for ProcessAlloc {
                     tracing::info!("child stopped with ProcStopReason::{:?}", reason);
 
                     break Some(ProcState::Stopped {
-                        proc_id: ProcId::Ranked(WorldId(self.name.to_string()), index),
-                        reason
+                        create_key: self.created[index].clone(),
+                        reason,
                     });
                 },
             }
