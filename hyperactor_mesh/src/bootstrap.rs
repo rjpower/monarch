@@ -155,74 +155,75 @@ pub async fn bootstrap() -> anyhow::Error {
         let (serve_addr, mut rx) = channel::serve(listen_addr).await?;
         let tx = channel::dial(bootstrap_addr.clone())?;
 
-        let (rtx, return_channel) = oneshot::channel();
-        let mut return_channel = Some(return_channel);
+        let (rtx, mut return_channel) = oneshot::channel();
         tx.try_post(
             Process2Allocator(bootstrap_index, Process2AllocatorMessage::Hello(serve_addr)),
             rtx,
         )?;
         tokio::spawn(exit_if_missed_heartbeat(bootstrap_index, bootstrap_addr));
 
-        loop {
-            let _ = hyperactor::tracing::info_span!("wait_for_next_message_from_mesh_agent");
-            tokio::select! {
-                msg = rx.recv() => {
-                    match msg? {
-                        Allocator2Process::StartProc(proc_id, listen_transport) => {
-                            let (proc, mesh_agent) = MeshAgent::bootstrap(proc_id.clone()).await?;
-                            let (proc_addr, proc_rx) =
-                                channel::serve(ChannelAddr::any(listen_transport)).await?;
-                            let handle = proc.clone().serve(proc_rx);
-                            drop(handle); // linter appeasement; it is safe to drop this future
-                            tx.send(Process2Allocator(
-                                bootstrap_index,
-                                Process2AllocatorMessage::StartedProc(
-                                    proc_id.clone(),
-                                    mesh_agent.bind(),
-                                    proc_addr,
-                                ),
-                            ))
-                            .await?;
-                            procs.lock().await.push(proc);
-                        }
-                        Allocator2Process::StopAndExit(code) => {
-                            tracing::info!("stopping procs with code {code}");
-                            {
-                                for proc_to_stop in procs.lock().await.iter_mut() {
-                                    if let Err(err) = proc_to_stop
-                                        .destroy_and_wait(Duration::from_millis(10), None)
-                                        .await
-                                    {
-                                        tracing::error!(
-                                            "error while stopping proc {}: {}",
-                                            proc_to_stop.proc_id(),
-                                            err
-                                        );
-                                    }
-                                }
-                            }
-                            tracing::info!("exiting with {code}");
-                            std::process::exit(code);
-                        }
-                        Allocator2Process::Exit(code) => {
-                            tracing::info!("exiting with {code}");
-                            std::process::exit(code);
-                        }
+        let mut the_msg;
+
+        tokio::select! {
+            msg = rx.recv() => {
+                the_msg = msg;
+            }
+            returned_msg = &mut return_channel => {
+                match returned_msg {
+                    Ok(msg) => {
+                        return Err(anyhow::anyhow!("Hello message was not delivered:{:?}", msg));
                     }
-                }
-                returned_msg = &mut return_channel.as_mut().unwrap(), if return_channel.is_some() => {
-                    match returned_msg {
-                        Ok(msg) => {
-                            return Err(anyhow::anyhow!("Hello message was not delivered:{:?}", msg));
-                        }
-                        Err(_) => {
-                            // Channel was closed normally, which is expected behavior
-                            // Continue with the loop
-                            return_channel = None;
-                        }
+                    Err(_) => {
+                        the_msg = rx.recv().await;
                     }
                 }
             }
+        }
+        loop {
+            let _ = hyperactor::tracing::info_span!("wait_for_next_message_from_mesh_agent");
+            match the_msg? {
+                Allocator2Process::StartProc(proc_id, listen_transport) => {
+                    let (proc, mesh_agent) = MeshAgent::bootstrap(proc_id.clone()).await?;
+                    let (proc_addr, proc_rx) =
+                        channel::serve(ChannelAddr::any(listen_transport)).await?;
+                    let handle = proc.clone().serve(proc_rx);
+                    drop(handle); // linter appeasement; it is safe to drop this future
+                    tx.send(Process2Allocator(
+                        bootstrap_index,
+                        Process2AllocatorMessage::StartedProc(
+                            proc_id.clone(),
+                            mesh_agent.bind(),
+                            proc_addr,
+                        ),
+                    ))
+                    .await?;
+                    procs.lock().await.push(proc);
+                }
+                Allocator2Process::StopAndExit(code) => {
+                    tracing::info!("stopping procs with code {code}");
+                    {
+                        for proc_to_stop in procs.lock().await.iter_mut() {
+                            if let Err(err) = proc_to_stop
+                                .destroy_and_wait(Duration::from_millis(10), None)
+                                .await
+                            {
+                                tracing::error!(
+                                    "error while stopping proc {}: {}",
+                                    proc_to_stop.proc_id(),
+                                    err
+                                );
+                            }
+                        }
+                    }
+                    tracing::info!("exiting with {code}");
+                    std::process::exit(code);
+                }
+                Allocator2Process::Exit(code) => {
+                    tracing::info!("exiting with {code}");
+                    std::process::exit(code);
+                }
+            }
+            the_msg = rx.recv().await;
         }
     }
 
