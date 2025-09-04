@@ -207,7 +207,7 @@ pub struct ProcMesh {
     event_state: Option<EventState>,
     actor_event_router: ActorEventRouter,
     shape: Shape,
-    ranks: Vec<(ProcId, (ChannelAddr, ActorRef<MeshAgent>))>,
+    ranks: Vec<(ShortUuid, ProcId, ChannelAddr, ActorRef<MeshAgent>)>,
     #[allow(dead_code)] // will be used in subsequent diff
     client_proc: Proc,
     client: Mailbox,
@@ -243,6 +243,7 @@ impl ProcMesh {
         C.get_or_init(|| AtomicUsize::new(0))
     }
 
+    #[hyperactor::observe_result("ProcMesh")]
     async fn allocate_boxed_inner(
         mut alloc: Box<dyn Alloc + Send + Sync>,
         loc: &'static Location<'static>,
@@ -295,26 +296,39 @@ impl ProcMesh {
                         continue;
                     };
 
-                    if let Some((old_proc_id, old_addr, old_mesh_agent)) =
-                        running.insert(*rank, (proc_id.clone(), addr.clone(), mesh_agent.clone()))
+                    if let Some((old_create_key, old_proc_id, old_addr, old_mesh_agent)) = running
+                        .insert(
+                            *rank,
+                            (
+                                create_key.clone(),
+                                proc_id.clone(),
+                                addr.clone(),
+                                mesh_agent.clone(),
+                            ),
+                        )
                     {
                         tracing::warn!(
                             "duplicate running notifications for {rank}: \
-                            old:{old_proc_id},{old_addr},{old_mesh_agent}; \
-                            new: {proc_id},{addr},{mesh_agent}"
+                            old:{old_create_key},{old_proc_id},{old_addr},{old_mesh_agent}; \
+                            new:{create_key},{proc_id},{addr},{mesh_agent}"
                         )
                     }
                     tracing::info!(
-                        "proc {} rank {}: running at addr:{addr} mesh_agent:{mesh_agent}",
+                        "proc {} create key {} rank {}: running at addr:{addr} mesh_agent:{mesh_agent}",
                         proc_id,
+                        create_key,
                         rank
                     );
                 }
                 // TODO: We should push responsibility to the allocator, which
                 // can choose to either provide a new proc or emit a
                 // ProcState::Failed to fail the whole allocation.
-                ProcState::Stopped { proc_id, reason } => {
-                    tracing::error!("allocation failed for proc_id {}: {}", proc_id, reason);
+                ProcState::Stopped { create_key, reason } => {
+                    tracing::error!(
+                        "allocation failed for proc with create_key {}: {}",
+                        create_key,
+                        reason
+                    );
                     return Err(AllocatorError::Other(anyhow::Error::msg(reason)));
                 }
                 ProcState::Failed {
@@ -339,7 +353,7 @@ impl ProcMesh {
             .map_err(|err| AllocatorError::Other(err.into()))?;
         tracing::info!("router channel started listening on addr: {router_channel_addr}");
         let router = DialMailboxRouter::new_with_default(global_router().boxed());
-        for (_rank, (proc_id, addr, _agent)) in running.iter().enumerate() {
+        for (_rank, (_create_key, proc_id, addr, _agent)) in running.iter().enumerate() {
             router.bind(Reference::Proc(proc_id.clone()), addr.clone());
             // Work around for Allocs that have more than one world.
             world_ids.insert(
@@ -423,11 +437,13 @@ impl ProcMesh {
         // Map of procs -> channel addresses
         let address_book: HashMap<_, _> = running
             .iter()
-            .map(|(_proc_id, addr, agent)| (agent.actor_id().proc_id().clone(), addr.clone()))
+            .map(|(_create_key, _proc_id, addr, agent)| {
+                (agent.actor_id().proc_id().clone(), addr.clone())
+            })
             .collect();
 
         let (config_handle, mut config_receiver) = client.open_port();
-        for (rank, (_, _, agent)) in running.iter().enumerate() {
+        for (rank, (_, _, _, agent)) in running.iter().enumerate() {
             agent
                 .configure(
                     &client,
@@ -464,9 +480,9 @@ impl ProcMesh {
         //
         // Baffling and unsettling.
         fn project_actor_ref(
-            pair: &(ProcId, ChannelAddr, ActorRef<MeshAgent>),
+            pair: &(ShortUuid, ProcId, ChannelAddr, ActorRef<MeshAgent>),
         ) -> ActorRef<MeshAgent> {
-            pair.2.clone()
+            pair.3.clone()
         }
 
         // Spawn a comm actor on each proc, so that they can be used
@@ -498,10 +514,7 @@ impl ProcMesh {
             }),
             actor_event_router: Arc::new(DashMap::new()),
             shape,
-            ranks: running
-                .into_iter()
-                .map(|(proc_id, addr, mesh_agent)| (proc_id, (addr, mesh_agent)))
-                .collect(),
+            ranks: running.into_iter().collect(),
             client_proc,
             client,
             comm_actors,
@@ -571,7 +584,7 @@ impl ProcMesh {
     }
 
     fn agents(&self) -> impl Iterator<Item = ActorRef<MeshAgent>> + '_ {
-        self.ranks.iter().map(|(_, (_, agent))| agent.clone())
+        self.ranks.iter().map(|(_, _, _, agent)| agent.clone())
     }
 
     /// Return the comm actor to which casts should be forwarded.
@@ -639,7 +652,9 @@ impl ProcMesh {
                 .ranks
                 .iter()
                 .enumerate()
-                .map(|(rank, (proc_id, _))| (proc_id.clone(), rank))
+                .map(|(rank, (create_key, proc_id, _addr, _mesh_agent))| {
+                    (proc_id.clone(), (rank, create_key.clone()))
+                })
                 .collect(),
             actor_event_router: self.actor_event_router.clone(),
         })
@@ -713,7 +728,8 @@ type ActorMeshName = String;
 // TODO: consider using streams for this.
 pub struct ProcEvents {
     event_state: EventState,
-    ranks: HashMap<ProcId, usize>,
+    // Proc id to its rank and create key.
+    ranks: HashMap<ProcId, (usize, ShortUuid)>,
     actor_event_router: ActorEventRouter,
 }
 
@@ -731,20 +747,20 @@ impl ProcEvents {
                         break None;
                     };
 
-                    let ProcState::Stopped { proc_id, reason } = alloc_event else {
+                    let ProcState::Stopped { create_key, reason } = alloc_event else {
                         // Ignore non-stopped events for now.
                         continue;
                     };
 
-                    let Some(rank) = self.ranks.get(&proc_id) else {
-                        tracing::warn!("received stop event for unmapped proc {}", proc_id);
+                    let Some((proc_id, (rank, _create_key))) = self.ranks.iter().find(|(proc_id, (_, key))| key == &create_key) else {
+                        tracing::warn!("received stop event for unmapped proc {}", create_key);
                         continue;
                     };
 
                     metrics::PROC_MESH_PROC_STOPPED.add(
                         1,
                         hyperactor_telemetry::kv_pairs!(
-                            "proc_id" => proc_id.to_string(),
+                            "create_key" => create_key.to_string(),
                             "rank" => rank.to_string(),
                             "reason" => reason.to_string(),
                         ),
@@ -843,7 +859,7 @@ impl ProcEvents {
                     // Ensure we have a known rank for the proc
                     // containing this actor. If we don't, we can't
                     // attribute the failure to a known process.
-                    let Some(rank) = self.ranks.get(actor_id.proc_id()) else {
+                    let Some((rank, _)) = self.ranks.get(actor_id.proc_id()) else {
                         tracing::warn!(
                             actor = %actor_id,
                             "proc supervision: actor belongs to an unmapped proc; dropping event"
@@ -936,7 +952,7 @@ impl Mesh for ProcMesh {
     }
 
     fn get(&self, rank: usize) -> Option<ProcId> {
-        Some(self.ranks[rank].0.clone())
+        Some(self.ranks[rank].1.clone())
     }
 
     fn id(&self) -> Self::Id {

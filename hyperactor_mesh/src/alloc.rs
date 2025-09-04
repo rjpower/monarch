@@ -126,7 +126,7 @@ pub enum ProcState {
     },
     /// A proc was stopped.
     Stopped {
-        proc_id: ProcId,
+        create_key: ShortUuid,
         reason: ProcStopReason,
     },
     /// Allocation process encountered an irrecoverable error. Depending on the
@@ -159,8 +159,8 @@ impl fmt::Display for ProcState {
             ProcState::Running { proc_id, addr, .. } => {
                 write!(f, "{}: running at {}", proc_id, addr)
             }
-            ProcState::Stopped { proc_id, reason } => {
-                write!(f, "{}: stopped: {}", proc_id, reason)
+            ProcState::Stopped { create_key, reason } => {
+                write!(f, "{}: stopped: {}", create_key, reason)
             }
             ProcState::Failed {
                 description,
@@ -440,7 +440,7 @@ pub(crate) mod testing {
                     proc_id,
                     ..
                 } => {
-                    assert!(running.insert(proc_id.clone()));
+                    assert!(running.insert(create_key.clone()));
                     procs.insert(proc_id, created.remove(&create_key).unwrap());
                 }
                 event => panic!("unexpected event: {:?}", event),
@@ -461,9 +461,12 @@ pub(crate) mod testing {
 
         alloc.stop().await.unwrap();
         let mut stopped = HashSet::new();
-        while let Some(ProcState::Stopped { proc_id, reason }) = alloc.next().await {
+        while let Some(ProcState::Stopped {
+            create_key, reason, ..
+        }) = alloc.next().await
+        {
             assert_eq!(reason, ProcStopReason::Stopped);
-            stopped.insert(proc_id);
+            stopped.insert(create_key);
         }
         assert!(alloc.next().await.is_none());
         assert_eq!(stopped, running);
@@ -592,12 +595,12 @@ pub(crate) mod testing {
                     router.bind(Reference::Proc(proc_id.clone()), addr.clone());
 
                     assert!(procs.contains_key(&create_key));
-                    assert!(!running.contains(&proc_id));
+                    assert!(!running.contains(&create_key));
 
                     actor_ref = Some(
                         spawn_test_actor(0, &client_proc, &client, router_addr, mesh_agent).await,
                     );
-                    running.insert(proc_id);
+                    running.insert(create_key.clone());
                     break;
                 }
                 event => panic!("unexpected event: {:?}", event),
@@ -608,9 +611,12 @@ pub(crate) mod testing {
         // There is a stuck actor! We should get a watchdog failure.
         alloc.stop().await.unwrap();
         let mut stopped = HashSet::new();
-        while let Some(ProcState::Stopped { proc_id, reason }) = alloc.next().await {
+        while let Some(ProcState::Stopped {
+            create_key, reason, ..
+        }) = alloc.next().await
+        {
             assert_eq!(reason, ProcStopReason::Watchdog);
-            stopped.insert(proc_id);
+            stopped.insert(create_key);
         }
         assert!(alloc.next().await.is_none());
         assert_eq!(stopped, running);

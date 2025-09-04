@@ -160,7 +160,6 @@ mod tests {
         // make sure we accounted for `world_size` number of Created and Stopped proc states
         let world_size = spec.extent.num_ranks();
         let mut created = HashSet::new();
-        let mut running = HashSet::new();
         let mut stopped = HashSet::new();
 
         while stopped.len() < world_size {
@@ -169,19 +168,13 @@ mod tests {
                 alloc::ProcState::Created { create_key, .. } => {
                     // alloc.next() will keep creating procs and incrementing rank id
                     // so we mod the rank by world_size to map it to its logical rank
+                    eprintln!("created: {}", create_key);
                     created.insert(create_key);
                 }
-                alloc::ProcState::Running {
-                    create_key,
-                    proc_id,
-                    ..
-                } => {
+                alloc::ProcState::Stopped { create_key, .. } => {
+                    eprintln!("stopped: {}", create_key);
                     assert!(created.remove(&create_key));
-                    running.insert(proc_id);
-                }
-                alloc::ProcState::Stopped { proc_id, .. } => {
-                    assert!(running.remove(&proc_id));
-                    stopped.insert(proc_id);
+                    stopped.insert(create_key);
                 }
                 _ => {}
             }
@@ -399,19 +392,15 @@ mod tests {
                 alloc::ProcState::Created { .. } => {
                     // ignore
                 }
-                alloc::ProcState::Stopped { proc_id, .. } => {
-                    stopped_ranks.insert(
-                        proc_id
-                            .rank()
-                            .expect("process allocator currently supports only ranked procs")
-                            % world_size,
-                    );
+                alloc::ProcState::Stopped { create_key, .. } => {
+                    assert!(created.remove(&create_key));
                 }
                 _ => {
                     panic!("Unexpected message: {:?}", proc_state)
                 }
             }
         }
+        assert!(created.is_empty());
         server_handle.abort();
         Ok(())
     }
