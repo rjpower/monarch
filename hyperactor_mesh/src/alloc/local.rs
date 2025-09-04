@@ -60,6 +60,7 @@ impl Allocator for LocalAllocator {
 
 struct LocalProc {
     proc: Proc,
+    create_key: ShortUuid,
     addr: ChannelAddr,
     handle: MailboxServerHandle,
 }
@@ -193,10 +194,13 @@ impl Alloc for LocalAlloc {
                     // Undeliverable messages get forwarded to the mesh agent.
                     let handle = proc.clone().serve(proc_rx);
 
+                    let create_key = ShortUuid::generate();
+
                     self.procs.insert(
                         rank,
                         LocalProc {
                             proc,
+                            create_key: create_key.clone(),
                             addr: addr.clone(),
                             handle,
                         },
@@ -209,7 +213,6 @@ impl Alloc for LocalAlloc {
                             return None;
                         }
                     };
-                    let create_key = ShortUuid::generate();
                     let created = ProcState::Created {
                         create_key: create_key.clone(),
                         point,
@@ -240,7 +243,7 @@ impl Alloc for LocalAlloc {
                     }
                     break Some(ProcState::Stopped {
                         reason,
-                        proc_id: proc_to_stop.proc.proc_id().clone(),
+                        create_key: proc_to_stop.create_key.clone(),
                     });
                 }
                 Action::Stopped => break None,
