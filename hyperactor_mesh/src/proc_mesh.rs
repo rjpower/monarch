@@ -191,7 +191,7 @@ pub struct ProcMesh {
     event_state: Option<EventState>,
     actor_event_router: ActorEventRouter,
     shape: Shape,
-    ranks: Vec<(ProcId, (ChannelAddr, ActorRef<ProcMeshAgent>))>,
+    ranks: Vec<(ShortUuid, ProcId, ChannelAddr, ActorRef<ProcMeshAgent>)>,
     #[allow(dead_code)] // will be used in subsequent diff
     client_proc: Proc,
     client: Mailbox,
@@ -227,6 +227,7 @@ impl ProcMesh {
         C.get_or_init(|| AtomicUsize::new(0))
     }
 
+    #[hyperactor::observe_result("ProcMesh")]
     async fn allocate_boxed_inner(
         mut alloc: Box<dyn Alloc + Send + Sync>,
         loc: &'static Location<'static>,
@@ -413,10 +414,11 @@ impl ProcMesh {
                 .into_iter()
                 .map(
                     |AllocatedProc {
+                         create_key,
                          proc_id,
                          addr,
                          mesh_agent,
-                     }| (proc_id, (addr, mesh_agent)),
+                     }| (create_key, proc_id, addr, mesh_agent),
                 )
                 .collect(),
             client_proc,
@@ -488,7 +490,7 @@ impl ProcMesh {
     }
 
     fn agents(&self) -> impl Iterator<Item = ActorRef<ProcMeshAgent>> + '_ {
-        self.ranks.iter().map(|(_, (_, agent))| agent.clone())
+        self.ranks.iter().map(|(_, _, _, agent)| agent.clone())
     }
 
     /// Return the comm actor to which casts should be forwarded.
@@ -556,7 +558,9 @@ impl ProcMesh {
                 .ranks
                 .iter()
                 .enumerate()
-                .map(|(rank, (proc_id, _))| (proc_id.clone(), rank))
+                .map(|(rank, (create_key, proc_id, _addr, _mesh_agent))| {
+                    (proc_id.clone(), (rank, create_key.clone()))
+                })
                 .collect(),
             actor_event_router: self.actor_event_router.clone(),
         })
@@ -630,7 +634,8 @@ type ActorMeshName = String;
 // TODO: consider using streams for this.
 pub struct ProcEvents {
     event_state: EventState,
-    ranks: HashMap<ProcId, usize>,
+    // Proc id to its rank and create key.
+    ranks: HashMap<ProcId, (usize, ShortUuid)>,
     actor_event_router: ActorEventRouter,
 }
 
@@ -648,20 +653,20 @@ impl ProcEvents {
                         break None;
                     };
 
-                    let ProcState::Stopped { proc_id, reason } = alloc_event else {
+                    let ProcState::Stopped { create_key, reason } = alloc_event else {
                         // Ignore non-stopped events for now.
                         continue;
                     };
 
-                    let Some(rank) = self.ranks.get(&proc_id) else {
-                        tracing::warn!("received stop event for unmapped proc {}", proc_id);
+                    let Some((proc_id, (rank, _create_key))) = self.ranks.iter().find(|(proc_id, (_, key))| key == &create_key) else {
+                        tracing::warn!("received stop event for unmapped proc {}", create_key);
                         continue;
                     };
 
                     metrics::PROC_MESH_PROC_STOPPED.add(
                         1,
                         hyperactor_telemetry::kv_pairs!(
-                            "proc_id" => proc_id.to_string(),
+                            "create_key" => create_key.to_string(),
                             "rank" => rank.to_string(),
                             "reason" => reason.to_string(),
                         ),
@@ -760,7 +765,7 @@ impl ProcEvents {
                     // Ensure we have a known rank for the proc
                     // containing this actor. If we don't, we can't
                     // attribute the failure to a known process.
-                    let Some(rank) = self.ranks.get(actor_id.proc_id()) else {
+                    let Some((rank, _)) = self.ranks.get(actor_id.proc_id()) else {
                         tracing::warn!(
                             actor = %actor_id,
                             "proc supervision: actor belongs to an unmapped proc; dropping event"
@@ -853,7 +858,7 @@ impl Mesh for ProcMesh {
     }
 
     fn get(&self, rank: usize) -> Option<ProcId> {
-        Some(self.ranks[rank].0.clone())
+        Some(self.ranks[rank].1.clone())
     }
 
     fn id(&self) -> Self::Id {

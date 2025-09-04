@@ -124,7 +124,7 @@ pub struct ProcMeshAgent {
 }
 
 impl ProcMeshAgent {
-    #[hyperactor::observe("mesh_agent")]
+    #[hyperactor::observe_result("MeshAgent")]
     pub(crate) async fn bootstrap(
         proc_id: ProcId,
     ) -> Result<(Proc, ActorHandle<Self>), anyhow::Error> {
