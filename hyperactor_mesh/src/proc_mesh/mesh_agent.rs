@@ -43,11 +43,12 @@ use hyperactor::mailbox::MailboxClient;
 use hyperactor::mailbox::MailboxSender;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::Undeliverable;
-use hyperactor::observe;
 use hyperactor::proc::Proc;
 use hyperactor::supervision::ActorSupervisionEvent;
 use serde::Deserialize;
 use serde::Serialize;
+
+use crate::proc_mesh::SupervisionEventState;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Named)]
 pub enum GspawnResult {
@@ -125,7 +126,7 @@ pub struct MeshAgent {
 }
 
 impl MeshAgent {
-    #[hyperactor::observe("mesh_agent")]
+    #[hyperactor::observe_result("MeshAgent")]
     pub(crate) async fn bootstrap(
         proc_id: ProcId,
     ) -> Result<(Proc, ActorHandle<Self>), anyhow::Error> {
@@ -243,7 +244,11 @@ impl MeshAgentMessageHandler for MeshAgent {
         actor_id: ActorId,
         timeout_ms: u64,
     ) -> Result<StopActorResult, anyhow::Error> {
-        tracing::info!("Stopping actor: {}", actor_id);
+        tracing::info!(
+            name = "StopActor",
+            actor_id = %actor_id,
+            actor_name = actor_id.name(),
+        );
 
         if let Some(mut status) = self.proc.stop_actor(&actor_id) {
             match RealClock
@@ -273,6 +278,7 @@ impl Handler<ActorSupervisionEvent> for MeshAgent {
             supervisor.send(cx, event)?;
         } else {
             tracing::error!(
+                name = SupervisionEventState::SupervisionEventTransmitFailed.as_ref(),
                 "proc {}: could not propagate supervision event {:?}: crashing",
                 cx.self_id().proc_id(),
                 event

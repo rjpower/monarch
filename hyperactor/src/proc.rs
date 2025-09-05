@@ -51,7 +51,6 @@ use crate::Actor;
 use crate::ActorRef;
 use crate::Handler;
 use crate::Message;
-use crate::Named;
 use crate::RemoteMessage;
 use crate::accum::ReducerSpec;
 use crate::actor::ActorError;
@@ -448,7 +447,7 @@ impl Proc {
 
     /// Spawn a named (root) actor on this proc. The name of the actor must be
     /// unique.
-    #[hyperactor::observe("proc")]
+    #[hyperactor::observe_result("Proc")]
     pub async fn spawn<A: Actor>(
         &self,
         name: &str,
