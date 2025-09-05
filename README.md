@@ -10,30 +10,31 @@ actor messaging. It provides:
 
 Monarch code imperatively describes how to create processes and actors using a simple python API:
 
-    from monarch.actor import Actor, endpoint, this_host
+```python
+from monarch.actor import Actor, endpoint, this_host
 
-    # spawn 8 trainer processes one for each gpu
-    training_procs = this_host().spawn_procs({"gpus": 8})
-
-
-    # define the actor to run on each process
-    class Trainer(Actor):
-        @endpoint
-        def train(self, step: int): ...
+# spawn 8 trainer processes one for each gpu
+training_procs = this_host().spawn_procs({"gpus": 8})
 
 
-    # create the trainers
-    trainers = training_procs.spawn("trainers", Trainer)
-
-    # tell all the trainers to to take a step
-    fut = trainers.train.call(step=0)
-
-    # wait for all trainers to complete
-    fut.get()
+# define the actor to run on each process
+class Trainer(Actor):
+    @endpoint
+    def train(self, step: int): ...
 
 
+# create the trainers
+trainers = training_procs.spawn("trainers", Trainer)
 
-The [introduction to monarch concepts](getting_started.html) provides an introduction to using these features.
+# tell all the trainers to to take a step
+fut = trainers.train.call(step=0)
+
+# wait for all trainers to complete
+fut.get()
+```
+
+
+The [introduction to monarch concepts](https://meta-pytorch.org/monarch/generated/examples/getting_started.html) provides an introduction to using these features.
 
 > ⚠️ **Early Development Warning** Monarch is currently in an experimental
 > stage. You should expect bugs, incomplete features, and APIs that may change
@@ -42,17 +43,23 @@ The [introduction to monarch concepts](getting_started.html) provides an introdu
 > work. It's recommended that you signal your intention to contribute in the
 > issue tracker, either by filing a new issue or by claiming an existing one.
 
-Note: Monarch is currently only supported on Linux systems
-
 ## 📖 Documentation
 
 View Monarch's hosted documentation [at this link](https://meta-pytorch.org/monarch/).
 
 ## Installation
+Note for running distributed tensors, the local torch version must match the version that monarch was built with.
 
 ### On Fedora distributions
+## Stable
+`pip install torchmonarch`
 
+torchmonarch stable is built with the latest stable torch.
+
+## Nightly
 `pip install torchmonarch-nightly`
+
+torchmonarch-nightly is built with torch nightly.
 
 or manually
 
