@@ -958,17 +958,16 @@ class _Actor:
         )
 
         if _post_mortem_enabled():
-            with fake_sync_state():
-                ctx = context()
-                msg_rank = ctx.message_rank
-                pdb_wrapper = PdbWrapper(
-                    msg_rank.rank,
-                    {k: msg_rank[k] for k in msg_rank},
-                    ctx.actor_instance.actor_id,
-                    debug_controller(),
-                )
-                DebugContext.set(DebugContext(pdb_wrapper))
-                pdb_wrapper.post_mortem(exc_tb)
+            ctx = context()
+            msg_rank = ctx.message_rank
+            pdb_wrapper = PdbWrapper(
+                msg_rank.rank,
+                {k: msg_rank[k] for k in msg_rank},
+                ctx.actor_instance.actor_id,
+                debug_controller(),
+            )
+            DebugContext.set(DebugContext(pdb_wrapper))
+            pdb_wrapper.post_mortem(exc_tb)
         self._maybe_exit_debugger(do_continue=False)
 
     def _handle_undeliverable_message(
