@@ -6,6 +6,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use futures::Future;
 use futures::future;
 use ndslice::view;
 use ndslice::view::Region;
