@@ -286,16 +286,15 @@ impl MessageEnvelope {
     ) {
         tracing::error!(
             name = "undelivered_message_attempt",
-            actor_id = self.sender.to_string(),
-            "message not delivered to {}, {}",
-            self.dest.actor_id().name(),
-            error.to_string(),
+            sender = self.sender.to_string(),
+            dest = self.dest.actor_id().to_string(),
+            error = error.to_string(),
         );
         metrics::MAILBOX_UNDELIVERABLE_MESSAGES.add(
             1,
             hyperactor_telemetry::kv_pairs!(
-                "actor_id" => self.sender.to_string(),
-                "dest_actor_id" => self.dest.0.to_string(),
+                "sender_actor_id" => self.sender.to_string(),
+                "dest_actor_id" => self.dest.to_string(),
                 "message_type" => self.data.typename().unwrap_or("unknown"),
                 "error_type" =>  error.to_string(),
             ),
