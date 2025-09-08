@@ -143,7 +143,7 @@ pub fn global_root_client() -> &'static Instance<()> {
     let (instance, _) = GLOBAL_INSTANCE.get_or_init(|| {
         let world_id = WorldId(ShortUuid::generate().to_string());
         let client_proc_id = ProcId::Ranked(world_id.clone(), 0);
-        let client_proc = Proc::new(client_proc_id.clone(), router::global().clone().boxed());
+        let client_proc = Proc::new(client_proc_id.clone(), router::global().boxed());
         router::global().bind(world_id.clone().into(), client_proc.clone());
 
         let (client, handle) = client_proc
@@ -256,7 +256,8 @@ impl ProcMesh {
             .await?;
 
         // 2. Set up routing to the initialized procs; these require dialing.
-        let router = DialMailboxRouter::new();
+        // let router = DialMailboxRouter::new();
+        let router = DialMailboxRouter::new_with_default(router::global().boxed());
         for AllocatedProc { proc_id, addr, .. } in running.iter() {
             if proc_id.is_direct() {
                 continue;
@@ -268,7 +269,7 @@ impl ProcMesh {
         //    to it, and communicate with the agents. We wire it into the same router as
         //    everything else, so now the whole mesh should be able to communicate.
         let client_proc_id =
-            ProcId::Ranked(WorldId(format!("{}_manager", alloc.world_id().name())), 0);
+            ProcId::Ranked(WorldId(format!("{}_client", alloc.world_id().name())), 0);
         let (client_proc_addr, client_rx) = channel::serve(ChannelAddr::any(alloc.transport()))
             .await
             .map_err(|err| AllocatorError::Other(err.into()))?;
@@ -334,11 +335,11 @@ impl ProcMesh {
             },
         );
 
-        // Ensure that the global router is served so that agents may reach us.
-        let router_channel_addr = router::global()
-            .serve(&alloc.transport())
+        // Ensure that the router is served so that agents may reach us.
+        let (router_channel_addr, router_rx) = channel::serve(ChannelAddr::any(alloc.transport()))
             .await
             .map_err(|err| AllocatorError::Other(err.into()))?;
+        router.serve(router_rx);
         tracing::info!("router channel started listening on addr: {router_channel_addr}");
 
         // 6. Configure the mesh agents. This transmits the address book to all agents,
