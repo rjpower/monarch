@@ -52,6 +52,8 @@ class TestMockCuda(TestCase):
             self.assertFalse(torch.equal((x @ y).cpu(), true_output))
 
     def test_simple_forward_backward(self):
+        # Make sure that any side-effects from importing mock_cuda are applied here too:
+        mock_cuda()
         # This test just makes sure that the forward and backward pass work
         # and don't crash.
         simple_forward_backward("cuda")
