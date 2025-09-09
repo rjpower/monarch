@@ -42,13 +42,13 @@ from monarch._src.actor.debugger.debug_session import (
     DebugSessionInfo,
     DebugSessions,
 )
-from monarch._src.actor.debugger.env import (
-    _MONARCH_DEBUG_SERVER_HOST_ENV_VAR,
-    _MONARCH_DEBUG_SERVER_PORT_ENV_VAR,
-)
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.proc_mesh import proc_mesh
 from monarch._src.actor.source_loader import SourceLoaderController
+from monarch.tools.debug_env import (
+    _MONARCH_DEBUG_SERVER_HOST_ENV_VAR,
+    _MONARCH_DEBUG_SERVER_PORT_ENV_VAR,
+)
 
 from pyre_extensions import none_throws
 

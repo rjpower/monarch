@@ -31,15 +31,15 @@ from monarch._src.actor.debugger.debug_session import (
     DebugSessionInfo,
     DebugSessions,
 )
-from monarch._src.actor.debugger.env import (
-    _get_debug_server_host,
-    _get_debug_server_port,
-    _get_debug_server_protocol,
-)
 from monarch._src.actor.debugger.pdb_wrapper import DebuggerWrite
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.proc_mesh import get_or_spawn_controller
 from monarch._src.actor.sync_state import fake_sync_state
+from monarch.tools.debug_env import (
+    _get_debug_server_host,
+    _get_debug_server_port,
+    _get_debug_server_protocol,
+)
 from pyre_extensions import none_throws
 from tabulate import tabulate
 
