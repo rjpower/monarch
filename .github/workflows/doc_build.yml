@@ -66,10 +66,7 @@ jobs:
         cd docs
 
         make clean
-        make html SPHINXOPTS="-v --keep-going" || {
-            echo "WARNING: Sphinx build had issues. Running diagnostics..."
-            ../scripts/handle_sphinx_errors.sh
-        }
+        make html SPHINXOPTS="-v --keep-going"
 
         cd ..
 
