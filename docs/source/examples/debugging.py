@@ -87,11 +87,11 @@ if __name__ == "__main__":
 # %%
 # Using the Monarch Debugger
 # ---------------------------
-# To access the debugger, from a separate terminal, run:
+# To access the debugger, from a separate terminal with conda activated and monarch installed, run:
 #
 # .. code-block:: sh
 #
-#     python -m monarch.debug_cli
+#     monarch debug
 #
 # There are two optional flags:
 #
