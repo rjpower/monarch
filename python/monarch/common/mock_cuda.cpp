@@ -58,8 +58,10 @@ std::optional<void*> extractJumpTarget(
   const uint8_t jmpq[] = {0xFF, 0x25};
   const uint8_t movzbl_sil_esi[] = {0x40, 0x0f, 0xb6, 0xf6};
   if (std::memcmp(functionBytes, expectedOpcode, sizeof(expectedOpcode)) != 0) {
-    std::cerr << nameStr << "Unexpected opcode: " << std::hex
-              << *(uint16_t*)functionBytes << std::endl;
+    for (int i = 0; i < 16; i++) {
+      std::cerr << nameStr << "Unexpected opcode: " << std::hex
+                << *(uint8_t*)(functionBytes + i) << std::endl;
+    }
     return std::nullopt;
   }
   if (std::memcmp(
