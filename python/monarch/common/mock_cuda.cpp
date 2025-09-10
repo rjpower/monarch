@@ -72,7 +72,7 @@ std::optional<void*> extractJumpTarget(
     std::cerr << std::endl;
   }
 
-  const uint8_t expectedOpcode[] = {0x80, 0x3D};
+  const uint8_t expectedOpcode[] = {0x81, 0x3D};
   const uint8_t expectedImmediateValue[] = {0x00, 0xBA, 0x1C, 0x32};
   const uint8_t jmpq[] = {0xFF, 0x25};
   const uint8_t movzbl_sil_esi[] = {0x40, 0x0f, 0xb6, 0xf6};
