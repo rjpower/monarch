@@ -53,7 +53,9 @@ std::optional<void*> extractJumpTarget(const uint8_t* functionBytes) {
   // push %rbp       # 0x55
   // mov %rsp, %rbp  # 0x48 0x89 0xe5
   // push %rsp       # 0x65 0x54
-  const uint8_t framePointerPrelude[] = {0x55, 0x48, 0x89, 0xe5, 0x65, 0x54};
+  // sub $0x8, %rsp  # 0x48 0x83 0xec 0x8
+  const uint8_t framePointerPrelude[] = {
+      0x55, 0x48, 0x89, 0xe5, 0x65, 0x54, 0x48, 0x83, 0xec, 0x8};
   uint8_t* functionBytesStart = (uint8_t*)functionBytes;
   if (std::memcmp(
           functionBytes, framePointerPrelude, sizeof(framePointerPrelude)) ==
