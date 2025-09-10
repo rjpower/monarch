@@ -47,9 +47,8 @@ pub use shape::Shape;
 /// Errors that can occur during shape construction or validation.
 pub use shape::ShapeError;
 
-/// Property-based generators for randomized test input. TODO: Move
-/// into dedicated crate and access via
-// `test_deps`.
+/// Property-based generators for randomized test input.
+#[cfg(test)]
 pub mod strategy;
 
 /// Utilities.

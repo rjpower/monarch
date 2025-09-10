@@ -20,8 +20,9 @@
 //! Example usage:
 //!
 //! ```
-//! use ndslice::strategy::gen_selection;
 //! use proptest::prelude::*;
+//!
+//! use crate::selection::strategy::gen_selection;
 //!
 //! proptest! {
 //!     #[test]
@@ -30,6 +31,8 @@
 //!     }
 //! }
 //! ```
+//!
+//! This module is only included in test builds (`#[cfg(test)]`).
 
 use proptest::prelude::*;
 
@@ -60,8 +63,9 @@ use crate::view::Region;
 /// # Example
 ///
 /// ```
-/// use ndslice::strategy::gen_slice;
 /// use proptest::prelude::*;
+///
+/// use crate::selection::strategy::gen_slice;
 ///
 /// proptest! {
 ///     #[test]
@@ -344,7 +348,6 @@ pub fn gen_selection(depth: u32, shape: Vec<usize>, dim: usize) -> BoxedStrategy
     .boxed()
 }
 
-#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::collections::HashSet;
