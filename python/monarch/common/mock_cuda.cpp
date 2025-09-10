@@ -9,6 +9,7 @@
 // @lint-ignore-every CLANGSECURITY facebook-security-vulnerable-memcpy
 // @lint-ignore-every CLANGTIDY clang-diagnostic-unused-parameter
 #include <Python.h>
+#include <iostream>
 #include <optional>
 #include <unordered_set>
 #ifdef MONARCH_CUDA_INSPECT
@@ -47,18 +48,26 @@ namespace {
 
 // This function extracts the address of the table entry for a function (e.g.
 // 0x7ffff7d0f150 above)
-std::optional<void*> extractJumpTarget(const uint8_t* functionBytes) {
+std::optional<void*> extractJumpTarget(
+    const char* name,
+    const uint8_t* functionBytes) {
+  std::string nameStr(name);
+  nameStr = "(" + nameStr + ") ";
   const uint8_t expectedOpcode[] = {0x81, 0x3D};
   const uint8_t expectedImmediateValue[] = {0x00, 0xBA, 0x1C, 0x32};
   const uint8_t jmpq[] = {0xFF, 0x25};
   const uint8_t movzbl_sil_esi[] = {0x40, 0x0f, 0xb6, 0xf6};
   if (std::memcmp(functionBytes, expectedOpcode, sizeof(expectedOpcode)) != 0) {
+    std::cerr << nameStr << "Unexpected opcode: " << std::hex
+              << *(uint16_t*)functionBytes << std::endl;
     return std::nullopt;
   }
   if (std::memcmp(
           functionBytes + 6,
           expectedImmediateValue,
           sizeof(expectedImmediateValue)) != 0) {
+    std::cerr << nameStr << "Unexpected immediate value: " << std::hex
+              << *(uint32_t*)(functionBytes + 6) << std::endl;
     return std::nullopt;
   }
 
@@ -70,6 +79,8 @@ std::optional<void*> extractJumpTarget(const uint8_t* functionBytes) {
     // but the operation is idempotent.
     if (std::memcmp(
             functionBytes + 12, movzbl_sil_esi, sizeof(movzbl_sil_esi)) != 0) {
+      std::cerr << nameStr << "Unexpected movzbl: " << std::hex
+                << *(uint32_t*)(functionBytes + 12) << std::endl;
       return std::nullopt;
     }
     jmpqOffset += sizeof(movzbl_sil_esi);
@@ -88,9 +99,10 @@ std::optional<void*> extractJumpTarget(const uint8_t* functionBytes) {
 
 // This function swaps the jump target with our own replacement,
 // Returning the (real) original function.
-std::optional<void*> swapJumpTarget(void* functionAddr, void* newTarget) {
+std::optional<void*>
+swapJumpTarget(const char* name, void* functionAddr, void* newTarget) {
   uint8_t* functionBytes = (uint8_t*)functionAddr;
-  auto targetAddressOpt = extractJumpTarget(functionBytes);
+  auto targetAddressOpt = extractJumpTarget(name, functionBytes);
   if (!targetAddressOpt) {
     return std::nullopt;
   }
@@ -445,7 +457,7 @@ void doPatch(const char* name, void** realFns, void* toPatch, void** ourFns) {
   patched.emplace(toPatch);
   for (size_t i = 0; i < MAX_VERSIONS; ++i) {
     if (realFns[i] == nullptr) {
-      realFns[i] = swapJumpTarget(toPatch, ourFns[i]).value();
+      realFns[i] = swapJumpTarget(name, toPatch, ourFns[i]).value();
       return;
     }
   }
