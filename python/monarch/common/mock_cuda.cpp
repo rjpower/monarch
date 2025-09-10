@@ -54,22 +54,25 @@ std::optional<void*> extractJumpTarget(
   std::string nameStr(name);
   nameStr = "(" + nameStr + ") ";
 
+  for (int i = 0; i < 32; ++i) {
+    std::cerr << std::showbase << std::hex << (uint32_t) * (functionBytes + i)
+              << " ";
+  }
+  std::cerr << std::endl;
+
   // If the library was compiled without -fomit-frame-pointer, the first
   // instructions will be:
   // push %rbp       # 0x55
   // mov %rsp, %rbp  # 0x48 0x89 0xe5
   // push %rsp       # 0x65 0x54
-  const uint8_t framePointerPrelude[] = {0x55, 0x48, 0x89, 0xe5, 0x65, 0x54};
+  // sub $0x8, %rsp  # 0x48 0x83 0xec 0x8
+  const uint8_t framePointerPrelude[] = {
+      0x55, 0x48, 0x89, 0xe5, 0x65, 0x54, 0x48, 0x83, 0xec, 0x8};
   uint8_t* functionBytesStart = (uint8_t*)functionBytes;
   if (std::memcmp(
           functionBytes, framePointerPrelude, sizeof(framePointerPrelude)) ==
       0) {
     functionBytesStart += sizeof(framePointerPrelude);
-    for (int i = 0; i < 32; ++i) {
-      std::cerr << std::showbase << std::hex << (uint32_t) * (functionBytes + i)
-                << " ";
-    }
-    std::cerr << std::endl;
   }
 
   const uint8_t expectedOpcode[] = {0x81, 0x3D};
