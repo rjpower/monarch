@@ -8,6 +8,7 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -34,11 +35,12 @@ use serde::Deserialize;
 use serde::Serialize;
 
 #[pyclass(
-    frozen,
     name = "WorkspaceLocation",
-    module = "monarch._rust_bindings.monarch_extension.code_sync"
+    module = "monarch._rust_bindings.monarch_extension.code_sync",
+    eq,
+    frozen
 )]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum PyWorkspaceLocation {
     Constant(PathBuf),
     FromEnvVar { env: String, relpath: PathBuf },
@@ -77,14 +79,20 @@ impl PyWorkspaceLocation {
         loc.resolve()
             .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))
     }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
+    }
 }
 
 #[pyclass(
-    frozen,
     name = "WorkspaceShape",
-    module = "monarch._rust_bindings.monarch_extension.code_sync"
+    module = "monarch._rust_bindings.monarch_extension.code_sync",
+    eq,
+    frozen,
+    get_all
 )]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct PyWorkspaceShape {
     dimension: Option<String>,
 }
@@ -102,10 +110,19 @@ impl PyWorkspaceShape {
     fn exclusive() -> Self {
         Self { dimension: None }
     }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
+    }
 }
 
-#[pyclass(frozen, module = "monarch._rust_bindings.monarch_extension.code_sync")]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[pyclass(
+    module = "monarch._rust_bindings.monarch_extension.code_sync",
+    eq,
+    frozen,
+    get_all
+)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct RemoteWorkspace {
     location: PyWorkspaceLocation,
     shape: PyWorkspaceShape,
@@ -118,24 +135,38 @@ impl RemoteWorkspace {
     fn new(location: PyWorkspaceLocation, shape: PyWorkspaceShape) -> Self {
         Self { location, shape }
     }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
+    }
 }
 
 #[pyclass(
-    frozen,
     name = "CodeSyncMethod",
-    module = "monarch._rust_bindings.monarch_extension.code_sync"
+    module = "monarch._rust_bindings.monarch_extension.code_sync",
+    eq,
+    frozen
 )]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum PyCodeSyncMethod {
-    Rsync,
-    CondaSync,
+    Rsync {},
+    CondaSync {
+        path_prefix_replacements: HashMap<PathBuf, PyWorkspaceLocation>,
+    },
 }
 
 impl From<PyCodeSyncMethod> for CodeSyncMethod {
     fn from(method: PyCodeSyncMethod) -> CodeSyncMethod {
         match method {
-            PyCodeSyncMethod::Rsync => CodeSyncMethod::Rsync,
-            PyCodeSyncMethod::CondaSync => CodeSyncMethod::CondaSync,
+            PyCodeSyncMethod::Rsync {} => CodeSyncMethod::Rsync,
+            PyCodeSyncMethod::CondaSync {
+                path_prefix_replacements,
+            } => CodeSyncMethod::CondaSync {
+                path_prefix_replacements: path_prefix_replacements
+                    .into_iter()
+                    .map(|(l, r)| (l, r.into()))
+                    .collect(),
+            },
         }
     }
 }
@@ -156,14 +187,20 @@ impl PyCodeSyncMethod {
         let py_bytes = PyBytes::new(slf.py(), &bytes);
         Ok((slf.as_any().getattr("from_bytes")?, (py_bytes,)))
     }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
+    }
 }
 
 #[pyclass(
-    frozen,
     name = "WorkspaceConfig",
-    module = "monarch._rust_bindings.monarch_extension.code_sync"
+    module = "monarch._rust_bindings.monarch_extension.code_sync",
+    eq,
+    frozen,
+    get_all
 )]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct PyWorkspaceConfig {
     local: PathBuf,
     remote: RemoteWorkspace,
@@ -173,13 +210,17 @@ struct PyWorkspaceConfig {
 #[pymethods]
 impl PyWorkspaceConfig {
     #[new]
-    #[pyo3(signature = (*, local, remote, method = PyCodeSyncMethod::Rsync))]
+    #[pyo3(signature = (*, local, remote, method = PyCodeSyncMethod::Rsync {}))]
     fn new(local: PathBuf, remote: RemoteWorkspace, method: PyCodeSyncMethod) -> Self {
         Self {
             local,
             remote,
             method,
         }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
     }
 }
 
@@ -231,7 +272,7 @@ impl CodeSyncMeshClient {
         })?
     }
 
-    #[pyo3(signature = (*, local, remote, method = PyCodeSyncMethod::Rsync, auto_reload = false))]
+    #[pyo3(signature = (*, local, remote, method = PyCodeSyncMethod::Rsync {}, auto_reload = false))]
     fn sync_workspace<'py>(
         &self,
         py: Python<'py>,

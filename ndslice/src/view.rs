@@ -36,6 +36,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::Range;
+use crate::Shape; // exclusively for `impl From<Shape> for Extent`
 use crate::Slice;
 use crate::SliceError;
 use crate::SliceIterator;
@@ -86,6 +87,19 @@ where
 struct ExtentData {
     labels: Vec<String>,
     sizes: Vec<usize>,
+}
+
+impl From<&Shape> for Extent {
+    fn from(s: &Shape) -> Self {
+        // Safe: Shape guarantees labels.len() == sizes.len().
+        Extent::new(s.labels().to_vec(), s.slice().sizes().to_vec()).unwrap()
+    }
+}
+
+impl From<Shape> for Extent {
+    fn from(s: Shape) -> Self {
+        Extent::from(&s)
+    }
 }
 
 impl Extent {
@@ -1060,6 +1074,229 @@ impl std::str::FromStr for Region {
     }
 }
 
+/// Dense builder: constructs a mesh from a complete sequence of
+/// values in the canonical order for `region`.
+///
+/// # Semantics
+/// - Input must contain exactly `region.num_ranks()` items.
+/// - Values must be in the same order as `region.slice().iter()`
+///   (i.e., the order observed by `ViewExt::values()`).
+///
+/// # Errors
+/// Returns [`Self::Error`] if `values.len() != region.num_ranks()`.
+///
+/// See also: [`BuildFromRegionIndexed`]
+pub trait BuildFromRegion<T>: Sized {
+    type Error;
+
+    /// Validates cardinality/shape and constructs a mesh.
+    fn build_dense(region: Region, values: Vec<T>) -> Result<Self, Self::Error>;
+
+    /// Caller guarantees correct cardinality/order; no validation.
+    fn build_dense_unchecked(region: Region, values: Vec<T>) -> Self;
+}
+
+/// Indexed builder: constructs a mesh from sparse `(rank, value)`
+/// pairs.
+///
+/// # Semantics
+/// - Every rank in `0..region.num_ranks()` must be provided at least
+///   once.
+/// - Out-of-bounds ranks (`rank >= num_ranks()`) cause an error.
+/// - Missing ranks cause an error.
+/// - Duplicate ranks are allowed; the **last write wins**.
+///
+/// # Errors
+/// Returns [`Self::Error`] if coverage is incomplete or a rank is out
+/// of bounds.
+pub trait BuildFromRegionIndexed<T>: Sized {
+    type Error;
+
+    /// Validates coverage and bounds, and constructs a mesh from
+    /// `(rank, value)` pairs.
+    fn build_indexed(
+        region: Region,
+        pairs: impl IntoIterator<Item = (usize, T)>,
+    ) -> Result<Self, Self::Error>;
+}
+
+/// Mesh-aware collecting adapter.
+///
+/// Unlike `FromIterator`, this trait takes both an iterator *and* a
+/// [`Region`] to build a mesh:
+///
+/// - Meshes always require a shape (`Region`) supplied externally.
+/// - Cardinality must match: the iterator must yield exactly
+///   `region.num_ranks()` items, or an error is returned.
+/// - Construction goes through [`BuildFromRegion`], which validates
+///   and builds the concrete mesh type.
+///
+/// In short: `collect_mesh` does for meshes what `collect` does for
+/// ordinary collections, but with shape-awareness and validation.
+pub trait CollectMeshExt<T>: Iterator<Item = T> + Sized {
+    fn collect_mesh<M>(self, region: Region) -> Result<M, M::Error>
+    where
+        M: BuildFromRegion<T>;
+}
+
+/// Blanket impl: enables `.collect_mesh(region)` on any iterator of
+/// `T`.
+impl<I, T> CollectMeshExt<T> for I
+where
+    I: Iterator<Item = T> + Sized,
+{
+    fn collect_mesh<M>(self, region: Region) -> Result<M, M::Error>
+    where
+        M: BuildFromRegion<T>,
+    {
+        M::build_dense(region, self.collect())
+    }
+}
+
+/// A canonical cardinality mismatch descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidCardinality {
+    pub expected: usize,
+    pub actual: usize,
+}
+
+/// Exact-size, mesh-aware collecting adapter.
+///
+/// Like [`CollectMeshExt`], but for `ExactSizeIterator`. Performs a
+/// `len()` pre-check to fail fast (no allocation) when `len() !=
+/// region.num_ranks()`. On success, constructs `M` without
+/// re-validating cardinality.
+pub trait CollectExactMeshExt<T>: ExactSizeIterator<Item = T> + Sized {
+    fn collect_exact_mesh<M>(self, region: Region) -> Result<M, M::Error>
+    where
+        M: BuildFromRegion<T>,
+        M::Error: From<InvalidCardinality>;
+}
+
+/// Blanket impl: enables `.collect_exact_mesh(region)` on any
+/// `ExactSizeIterator` of `T`.
+impl<I, T> CollectExactMeshExt<T> for I
+where
+    I: ExactSizeIterator<Item = T> + Sized,
+{
+    fn collect_exact_mesh<M>(self, region: Region) -> Result<M, M::Error>
+    where
+        M: BuildFromRegion<T>,
+        M::Error: From<InvalidCardinality>,
+    {
+        let expected = region.num_ranks();
+        let actual = self.len();
+        if actual != expected {
+            return Err(M::Error::from(InvalidCardinality { expected, actual }));
+        }
+        Ok(M::build_dense_unchecked(region, self.collect()))
+    }
+}
+
+/// Indexed collecting adapter.
+///
+/// Consume `(rank, value)` pairs plus a [`Region`] and build a mesh
+/// via [`BuildFromRegionIndexed`].
+///
+/// # Semantics (recommended contract)
+/// Implementations of [`BuildFromRegionIndexed`] are expected to
+/// enforce:
+/// - **Coverage:** every rank in `0..region.num_ranks()` is provided
+///   at least once.
+/// - **Bounds:** any out-of-bounds rank (`rank >= num_ranks`) is an
+///   error.
+/// - **Duplicates:** allowed; **last write wins**.
+/// - **Missing ranks:** an error (incomplete coverage).
+///
+/// # Errors
+/// Propagates whatever [`BuildFromRegionIndexed::build_indexed`]
+/// returns (e.g., a cardinality/bounds error) from the target mesh
+/// type.
+///
+/// See also: [`BuildFromRegionIndexed`] for the authoritative policy.
+pub trait CollectIndexedMeshExt<T>: Iterator<Item = (usize, T)> + Sized {
+    fn collect_indexed<M>(self, region: Region) -> Result<M, M::Error>
+    where
+        M: BuildFromRegionIndexed<T>;
+}
+
+/// Blanket impl: enables `.collect_indexed(region)` on any iterator
+/// of `(usize, T)` pairs.
+impl<I, T> CollectIndexedMeshExt<T> for I
+where
+    I: Iterator<Item = (usize, T)> + Sized,
+{
+    #[inline]
+    fn collect_indexed<M>(self, region: Region) -> Result<M, M::Error>
+    where
+        M: BuildFromRegionIndexed<T>,
+    {
+        M::build_indexed(region, self)
+    }
+}
+
+/// Map-by-value into any mesh `M`.
+pub trait MapIntoExt: Ranked {
+    fn map_into<M, U>(&self, f: impl Fn(Self::Item) -> U) -> M
+    where
+        Self: Sized,
+        M: BuildFromRegion<U>,
+    {
+        let region = self.region().clone();
+        let n = region.num_ranks();
+        let values: Vec<U> = (0..n).map(|i| f(self.get(i).unwrap())).collect();
+        M::build_dense_unchecked(region, values)
+    }
+
+    fn try_map_into<M, U, E>(self, f: impl Fn(Self::Item) -> Result<U, E>) -> Result<M, E>
+    where
+        Self: Sized,
+        M: BuildFromRegion<U>,
+    {
+        let region = self.region().clone();
+        let n = region.num_ranks();
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            out.push(f(self.get(i).unwrap())?);
+        }
+        Ok(M::build_dense_unchecked(region, out))
+    }
+}
+
+/// Blanket impl: enables `.map_into(...)` and `.try_map_into`` on any
+/// `Ranked`.
+impl<T: Ranked> MapIntoExt for T {}
+
+/// Map-by-reference into any mesh `M` (no clone required).
+pub trait MapIntoRefExt: RankedRef {
+    fn map_into_ref<M, U>(&self, f: impl Fn(&Self::Item) -> U) -> M
+    where
+        M: BuildFromRegion<U>,
+    {
+        let region = self.region().clone();
+        let n = region.num_ranks();
+        let values: Vec<U> = (0..n).map(|i| f(self.get_ref(i).unwrap())).collect();
+        M::build_dense_unchecked(region, values)
+    }
+
+    fn try_map_into_ref<M, U, E>(&self, f: impl Fn(&Self::Item) -> Result<U, E>) -> Result<M, E>
+    where
+        M: BuildFromRegion<U>,
+    {
+        let region = self.region().clone();
+        let n = region.num_ranks();
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            out.push(f(self.get_ref(i).unwrap())?);
+        }
+        Ok(M::build_dense_unchecked(region, out))
+    }
+}
+
+/// Blanket impl: enables `.map_into_ref(...)` and
+/// `.try_map_into_ref(...)` on any `RankedRef`.
+impl<T: RankedRef> MapIntoRefExt for T {}
+
 /// A View is a collection of items in a space indexed by a [`Region`].
 pub trait View: Sized {
     /// The type of item in this view.
@@ -1157,6 +1394,12 @@ pub trait Ranked: Sized {
     /// `ranks.len() == region.num_ranks()` and that
     /// `region.is_subset(self.region())`.`
     fn sliced(&self, region: Region, ranks: impl Iterator<Item = Self::Item>) -> Self;
+}
+
+/// Access items by reference (no clone). Types that can expose
+/// internal storage implement this.
+pub trait RankedRef: Ranked {
+    fn get_ref(&self, rank: usize) -> Option<&Self::Item>;
 }
 
 impl<T: Ranked> View for T {
