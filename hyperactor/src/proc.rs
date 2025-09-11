@@ -1991,7 +1991,7 @@ mod tests {
     #[tokio::test]
     async fn test_actor_lookup() {
         let proc = Proc::local();
-        let client = proc.attach("client").unwrap();
+        let (client, _handle) = proc.instance("client").unwrap();
 
         let target_actor = proc.spawn::<TestActor>("target", ()).await.unwrap();
         let target_actor_ref = target_actor.bind();
@@ -2448,7 +2448,7 @@ mod tests {
         // be actor failure(s) in this test which trigger supervision.
         ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
-        let client = proc.attach("client").unwrap();
+        let (client, _handle) = proc.instance("client").unwrap();
         let actor_handle = proc.spawn::<TestActor>("test", ()).await.unwrap();
         actor_handle
             .panic(&client, "some random failure".to_string())
@@ -2738,7 +2738,7 @@ mod tests {
             // should cause the process to terminate.
             // ProcSupervisionCoordinator::set(&proc).await.unwrap();
             let root = proc.spawn::<TestActor>("root", ()).await.unwrap();
-            let client = proc.attach("client").unwrap();
+            let (client, _handle) = proc.instance("client").unwrap();
             root.fail(&client, anyhow::anyhow!("some random failure"))
                 .await
                 .unwrap();

@@ -24,6 +24,7 @@ pub use actor_mesh::ActorMeshRef;
 pub use host_mesh::HostMeshRef;
 use hyperactor::ActorId;
 use hyperactor::mailbox::MailboxSenderError;
+use ndslice::view;
 pub use proc_mesh::ProcMesh;
 pub use proc_mesh::ProcMeshRef;
 use serde::Deserialize;
@@ -99,6 +100,15 @@ impl From<hyperactor::mailbox::MailboxError> for Error {
 impl From<bincode::Error> for Error {
     fn from(e: bincode::Error) -> Self {
         Error::BincodeError(Box::new(e))
+    }
+}
+
+impl From<view::InvalidCardinality> for crate::v1::Error {
+    fn from(e: view::InvalidCardinality) -> Self {
+        crate::v1::Error::InvalidRankCardinality {
+            expected: e.expected,
+            actual: e.actual,
+        }
     }
 }
 

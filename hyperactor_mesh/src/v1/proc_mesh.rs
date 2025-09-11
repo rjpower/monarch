@@ -144,7 +144,7 @@ impl ProcMesh {
             )
             .collect();
 
-        let (config_handle, mut config_receiver) = mailbox::open_port(cx);
+        let (config_handle, mut config_receiver) = cx.mailbox().open_port();
         for (rank, AllocatedProc { mesh_agent, .. }) in running.iter().enumerate() {
             mesh_agent
                 .configure(
@@ -291,7 +291,7 @@ impl ProcMeshRef {
         let name = Name::new(name);
         let serialized_params = bincode::serialize(params)?;
 
-        let (completed_handle, mut completed_receiver) = mailbox::open_port(cx);
+        let (completed_handle, mut completed_receiver) = cx.mailbox().open_port();
         for proc_ref in self.ranks.iter() {
             proc_ref
                 .agent

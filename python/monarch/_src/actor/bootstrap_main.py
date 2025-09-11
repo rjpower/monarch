@@ -17,6 +17,12 @@ import multiprocessing
 import os
 import sys
 
+# Import torch to avoid import-time races if a spawned actor tries to import torch.
+try:
+    import torch  # @manual  # noqa: F401
+except ImportError:
+    pass
+
 
 async def main():
     from monarch._rust_bindings.monarch_hyperactor.bootstrap import bootstrap_main
@@ -32,7 +38,6 @@ def invoke_main():
     global bootstrap_main
 
     # TODO: figure out what from worker_main.py we should reproduce here.
-
     from monarch._src.actor.telemetry import TracingForwarder  # noqa
 
     if os.environ.get("MONARCH_ERROR_DURING_BOOTSTRAP_FOR_TESTING") == "1":
@@ -56,7 +61,7 @@ def invoke_main():
     except Exception as e:
         logging.warning(f"Failed to set up py-spy: {e}")
 
-    from monarch._src.actor.debugger.debugger import remote_breakpointhook
+    from monarch._src.actor.debugger.breakpoint import remote_breakpointhook
 
     sys.breakpointhook = remote_breakpointhook
 
