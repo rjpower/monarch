@@ -1046,17 +1046,17 @@ mod tests {
                 let actor_mesh: RootActorMesh<TestActor> = mesh.spawn("test", &()).await.unwrap();
                 let actor_ref = actor_mesh.get(0).unwrap();
                 let mut headers = Attrs::new();
-                set_cast_info_on_headers(&mut headers, 0, shape.clone(), mesh.client().actor_id().clone());
+                set_cast_info_on_headers(&mut headers, 0, shape.clone(), mesh.client().self_id().clone());
                 actor_ref.send_with_headers(mesh.client(), headers.clone(), GetRank(true, reply_port.clone())).unwrap();
                 assert_eq!(0, reply_port_receiver.recv().await.unwrap());
 
-                set_cast_info_on_headers(&mut headers, 1, shape.clone(), mesh.client().actor_id().clone());
+                set_cast_info_on_headers(&mut headers, 1, shape.clone(), mesh.client().self_id().clone());
                 actor_ref.port()
                     .send_with_headers(mesh.client(), headers.clone(), GetRank(true, reply_port.clone()))
                     .unwrap();
                 assert_eq!(1, reply_port_receiver.recv().await.unwrap());
 
-                set_cast_info_on_headers(&mut headers, 2, shape.clone(), mesh.client().actor_id().clone());
+                set_cast_info_on_headers(&mut headers, 2, shape.clone(), mesh.client().self_id().clone());
                 actor_ref.actor_id()
                     .port_id(GetRank::port())
                     .send_with_headers(
@@ -1077,6 +1077,8 @@ mod tests {
 
         #[tokio::test]
         async fn test_send_failure() {
+            hyperactor_telemetry::initialize_logging(hyperactor::clock::ClockKind::default());
+
             use hyperactor::test_utils::pingpong::PingPongActor;
             use hyperactor::test_utils::pingpong::PingPongActorParams;
             use hyperactor::test_utils::pingpong::PingPongMessage;
@@ -1103,7 +1105,7 @@ mod tests {
             let mut events = mesh.events().unwrap();
 
             let ping_pong_actor_params = PingPongActorParams::new(
-                Some(PortRef::attest_message_port(mesh.client().actor_id())),
+                Some(PortRef::attest_message_port(mesh.client().self_id())),
                 None,
             );
             let actor_mesh: RootActorMesh<PingPongActor> = mesh
@@ -1145,7 +1147,7 @@ mod tests {
             )
             .unwrap();
 
-            // The message will be returned!
+             // The message will be returned!
             assert_matches!(
                 events.next().await.unwrap(),
                 ProcEvent::Crashed(0, reason) if reason.contains("failed: message not delivered")
@@ -1236,7 +1238,7 @@ mod tests {
             let mesh = ProcMesh::allocate(alloc).await.unwrap();
 
             let ping_pong_actor_params = PingPongActorParams::new(
-                Some(PortRef::attest_message_port(mesh.client().actor_id())),
+                Some(PortRef::attest_message_port(mesh.client().self_id())),
                 None,
             );
             let mesh_one: RootActorMesh<PingPongActor> = mesh
@@ -1350,7 +1352,7 @@ mod tests {
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
-                proc_mesh.client().actor_id(),
+                proc_mesh.client().self_id(),
                 dest.port::<Payload>().port_id(),
                 &payload,
             );
@@ -1370,7 +1372,7 @@ mod tests {
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
-                proc_mesh.client().actor_id(),
+                proc_mesh.client().self_id(),
                 dest.port::<Payload>().port_id(),
                 &payload,
             );

@@ -128,7 +128,7 @@ impl RdmaBuffer {
         );
         let mut qp = self
             .owner
-            .request_queue_pair(client, remote.owner.clone())
+            .request_queue_pair_deprecated(client, remote.owner.clone())
             .await?;
 
         qp.put(self.clone(), remote)?;
@@ -163,7 +163,7 @@ impl RdmaBuffer {
         );
         let mut qp = self
             .owner
-            .request_queue_pair(client, remote.owner.clone())
+            .request_queue_pair_deprecated(client, remote.owner.clone())
             .await?;
         qp.get(self.clone(), remote)?;
         self.wait_for_completion(&mut qp, PollTarget::Send, timeout)
