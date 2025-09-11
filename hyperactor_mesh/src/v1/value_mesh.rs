@@ -99,114 +99,25 @@ impl<T: Clone + 'static> view::Ranked for ValueMesh<T> {
     }
 }
 
-// `FromIterator` cant't work for `ValueMesh`: it has no way to carry
-// the required `Region`, and it can't fail if the iterator length
-// mismatches. This trait provides a "mesh-aware" collect: consume an
-// iterator and a `Region`, and build a `ValueMesh<T>` with
-// cardinality validated.
-pub trait CollectMesh<T>: Iterator<Item = T> + Sized {
-    fn collect_mesh(self, region: view::Region) -> crate::v1::Result<ValueMesh<T>>;
-}
+impl<T> view::BuildFromRegion<T> for ValueMesh<T> {
+    type Error = crate::v1::Error;
 
-impl<I: Iterator<Item = T>, T> CollectMesh<T> for I {
-    /// Collects items into a `ValueMesh` for the given `region`.
-    ///
-    /// Delegates to `ValueMesh::new`, so the result is only returned
-    /// if the iterator yields exactly `region.num_ranks()` items.
-    fn collect_mesh(self, region: view::Region) -> crate::v1::Result<ValueMesh<T>> {
-        ValueMesh::new(region, self.collect())
+    fn build_dense(region: Region, values: Vec<T>) -> Result<Self, Self::Error> {
+        Self::new(region, values)
+    }
+
+    fn build_dense_unchecked(region: Region, values: Vec<T>) -> Self {
+        Self::new_unchecked(region, values)
     }
 }
 
-/// Like `CollectMesh`, but for `ExactSizeIterator`. Uses `len()` to
-/// pre-check cardinality and fail fast (no allocation) if `len() !=
-/// region.num_ranks()`. On success, builds a complete mesh.
-pub trait CollectExactMesh<T>: ExactSizeIterator<Item = T> + Sized {
-    fn collect_exact_mesh(self, region: view::Region) -> crate::v1::Result<ValueMesh<T>>;
-}
+impl<T> view::BuildFromRegionIndexed<T> for ValueMesh<T> {
+    type Error = crate::v1::Error;
 
-impl<I: ExactSizeIterator<Item = T>, T> CollectExactMesh<T> for I {
-    // Pre-check length via `len()` to fail fast before collecting.
-    fn collect_exact_mesh(self, region: view::Region) -> crate::v1::Result<ValueMesh<T>> {
-        let expected = region.num_ranks();
-        let actual = self.len();
-        if actual != expected {
-            return Err(crate::v1::Error::InvalidRankCardinality { expected, actual });
-        }
-        Ok(ValueMesh::new_unchecked(region, self.collect()))
-    }
-}
-
-/// Collect `(rank, value)` pairs into a `ValueMesh<T>` for `region`.
-///
-/// Validates that:
-/// - every rank `0..region.num_ranks()` is provided exactly once
-///   overall (coverage),
-/// - no pair has an out-of-bounds rank (`rank >= num_ranks()`).
-///
-/// Duplicates are allowed; the **last write wins**. Missing ranks or
-/// out-of-bound ranks return `InvalidRankCardinality`.
-pub trait TryCollectIndexedMesh<T>: Iterator<Item = (usize, T)> + Sized {
-    fn try_collect_indexed(self, region: view::Region) -> crate::v1::Result<ValueMesh<T>>;
-}
-
-impl<I: Iterator<Item = (usize, T)>, T> TryCollectIndexedMesh<T> for I {
-    fn try_collect_indexed(self, region: view::Region) -> crate::v1::Result<ValueMesh<T>> {
-        let n = region.num_ranks();
-
-        // Buffer for exactly n slots; fill by rank.
-        let mut buf: Vec<Option<T>> = std::iter::repeat_with(|| None).take(n).collect();
-        let mut filled = 0usize;
-
-        for (rank, value) in self {
-            if rank >= n {
-                // Out-of-bounds: report `expected` = n, `actual` =
-                // offending index + 1; i.e. number of ranks implied
-                // so far.
-                return Err(crate::v1::Error::InvalidRankCardinality {
-                    expected: n,
-                    actual: rank + 1,
-                });
-            }
-            if buf[rank].is_none() {
-                filled += 1;
-            }
-            buf[rank] = Some(value); // Last write wins.
-        }
-
-        if filled != n {
-            // Missing ranks: actual = number of distinct ranks seen.
-            return Err(crate::v1::Error::InvalidRankCardinality {
-                expected: n,
-                actual: filled,
-            });
-        }
-
-        // All present and in-bounds: unwrap and build unchecked.
-        let ranks: Vec<T> = buf.into_iter().map(Option::unwrap).collect();
-        Ok(ValueMesh::new_unchecked(region, ranks))
-    }
-}
-
-/// Optimized variant of [`TryCollectIndexedMesh`].
-///
-/// Collect `(rank, value)` pairs into a `ValueMesh<T>` for `region`,
-/// using a raw buffer (`MaybeUninit<T>`) plus a compact bitset
-/// instead of `Vec<Option<T>>`. This avoids per-element `Option`
-/// overhead and extra moves, which can be important when `T` is
-/// large.
-///
-/// Semantics are identical to the reference version:
-/// - every rank `0..region.num_ranks()` must be provided exactly
-///   once,
-/// - out-of-bounds ranks (`rank >= num_ranks()`) error,
-/// - duplicates are allowed, with **last write winning**.
-pub trait TryCollectIndexedMeshOpt<T>: Iterator<Item = (usize, T)> + Sized {
-    fn try_collect_indexed_opt(self, region: view::Region) -> crate::v1::Result<ValueMesh<T>>;
-}
-
-impl<I: Iterator<Item = (usize, T)>, T> TryCollectIndexedMeshOpt<T> for I {
-    fn try_collect_indexed_opt(self, region: view::Region) -> crate::v1::Result<ValueMesh<T>> {
+    fn build_indexed(
+        region: Region,
+        pairs: impl IntoIterator<Item = (usize, T)>,
+    ) -> Result<Self, Self::Error> {
         let n = region.num_ranks();
 
         // Allocate uninitialized buffer for T.
@@ -288,9 +199,9 @@ impl<I: Iterator<Item = (usize, T)>, T> TryCollectIndexedMeshOpt<T> for I {
             n,
         };
 
-        for (rank, value) in self {
+        for (rank, value) in pairs {
             if rank >= n {
-                // Out-of-bounds → error
+                // Out-of-bounds.
                 return Err(crate::v1::Error::InvalidRankCardinality {
                     expected: n,
                     actual: rank + 1,
@@ -348,19 +259,40 @@ impl<I: Iterator<Item = (usize, T)>, T> TryCollectIndexedMeshOpt<T> for I {
             Vec::from_raw_parts(ptr, len, cap)
         };
 
-        Ok(ValueMesh::new_unchecked(region, ranks))
+        Ok(Self::new_unchecked(region, ranks))
+    }
+}
+
+impl<T: Clone + 'static> view::RankedRef for ValueMesh<T> {
+    fn get_ref(&self, rank: usize) -> Option<&Self::Item> {
+        self.ranks.get(rank)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::RawWaker;
+    use std::task::RawWakerVTable;
+    use std::task::Waker;
 
     use futures::executor::block_on;
     use futures::future;
     use ndslice::extent;
+    use ndslice::strategy::gen_region;
+    use ndslice::view::CollectExactMeshExt;
+    use ndslice::view::CollectIndexedMeshExt;
+    use ndslice::view::CollectMeshExt;
+    use ndslice::view::MapIntoExt;
+    use ndslice::view::MapIntoRefExt;
     use ndslice::view::Ranked;
     use ndslice::view::ViewExt;
+    use proptest::prelude::*;
+    use proptest::strategy::ValueTree;
 
     use super::*;
 
@@ -425,7 +357,7 @@ mod tests {
     fn collect_mesh_ok() {
         let region: Region = extent!(x = 2, y = 3).into();
         let mesh = (0..6)
-            .collect_mesh(region.clone())
+            .collect_mesh::<ValueMesh<_>>(region.clone())
             .expect("collect_mesh should succeed");
 
         assert_eq!(mesh.region().num_ranks(), 6);
@@ -435,7 +367,7 @@ mod tests {
     #[test]
     fn collect_mesh_len_too_short_is_error() {
         let region: Region = extent!(x = 2, y = 3).into();
-        let err = (0..5).collect_mesh(region).unwrap_err();
+        let err = (0..5).collect_mesh::<ValueMesh<_>>(region).unwrap_err();
 
         match err {
             crate::v1::Error::InvalidRankCardinality { expected, actual } => {
@@ -449,7 +381,7 @@ mod tests {
     #[test]
     fn collect_mesh_len_too_long_is_error() {
         let region: Region = extent!(x = 2, y = 3).into();
-        let err = (0..7).collect_mesh(region).unwrap_err();
+        let err = (0..7).collect_mesh::<ValueMesh<_>>(region).unwrap_err();
         match err {
             crate::v1::Error::InvalidRankCardinality { expected, actual } => {
                 assert_eq!(expected, 6);
@@ -462,7 +394,10 @@ mod tests {
     #[test]
     fn collect_mesh_from_map_pipeline() {
         let region: Region = extent!(x = 2, y = 2).into();
-        let mesh = (0..4).map(|i| i * 10).collect_mesh(region.clone()).unwrap();
+        let mesh = (0..4)
+            .map(|i| i * 10)
+            .collect_mesh::<ValueMesh<_>>(region.clone())
+            .unwrap();
 
         assert_eq!(mesh.region().num_ranks(), 4);
         assert_eq!(mesh.values().collect::<Vec<_>>(), vec![0, 10, 20, 30]);
@@ -472,7 +407,7 @@ mod tests {
     fn collect_exact_mesh_ok() {
         let region: Region = extent!(x = 2, y = 3).into();
         let mesh = (0..6)
-            .collect_exact_mesh(region.clone())
+            .collect_exact_mesh::<ValueMesh<_>>(region.clone())
             .expect("collect_exact_mesh should succeed");
 
         assert_eq!(mesh.region().num_ranks(), 6);
@@ -482,7 +417,9 @@ mod tests {
     #[test]
     fn collect_exact_mesh_len_too_short_is_error() {
         let region: Region = extent!(x = 2, y = 3).into();
-        let err = (0..5).collect_exact_mesh(region).unwrap_err();
+        let err = (0..5)
+            .collect_exact_mesh::<ValueMesh<_>>(region)
+            .unwrap_err();
 
         match err {
             crate::v1::Error::InvalidRankCardinality { expected, actual } => {
@@ -496,7 +433,9 @@ mod tests {
     #[test]
     fn collect_exact_mesh_len_too_long_is_error() {
         let region: Region = extent!(x = 2, y = 3).into();
-        let err = (0..7).collect_exact_mesh(region).unwrap_err();
+        let err = (0..7)
+            .collect_exact_mesh::<ValueMesh<_>>(region)
+            .unwrap_err();
 
         match err {
             crate::v1::Error::InvalidRankCardinality { expected, actual } => {
@@ -512,7 +451,7 @@ mod tests {
         let region: Region = extent!(x = 2, y = 2).into();
         let mesh = (0..4)
             .map(|i| i * 10)
-            .collect_exact_mesh(region.clone())
+            .collect_exact_mesh::<ValueMesh<_>>(region.clone())
             .unwrap();
 
         assert_eq!(mesh.region().num_ranks(), 4);
@@ -520,13 +459,13 @@ mod tests {
     }
 
     #[test]
-    fn try_collect_indexed_ok_shuffled() {
+    fn collect_indexed_ok_shuffled() {
         let region: Region = extent!(x = 2, y = 3).into();
         // (rank, value) in shuffled order; values = rank * 10
         let pairs = vec![(3, 30), (0, 0), (5, 50), (2, 20), (1, 10), (4, 40)];
         let mesh = pairs
             .into_iter()
-            .try_collect_indexed(region.clone())
+            .collect_indexed::<ValueMesh<_>>(region.clone())
             .unwrap();
 
         assert_eq!(mesh.region().num_ranks(), 6);
@@ -537,11 +476,14 @@ mod tests {
     }
 
     #[test]
-    fn try_collect_indexed_missing_rank_is_error() {
+    fn collect_indexed_missing_rank_is_error() {
         let region: Region = extent!(x = 2, y = 2).into(); // 4
         // Missing rank 3
         let pairs = vec![(0, 100), (1, 101), (2, 102)];
-        let err = pairs.into_iter().try_collect_indexed(region).unwrap_err();
+        let err = pairs
+            .into_iter()
+            .collect_indexed::<ValueMesh<_>>(region)
+            .unwrap_err();
 
         match err {
             crate::v1::Error::InvalidRankCardinality { expected, actual } => {
@@ -553,10 +495,13 @@ mod tests {
     }
 
     #[test]
-    fn try_collect_indexed_out_of_bounds_is_error() {
+    fn collect_indexed_out_of_bounds_is_error() {
         let region: Region = extent!(x = 2, y = 2).into(); // 4 (valid ranks 0..=3)
         let pairs = vec![(0, 1), (4, 9)]; // 4 is out-of-bounds
-        let err = pairs.into_iter().try_collect_indexed(region).unwrap_err();
+        let err = pairs
+            .into_iter()
+            .collect_indexed::<ValueMesh<_>>(region)
+            .unwrap_err();
 
         match err {
             crate::v1::Error::InvalidRankCardinality { expected, actual } => {
@@ -568,81 +513,316 @@ mod tests {
     }
 
     #[test]
-    fn try_collect_indexed_duplicate_last_write_wins() {
+    fn collect_indexed_duplicate_last_write_wins() {
         let region: Region = extent!(x = 1, y = 3).into(); // 3
         // rank 1 appears twice; last value should stick
         let pairs = vec![(0, 7), (1, 8), (1, 88), (2, 9)];
         let mesh = pairs
             .into_iter()
-            .try_collect_indexed(region.clone())
+            .collect_indexed::<ValueMesh<_>>(region.clone())
             .unwrap();
 
         assert_eq!(mesh.values().collect::<Vec<_>>(), vec![7, 88, 9]);
     }
 
-    #[test]
-    fn try_collect_indexed_opt_ok_shuffled() {
-        let region: Region = extent!(x = 2, y = 3).into();
-        let pairs = vec![(3, 30), (0, 0), (5, 50), (2, 20), (1, 10), (4, 40)];
-        let mesh = pairs
-            .into_iter()
-            .try_collect_indexed_opt(region.clone())
-            .unwrap();
+    // Indexed collector naïve implementation (for reference).
+    fn build_value_mesh_indexed<T>(
+        region: Region,
+        pairs: impl IntoIterator<Item = (usize, T)>,
+    ) -> crate::v1::Result<ValueMesh<T>> {
+        let n = region.num_ranks();
 
-        assert_eq!(mesh.region().num_ranks(), 6);
-        assert_eq!(
-            mesh.values().collect::<Vec<_>>(),
-            vec![0, 10, 20, 30, 40, 50]
+        // Buffer for exactly n slots; fill by rank.
+        let mut buf: Vec<Option<T>> = std::iter::repeat_with(|| None).take(n).collect();
+        let mut filled = 0usize;
+
+        for (rank, value) in pairs {
+            if rank >= n {
+                // Out-of-bounds: report `expected` = n, `actual` =
+                // offending index + 1; i.e. number of ranks implied
+                // so far.
+                return Err(crate::v1::Error::InvalidRankCardinality {
+                    expected: n,
+                    actual: rank + 1,
+                });
+            }
+            if buf[rank].is_none() {
+                filled += 1;
+            }
+            buf[rank] = Some(value); // Last write wins.
+        }
+
+        if filled != n {
+            // Missing ranks: actual = number of distinct ranks seen.
+            return Err(crate::v1::Error::InvalidRankCardinality {
+                expected: n,
+                actual: filled,
+            });
+        }
+
+        // All present and in-bounds: unwrap and build unchecked.
+        let ranks: Vec<T> = buf.into_iter().map(Option::unwrap).collect();
+        Ok(ValueMesh::new_unchecked(region, ranks))
+    }
+
+    /// This uses the bit-mixing portion of Sebastiano Vigna's
+    /// [SplitMix64 algorithm](https://prng.di.unimi.it/splitmix64.c)
+    /// to generate a high-quality 64-bit hash from a usize index.
+    /// Unlike the full SplitMix64 generator, this is stateless - we
+    /// accept an arbitrary x as input and apply the mix function to
+    /// turn `x` deterministically into a "randomized" u64. input
+    /// always produces the same output.
+    fn hash_key(x: usize) -> u64 {
+        let mut z = x as u64 ^ 0x9E3779B97F4A7C15;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+
+    /// Shuffle a slice deterministically, using a hash of indices as
+    /// the key.
+    ///
+    /// Each position `i` is assigned a pseudo-random 64-bit key (from
+    /// `key(i)`), the slice is sorted by those keys, and the
+    /// resulting permutation is applied in place.
+    ///
+    /// The permutation is fully determined by the sequence of indices
+    /// `0..n` and the chosen `key` function. Running it twice on the
+    /// same input yields the same "random-looking" arrangement.
+    ///
+    /// This is going to be used (below) for property tests: it gives
+    /// the effect of a shuffle without introducing global RNG state,
+    /// and ensures that duplicate elements are still ordered
+    /// consistently (so we can test "last write wins" semantics in
+    /// collectors).
+    fn pseudo_shuffle<'a, T: 'a>(v: &'a mut [T], key: impl Fn(usize) -> u64 + Copy) {
+        // Build perm.
+        let mut with_keys: Vec<(u64, usize)> = (0..v.len()).map(|i| (key(i), i)).collect();
+        with_keys.sort_by_key(|&(k, _)| k);
+        let perm: Vec<usize> = with_keys.into_iter().map(|(_, i)| i).collect();
+
+        // In-place permutation using a cycle based approach (e.g.
+        // https://www.geeksforgeeks.org/dsa/permute-the-elements-of-an-array-following-given-order/).
+        let mut seen = vec![false; v.len()];
+        for i in 0..v.len() {
+            if seen[i] {
+                continue;
+            }
+            let mut a = i;
+            while !seen[a] {
+                seen[a] = true;
+                let b = perm[a];
+                // Short circuit on the cycle's start index.
+                if b == i {
+                    break;
+                }
+                v.swap(a, b);
+                a = b;
+            }
+        }
+    }
+
+    // Property: Optimized and reference collectors yield the same
+    // `ValueMesh` on complete inputs, even with duplicates.
+    //
+    // - Begin with a complete set of `(rank, value)` pairs covering
+    //   all ranks of the region.
+    // - Add extra pairs at arbitrary ranks (up to `extra_len`), which
+    //   necessarily duplicate existing entries when `extra_len > 0`.
+    // - Shuffle the combined pairs deterministically.
+    // - Collect using both the reference (`try_collect_indexed`) and
+    //   optimized (`try_collect_indexed_opt`) implementations.
+    //
+    // Both collectors must succeed and produce identical results.
+    // This demonstrates that the optimized version preserves
+    // last-write-wins semantics and agrees exactly with the reference
+    // behavior.
+    proptest! {
+        #[test]
+        fn try_collect_opt_equivalence(region in gen_region(1..=4, 6), extra_len in 0usize..=12) {
+            let n = region.num_ranks();
+
+            // Start with one pair per rank (coverage guaranteed).
+            let mut pairs: Vec<(usize, i64)> = (0..n).map(|r| (r, r as i64)).collect();
+
+            // Add some extra duplicates of random in-bounds ranks.
+            // Their values differ so last-write-wins is observable.
+            let extras = proptest::collection::vec(0..n, extra_len)
+                .new_tree(&mut proptest::test_runner::TestRunner::default())
+                .unwrap()
+                .current();
+            for (k, r) in extras.into_iter().enumerate() {
+                pairs.push((r, (n as i64) + (k as i64)));
+            }
+
+            // Deterministic "shuffle" to fix iteration order across
+            // both collectors.
+            pseudo_shuffle(&mut pairs, hash_key);
+
+            // Reference vs optimized.
+            let mesh_ref = build_value_mesh_indexed(region.clone(), pairs.clone()).unwrap();
+            let mesh_opt = pairs.into_iter().collect_indexed::<ValueMesh<_>>(region.clone()).unwrap();
+
+            prop_assert_eq!(mesh_ref.region(), mesh_opt.region());
+            prop_assert_eq!(mesh_ref.values().collect::<Vec<_>>(), mesh_opt.values().collect::<Vec<_>>());
+        }
+    }
+
+    // Property: Optimized and reference collectors report identical
+    // errors when ranks are missing.
+    //
+    // - Begin with a complete set of `(rank, value)` pairs.
+    // - Remove one rank so coverage is incomplete.
+    // - Shuffle deterministically.
+    // - Collect with both implementations.
+    //
+    // Both must fail with `InvalidRankCardinality` describing the
+    // same expected vs. actual counts.
+    proptest! {
+        #[test]
+        fn try_collect_opt_missing_rank_errors_match(region in gen_region(1..=4, 6)) {
+            let n = region.num_ranks();
+            // Base complete.
+            let mut pairs: Vec<(usize, i64)> = (0..n).map(|r| (r, r as i64)).collect();
+            // Drop one distinct rank.
+            if n > 0 {
+                let drop_idx = 0usize; // Deterministic, fine for the property.
+                pairs.remove(drop_idx);
+            }
+            // Shuffle deterministically.
+            pseudo_shuffle(&mut pairs, hash_key);
+
+            let ref_err  = build_value_mesh_indexed(region.clone(), pairs.clone()).unwrap_err();
+            let opt_err  = pairs.into_iter().collect_indexed::<ValueMesh<_>>(region).unwrap_err();
+            assert_eq!(format!("{ref_err:?}"), format!("{opt_err:?}"));
+        }
+    }
+
+    // Property: Optimized and reference collectors report identical
+    // errors when given out-of-bounds ranks.
+    //
+    // - Construct a set of `(rank, value)` pairs.
+    // - Include at least one pair whose rank is ≥
+    //   `region.num_ranks()`.
+    // - Shuffle deterministically.
+    // - Collect with both implementations.
+    //
+    // Both must fail with `InvalidRankCardinality`, and the reported
+    // error values must match exactly.
+    proptest! {
+        #[test]
+        fn try_collect_opt_out_of_bound_errors_match(region in gen_region(1..=4, 6)) {
+            let n = region.num_ranks();
+            // One valid, then one out-of-bound.
+            let mut pairs = vec![(0usize, 0i64), (n, 123i64)];
+            pseudo_shuffle(&mut pairs, hash_key);
+
+            let ref_err = build_value_mesh_indexed(region.clone(), pairs.clone()).unwrap_err();
+            let opt_err = pairs.into_iter().collect_indexed::<ValueMesh<_>>(region).unwrap_err();
+            assert_eq!(format!("{ref_err:?}"), format!("{opt_err:?}"));
+        }
+    }
+
+    #[test]
+    fn map_into_preserves_region_and_order() {
+        let region: Region = extent!(rows = 2, cols = 3).into();
+        let vm = ValueMesh::new_unchecked(region.clone(), vec![0, 1, 2, 3, 4, 5]);
+
+        let doubled: ValueMesh<_> = vm.map_into(|x| x * 2);
+        assert_eq!(doubled.region, region);
+        assert_eq!(doubled.ranks, vec![0, 2, 4, 6, 8, 10]);
+    }
+
+    #[test]
+    fn map_into_ref_borrows_and_preserves() {
+        let region: Region = extent!(n = 4).into();
+        let vm = ValueMesh::new_unchecked(
+            region.clone(),
+            vec!["a".to_string(), "b".into(), "c".into(), "d".into()],
         );
+
+        let lens: ValueMesh<_> = vm.map_into_ref(|s| s.len());
+        assert_eq!(lens.region, region);
+        assert_eq!(lens.ranks, vec![1, 1, 1, 1]);
     }
 
     #[test]
-    fn try_collect_indexed_opt_missing_rank_is_error() {
-        let region: Region = extent!(x = 2, y = 2).into(); // 4
-        let pairs = vec![(0, 100), (1, 101), (2, 102)]; // missing 3
-        let err = pairs
-            .into_iter()
-            .try_collect_indexed_opt(region)
-            .unwrap_err();
+    fn try_map_into_short_circuits_on_error() {
+        let region = extent!(n = 4).into();
+        let vm = ValueMesh::new_unchecked(region, vec![1, 2, 3, 4]);
 
-        match err {
-            crate::v1::Error::InvalidRankCardinality { expected, actual } => {
-                assert_eq!(expected, 4);
-                assert_eq!(actual, 3);
-            }
-            other => panic!("unexpected error: {other:?}"),
+        let res: Result<ValueMesh<i32>, &'static str> =
+            vm.try_map_into(|x| if x == 3 { Err("boom") } else { Ok(x + 10) });
+
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "boom");
+    }
+
+    #[test]
+    fn try_map_into_ref_short_circuits_on_error() {
+        let region = extent!(n = 4).into();
+        let vm = ValueMesh::new_unchecked(region, vec![1, 2, 3, 4]);
+
+        let res: Result<ValueMesh<i32>, &'static str> =
+            vm.try_map_into_ref(|x| if x == &3 { Err("boom") } else { Ok(x + 10) });
+
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "boom");
+    }
+
+    // -- Helper to poll `core::future::Ready` without a runtime
+    fn noop_waker() -> Waker {
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+        fn wake(_: *const ()) {}
+        fn wake_by_ref(_: *const ()) {}
+        fn drop(_: *const ()) {}
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+        // SAFETY: The raw waker never dereferences its data pointer
+        // (`null`), and all vtable fns are no-ops. It's only used to
+        // satisfy `Context` for polling already-ready futures in
+        // tests.
+        unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+    }
+
+    fn poll_now<F: Future>(mut fut: F) -> F::Output {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        // SAFETY: `fut` is a local stack variable that we never move
+        // after pinning, and we only use it to poll immediately
+        // within this scope. This satisfies the invariants of
+        // `Pin::new_unchecked`.
+        let mut fut = unsafe { Pin::new_unchecked(&mut fut) };
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => v,
+            Poll::Pending => unreachable!("Ready futures must complete immediately"),
         }
     }
+    // --
 
     #[test]
-    fn try_collect_indexed_opt_out_of_bounds_is_error() {
-        let region: Region = extent!(x = 2, y = 2).into(); // valid ranks 0..=3
-        let pairs = vec![(0, 1), (4, 9)]; // 4 is out-of-bounds
-        let err = pairs
-            .into_iter()
-            .try_collect_indexed_opt(region)
-            .unwrap_err();
+    fn map_into_ready_futures() {
+        let region: Region = extent!(r = 2, c = 2).into();
+        let vm = ValueMesh::new_unchecked(region.clone(), vec![10, 20, 30, 40]);
 
-        match err {
-            crate::v1::Error::InvalidRankCardinality { expected, actual } => {
-                assert_eq!(expected, 4);
-                assert_eq!(actual, 5); // offending index + 1
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        // Map to `core::future::Ready` futures.
+        let pending: ValueMesh<core::future::Ready<_>> =
+            vm.map_into(|x| core::future::ready(x + 1));
+        assert_eq!(pending.region, region);
+
+        // Drive the ready futures without a runtime and collect results.
+        let results: Vec<_> = pending.ranks.into_iter().map(poll_now).collect();
+        assert_eq!(results, vec![11, 21, 31, 41]);
     }
 
     #[test]
-    fn try_collect_indexed_opt_duplicate_last_write_wins() {
-        let region: Region = extent!(x = 1, y = 3).into(); // 3
-        let pairs = vec![(0, 7), (1, 8), (1, 88), (2, 9)]; // dup rank 1
-        let mesh = pairs
-            .into_iter()
-            .try_collect_indexed_opt(region.clone())
-            .unwrap();
+    fn map_into_single_element_mesh() {
+        let region: Region = extent!(n = 1).into();
+        let vm = ValueMesh::new_unchecked(region.clone(), vec![7]);
 
-        assert_eq!(mesh.values().collect::<Vec<_>>(), vec![7, 88, 9]);
+        let out: ValueMesh<_> = vm.map_into(|x| x * x);
+        assert_eq!(out.region, region);
+        assert_eq!(out.ranks, vec![49]);
     }
-
-    // TODO: add property tests to cross-check opt vs reference
 }
