@@ -27,6 +27,7 @@ use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxServer;
 use ndslice::Extent;
 use ndslice::view;
+use ndslice::view::MapIntoRefExt;
 use ndslice::view::Region;
 use serde::Deserialize;
 use serde::Serialize;
@@ -57,6 +58,7 @@ pub struct ProcRef {
 impl ProcRef {
     /// Pings the proc, returning whether it is alive. This will be replaced by a
     /// finer-grained lifecycle status in the near future.
+    #[allow(dead_code)]
     async fn status(&self, cx: &impl context::Actor) -> v1::Result<bool> {
         let (port, mut rx) = cx.mailbox().open_port();
         self.agent
@@ -102,6 +104,21 @@ impl ProcMesh {
         }
     }
 
+    /// The current statuses of procs in this mesh.
+    #[allow(dead_code)]
+    async fn status(
+        &self,
+        caps: &(impl cap::CanSend + cap::CanOpenPort),
+    ) -> v1::Result<ValueMesh<bool>> {
+        let vm: ValueMesh<_> = self.map_into_ref(|proc_ref| {
+            let proc_ref = proc_ref.clone();
+            async move { proc_ref.status(caps).await }
+        });
+        vm.join().await.transpose()
+    }
+
+    /// Allocate a new ProcMeshRef from the provided alloc.
+    /// Allocate does not require an owning actor because references are not owned.
     /// Allocate a new ProcMesh from the provided alloc.
     pub async fn allocate(
         cx: &impl context::Actor,
@@ -273,6 +290,7 @@ impl ProcMeshRef {
     }
 
     /// Spawn an actor on all of the procs in this mesh, returning a new ActorMesh.
+    #[allow(dead_code)]
     async fn spawn<A: Actor + RemoteActor>(
         &self,
         cx: &impl context::Actor,
@@ -350,6 +368,12 @@ impl view::Ranked for ProcMeshRef {
 
     fn sliced(&self, region: Region, nodes: impl Iterator<Item = ProcRef>) -> Self {
         Self::new(self.name.clone(), region, Arc::new(nodes.collect())).unwrap()
+    }
+}
+
+impl view::RankedRef for ProcMeshRef {
+    fn get_ref(&self, rank: usize) -> Option<&Self::Item> {
+        self.ranks.get(rank)
     }
 }
 
