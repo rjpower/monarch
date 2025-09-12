@@ -104,19 +104,6 @@ impl ProcMesh {
         }
     }
 
-    /// The current statuses of procs in this mesh.
-    #[allow(dead_code)]
-    async fn status(
-        &self,
-        caps: &(impl cap::CanSend + cap::CanOpenPort),
-    ) -> v1::Result<ValueMesh<bool>> {
-        let vm: ValueMesh<_> = self.map_into_ref(|proc_ref| {
-            let proc_ref = proc_ref.clone();
-            async move { proc_ref.status(caps).await }
-        });
-        vm.join().await.transpose()
-    }
-
     /// Allocate a new ProcMeshRef from the provided alloc.
     /// Allocate does not require an owning actor because references are not owned.
     /// Allocate a new ProcMesh from the provided alloc.
@@ -279,17 +266,16 @@ impl ProcMeshRef {
     }
 
     /// The current statuses of procs in this mesh.
+    #[allow(dead_code)]
     async fn status(
         &self,
         caps: &(impl cap::CanSend + cap::CanOpenPort),
     ) -> v1::Result<ValueMesh<bool>> {
-        self.mapped(|proc_ref| {
+        let vm: ValueMesh<_> = self.map_into_ref(|proc_ref| {
             let proc_ref = proc_ref.clone();
             async move { proc_ref.status(caps).await }
-        })
-        .join()
-        .await
-        .transpose()
+        });
+        vm.join().await.transpose()
     }
 
     /// Spawn an actor on all of the procs in this mesh, returning a new ActorMesh.
