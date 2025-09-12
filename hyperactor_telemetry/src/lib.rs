@@ -718,14 +718,15 @@ pub mod env {
 
         #[cfg(not(test))]
         pub fn current() -> Self {
-            match std::env::var(MAST_ENVIRONMENT).unwrap_or_default().as_str() {
-                // Constant from https://fburl.com/fhysd3fd
-                "local_mast_simulator" => Self::MastEmulator,
-                _ => match std::env::var("MAST_HPC_JOB_NAME").is_ok() {
-                    true => Self::Mast,
-                    false => Self::Local,
-                },
-            }
+            Self::Test
+            // match std::env::var(MAST_ENVIRONMENT).unwrap_or_default().as_str() {
+            //     // Constant from https://fburl.com/fhysd3fd
+            //     "local_mast_simulator" => Self::MastEmulator,
+            //     _ => match std::env::var("MAST_HPC_JOB_NAME").is_ok() {
+            //         true => Self::Mast,
+            //         false => Self::Local,
+            //     },
+            // }
         }
     }
 }
