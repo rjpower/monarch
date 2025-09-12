@@ -380,6 +380,9 @@ fn options() -> part::BincodeOptionsType {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
+    use std::net::SocketAddr;
+    use std::net::SocketAddrV6;
 
     use proptest::prelude::*;
     use proptest_derive::Arbitrary;
@@ -568,6 +571,31 @@ mod tests {
         let mut framed = message.clone().framed();
         let framed = framed.copy_to_bytes(framed.remaining());
         assert_eq!(Message::from_framed(framed).unwrap(), message);
+    }
+
+    #[test]
+    fn test_socket_addr() {
+        let socket_addr_v6: SocketAddrV6 =
+            "[2401:db00:225c:2d09:face:0:223:0]:48483".parse().unwrap();
+        {
+            let message = serialize_bincode(&socket_addr_v6).unwrap();
+            let deserialized: SocketAddrV6 = deserialize_bincode(message).unwrap();
+            assert_eq!(socket_addr_v6, deserialized);
+        }
+        let socket_addr = SocketAddr::V6(socket_addr_v6);
+        {
+            let message = serialize_bincode(&socket_addr).unwrap();
+            let deserialized: SocketAddr = deserialize_bincode(message).unwrap();
+            assert_eq!(socket_addr, deserialized);
+        }
+
+        let mut address_book: HashMap<usize, SocketAddr> = HashMap::new();
+        address_book.insert(1, socket_addr);
+        {
+            let message = serialize_bincode(&address_book).unwrap();
+            let deserialized: HashMap<usize, SocketAddr> = deserialize_bincode(message).unwrap();
+            assert_eq!(address_book, deserialized);
+        }
     }
 
     prop_compose! {
