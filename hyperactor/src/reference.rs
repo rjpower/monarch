@@ -689,7 +689,7 @@ impl<A: RemoteActor> ActorRef<A> {
     {
         self.port().send(cap, message)
     }
-    
+
     /// Send an [`M`]-typed message to the referenced actor, with additional context provided by
     /// headers.
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.

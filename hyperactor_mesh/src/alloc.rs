@@ -525,7 +525,6 @@ pub(crate) mod testing {
     use std::time::Duration;
 
     use hyperactor::Instance;
-    use hyperactor::Mailbox;
     use hyperactor::actor::remote::Remote;
     use hyperactor::channel;
     use hyperactor::context;

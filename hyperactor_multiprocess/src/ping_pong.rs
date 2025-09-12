@@ -11,11 +11,11 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use hyperactor::context::Mailbox as _;
     use hyperactor::ActorRef;
     use hyperactor::channel::ChannelAddr;
     use hyperactor::channel::sim::SimAddr;
     use hyperactor::context;
+    use hyperactor::context::Mailbox as _;
     use hyperactor::id;
     use hyperactor::reference::Index;
     use hyperactor::reference::WorldId;

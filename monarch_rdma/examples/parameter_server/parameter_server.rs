@@ -409,7 +409,9 @@ impl Handler<WorkerUpdate> for WorkerActor {
             .ps_weights_handle
             .as_ref()
             .expect("worker_actor should be initialized");
-        buffer.write_from(cx.mailbox(), ps_weights_handle.clone(), 5).await?;
+        buffer
+            .write_from(cx.mailbox(), ps_weights_handle.clone(), 5)
+            .await?;
         reply.send(cx, true)?;
         Ok(())
     }

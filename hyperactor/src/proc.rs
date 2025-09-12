@@ -45,7 +45,6 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::Instrument;
-use tracing::Level;
 
 use crate as hyperactor;
 use crate::Actor;
