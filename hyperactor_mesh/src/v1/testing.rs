@@ -12,7 +12,6 @@
 
 use hyperactor::Instance;
 use hyperactor::Proc;
-
 use hyperactor::context;
 use hyperactor::id;
 use hyperactor::mailbox::BoxableMailboxSender;
