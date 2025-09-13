@@ -162,6 +162,7 @@ mod tests {
     use crate::Proc;
     use crate::channel::ChannelTransport;
     use crate::context::Mailbox as _;
+    use crate::mailbox::IntoBoxedMailboxSender;
     use crate::mailbox::MailboxClient;
 
     struct TestProcManager {
