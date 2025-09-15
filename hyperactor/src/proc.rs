@@ -986,10 +986,15 @@ impl<A: Actor> Instance<A> {
         mut self,
         mut actor: A,
         actor_loop_receivers: (PortReceiver<Signal>, PortReceiver<ActorSupervisionEvent>),
-        work_rx: mpsc::UnboundedReceiver<WorkCell<A>>,
+        mut work_rx: mpsc::UnboundedReceiver<WorkCell<A>>,
     ) {
+        // `run_actor_tree` borrows `work_rx` instead of taking ownership because
+        // `work_rx` needs to remain alive until this function returns. If the owning
+        // proc's `supervision_coordinator_port` is a port on this instance, if `work_rx`
+        // is dropped before `self.proc.handle_supervision_event` is called, the process
+        // will exit due to a "channel closed" failure.
         let result = self
-            .run_actor_tree(&mut actor, actor_loop_receivers, work_rx)
+            .run_actor_tree(&mut actor, actor_loop_receivers, &mut work_rx)
             .await;
 
         let (actor_status, event) = match result {
@@ -1043,7 +1048,7 @@ impl<A: Actor> Instance<A> {
         &mut self,
         actor: &mut A,
         mut actor_loop_receivers: (PortReceiver<Signal>, PortReceiver<ActorSupervisionEvent>),
-        work_rx: mpsc::UnboundedReceiver<WorkCell<A>>,
+        work_rx: &mut mpsc::UnboundedReceiver<WorkCell<A>>,
     ) -> Result<(), ActorError> {
         // It is okay to catch all panics here, because we are in a tokio task,
         // and tokio will catch the panic anyway:
@@ -1115,7 +1120,7 @@ impl<A: Actor> Instance<A> {
         &mut self,
         actor: &mut A,
         actor_loop_receivers: &mut (PortReceiver<Signal>, PortReceiver<ActorSupervisionEvent>),
-        mut work_rx: mpsc::UnboundedReceiver<WorkCell<A>>,
+        work_rx: &mut mpsc::UnboundedReceiver<WorkCell<A>>,
     ) -> Result<(), ActorError> {
         let (signal_receiver, supervision_event_receiver) = actor_loop_receivers;
 

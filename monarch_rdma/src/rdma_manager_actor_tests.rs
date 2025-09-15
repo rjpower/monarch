@@ -659,7 +659,7 @@ mod tests {
         // Pre-initialize comms, and wait for hardware to transition to send state
         let mut _qp_1 = env
             .actor_1
-            .request_queue_pair(&env.client_1.clone(), env.actor_2.clone())
+            .request_queue_pair(&env.client_1, env.actor_2.clone())
             .await?;
         RealClock.sleep(std::time::Duration::from_millis(50)).await;
 
@@ -691,7 +691,7 @@ mod tests {
         // Pre-initialize comms, and wait for hardware to transition to send state
         let mut _qp_1 = env
             .actor_1
-            .request_queue_pair(&env.client_1.clone(), env.actor_2.clone())
+            .request_queue_pair(&env.client_1, env.actor_2.clone())
             .await?;
         RealClock.sleep(std::time::Duration::from_millis(50)).await;
 
@@ -724,7 +724,7 @@ mod tests {
         // Pre-initialize comms, and wait for hardware to transition to send state
         let mut _qp_1 = env
             .actor_1
-            .request_queue_pair(&env.client_1.clone(), env.actor_2.clone())
+            .request_queue_pair(&env.client_1, env.actor_2.clone())
             .await?;
         RealClock.sleep(std::time::Duration::from_millis(50)).await;
         let /*mut*/ rdma_handle_1 = env.rdma_handle_1.clone();

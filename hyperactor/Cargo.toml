@@ -40,7 +40,6 @@ derivative = "2.2"
 dns-lookup = "1.0"
 enum-as-inner = "0.6.0"
 erased-serde = "0.3.27"
-erased_lifetime = { version = "0.0.0", path = "../erased_lifetime" }
 futures = { version = "0.3.31", features = ["async-await", "compat"] }
 hostname = "0.3"
 hyperactor_macros = { version = "0.0.0", path = "../hyperactor_macros" }
@@ -74,7 +73,7 @@ unicode-ident = "1.0.12"
 [dev-dependencies]
 maplit = "1.0"
 proptest = "1.5"
-tempfile = "3.15"
+tempfile = "3.22"
 timed_test = { version = "0.0.0", path = "../timed_test" }
 tracing-subscriber = { version = "0.3.20", features = ["chrono", "env-filter", "json", "local-time", "parking_lot", "registry"] }
 tracing-test = { version = "0.2.3", features = ["no-env-filter"] }
