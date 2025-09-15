@@ -6,8 +6,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use std::ops::Deref;
-
 use hyperactor_mesh::comm::multicast::CastInfo;
 use hyperactor_mesh::proc_mesh::global_root_client;
 use ndslice::Extent;
@@ -19,18 +17,30 @@ use crate::mailbox::PyMailbox;
 use crate::proc::PyActorId;
 use crate::shape::PyPoint;
 
-#[derive(Debug)]
-pub(crate) enum InstanceActorType {
-    Unit,
-    PythonActor,
+enum ErasedInstance {
+    Unit(hyperactor::Instance<()>),
+    PythonActor(hyperactor::Instance<PythonActor>),
+}
+
+impl ErasedInstance {
+    fn mailbox_for_py(&self) -> &hyperactor::Mailbox {
+        match self {
+            ErasedInstance::Unit(ins) => ins.mailbox_for_py(),
+            ErasedInstance::PythonActor(ins) => ins.mailbox_for_py(),
+        }
+    }
+
+    fn self_id(&self) -> &hyperactor::ActorId {
+        match self {
+            ErasedInstance::Unit(ins) => ins.self_id(),
+            ErasedInstance::PythonActor(ins) => ins.self_id(),
+        }
+    }
 }
 
 #[pyclass(name = "Instance", module = "monarch._src.actor.actor_mesh")]
 pub(crate) struct PyInstance {
-    inner: hyperactor::proc::ErasedInstance,
-    // Will be used in a future diff.
-    #[allow(dead_code)]
-    type_: InstanceActorType,
+    inner: ErasedInstance,
     #[pyo3(get, set)]
     proc_mesh: Option<PyObject>,
     #[pyo3(get, set, name = "_controller_controller")]
@@ -56,46 +66,39 @@ impl PyInstance {
     }
 }
 
-impl PyInstance {
-    // Will be used in a future diff
-    #[allow(dead_code)]
-    pub(crate) fn actor_type(&self) -> &InstanceActorType {
-        &self.type_
+impl From<&hyperactor::Instance<PythonActor>> for ErasedInstance {
+    fn from(ins: &hyperactor::Instance<PythonActor>) -> Self {
+        ErasedInstance::PythonActor(ins.clone_for_py())
     }
 }
 
-trait ConvertibleToPyInstance: hyperactor::Actor {
-    fn actor_type() -> InstanceActorType;
-}
-
-impl ConvertibleToPyInstance for () {
-    fn actor_type() -> InstanceActorType {
-        InstanceActorType::Unit
+impl From<&hyperactor::Instance<()>> for ErasedInstance {
+    fn from(ins: &hyperactor::Instance<()>) -> Self {
+        ErasedInstance::Unit(ins.clone_for_py())
     }
 }
 
-impl ConvertibleToPyInstance for PythonActor {
-    fn actor_type() -> InstanceActorType {
-        InstanceActorType::PythonActor
+impl From<&hyperactor::Context<'_, PythonActor>> for ErasedInstance {
+    fn from(cx: &hyperactor::Context<'_, PythonActor>) -> Self {
+        ErasedInstance::PythonActor(cx.clone_for_py())
     }
 }
 
-impl<A: ConvertibleToPyInstance> From<&hyperactor::Instance<A>> for PyInstance {
-    fn from(ins: &hyperactor::Instance<A>) -> Self {
+impl From<&hyperactor::Context<'_, ()>> for ErasedInstance {
+    fn from(cx: &hyperactor::Context<'_, ()>) -> Self {
+        ErasedInstance::Unit(cx.clone_for_py())
+    }
+}
+
+impl<I: Into<ErasedInstance>> From<I> for PyInstance {
+    fn from(ins: I) -> Self {
         PyInstance {
-            inner: ins.erased_for_py(),
-            type_: A::actor_type(),
+            inner: ins.into(),
             proc_mesh: None,
             controller_controller: None,
             rank: PyPoint::new(0, Extent::unity().into()),
             children: None,
         }
-    }
-}
-
-impl<A: ConvertibleToPyInstance> From<&hyperactor::Context<'_, A>> for PyInstance {
-    fn from(cx: &hyperactor::Context<A>) -> Self {
-        PyInstance::from(cx.deref())
     }
 }
 

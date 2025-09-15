@@ -1346,12 +1346,12 @@ impl<A: Actor> Instance<A> {
         &self.proc
     }
 
-    /// Get a type-erased, owned copy of this instance that can be
+    /// Clone this Instance to get an owned struct that can be
     /// plumbed through python. This should really only be called
-    /// for the explicit purpose of being passed into python.
+    /// for the explicit purpose of being passed into python
     #[doc(hidden)]
-    pub fn erased_for_py(&self) -> ErasedInstance {
-        ErasedInstance {
+    pub fn clone_for_py(&self) -> Self {
+        Self {
             proc: self.proc.clone(),
             cell: self.cell.clone(),
             mailbox: self.mailbox.clone(),
@@ -1837,51 +1837,6 @@ impl<A: Actor> Ports<A> {
                 );
             }
         }
-    }
-}
-
-/// Type-erased Instance that can be downcast to a typed Instance.
-#[derive(Debug)]
-pub struct ErasedInstance {
-    /// The proc that owns this instance.
-    proc: Proc,
-
-    /// The instance cell that manages instance hierarchy.
-    cell: InstanceCell,
-
-    /// The mailbox associated with the actor.
-    mailbox: Mailbox,
-
-    /// Arc<Ports<A>> where A is the concrete actor type that
-    /// was erased.
-    ports: Arc<dyn Any + Send + Sync>,
-
-    /// A watch for communicating the actor's state.
-    status_tx: watch::Sender<ActorStatus>,
-}
-
-impl ErasedInstance {
-    /// Attempt to downcast to an Instance<A>, returning None
-    /// if unsuccessful.
-    pub fn downcast<A: Actor>(&self) -> Option<Instance<A>> {
-        Some(Instance {
-            proc: self.proc.clone(),
-            cell: self.cell.clone(),
-            mailbox: self.mailbox.clone(),
-            ports: self.ports.clone().downcast::<Ports<A>>().ok()?,
-            status_tx: self.status_tx.clone(),
-        })
-    }
-
-    /// Get the mailbox for use in python.
-    #[doc(hidden)]
-    pub fn mailbox_for_py(&self) -> &Mailbox {
-        &self.mailbox
-    }
-
-    /// Get the actor id of this instance.
-    pub fn self_id(&self) -> &ActorId {
-        self.mailbox.actor_id()
     }
 }
 
