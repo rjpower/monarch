@@ -357,7 +357,7 @@ impl<A: Actor + RemoteActor> ProcManager for ProcessProcManager<A> {
 pub async fn boot_proc<A, S, F>(spawn: S) -> Result<Proc, HostError>
 where
     A: Actor + RemoteActor + Binds<A>,
-    S: FnOnce(hostProc) -> F,
+    S: FnOnce(Proc) -> F,
     F: Future<Output = Result<ActorHandle<A>, anyhow::Error>>,
 {
     let backend_addr: ChannelAddr = parse_env("HYPERACTOR_HOST_BACKEND_ADDR")?;
