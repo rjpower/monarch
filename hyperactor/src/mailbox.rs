@@ -289,6 +289,7 @@ impl MessageEnvelope {
             sender = self.sender.to_string(),
             dest = self.dest.actor_id().to_string(),
             error = error.to_string(),
+            return_handle = %return_handle,
         );
         metrics::MAILBOX_UNDELIVERABLE_MESSAGES.add(
             1,
@@ -1050,6 +1051,12 @@ impl MailboxClient {
         this
     }
 
+    /// Convenience constructor, to set up a mailbox client that forwards messages
+    /// to the provided address.
+    pub fn dial(addr: ChannelAddr) -> Result<MailboxClient, ChannelError> {
+        Ok(MailboxClient::new(channel::dial(addr)?))
+    }
+
     // Set up a watch for the tx's health.
     fn monitor_tx_health(
         mut rx: watch::Receiver<TxStatus>,
@@ -1442,7 +1449,7 @@ impl MailboxSender for Mailbox {
 // missing an `Undeliverable<MessageEnvelope>` binding. In this
 // context, mailboxes are few and long-lived; unbounded growth is not
 // a realistic concern.
-static CAN_SEND_WARNED_MAILBOXES: OnceLock<DashSet<ActorId>> = OnceLock::new();
+pub(crate) static CAN_SEND_WARNED_MAILBOXES: OnceLock<DashSet<ActorId>> = OnceLock::new();
 
 impl cap::sealed::CanSend for Mailbox {
     fn post(&self, dest: PortId, headers: Attrs, data: Serialized) {
@@ -2416,12 +2423,12 @@ impl DialMailboxRouter {
         if let Ok(mut w) = self.address_book.write() {
             if let Some(old_addr) = w.insert(dest.clone(), addr.clone()) {
                 if old_addr != addr {
-                    tracing::info!("Rebinding {:?} from {:?} to {:?}", dest, old_addr, addr);
+                    tracing::info!("rebinding {:?} from {:?} to {:?}", dest, old_addr, addr);
                     self.sender_cache.remove(&old_addr);
                 }
             }
         } else {
-            tracing::error!("Address book poisoned during bind of {:?}", dest);
+            tracing::error!("address book poisoned during bind of {:?}", dest);
         }
     }
 
@@ -2439,12 +2446,12 @@ impl DialMailboxRouter {
                 .collect();
 
             for (key, addr) in to_remove {
-                tracing::info!("Unbinding {:?} from {:?}", key, addr);
+                tracing::info!("unbinding {:?} from {:?}", key, addr);
                 w.remove(&key);
                 self.sender_cache.remove(&addr);
             }
         } else {
-            tracing::error!("Address book poisoned during unbind of {:?}", dest);
+            tracing::error!("address book poisoned during unbind of {:?}", dest);
         }
     }
 

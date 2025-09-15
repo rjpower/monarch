@@ -23,7 +23,6 @@ use std::panic;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::Weak;
 use std::sync::atomic::AtomicU64;
@@ -52,7 +51,6 @@ use crate::ActorRef;
 use crate::Handler;
 use crate::Message;
 use crate::RemoteMessage;
-use crate::accum::ReducerSpec;
 use crate::actor::ActorError;
 use crate::actor::ActorErrorKind;
 use crate::actor::ActorHandle;
@@ -66,6 +64,7 @@ use crate::cap;
 use crate::clock::Clock;
 use crate::clock::ClockKind;
 use crate::clock::RealClock;
+use crate::context;
 use crate::data::Serialized;
 use crate::data::TypeInfo;
 use crate::mailbox::BoxedMailboxSender;
@@ -433,16 +432,16 @@ impl Proc {
     pub fn attach_actor<R, M>(
         &self,
         name: &str,
-    ) -> Result<(Mailbox, ActorRef<R>, PortReceiver<M>), anyhow::Error>
+    ) -> Result<(Instance<()>, ActorRef<R>, PortReceiver<M>), anyhow::Error>
     where
         M: RemoteMessage,
         R: RemoteActor + RemoteHandles<M>,
     {
-        let mbox = self.attach(name)?;
-        let (handle, rx) = mbox.open_port::<M>();
+        let (instance, _handle) = self.instance(name)?;
+        let (handle, rx) = instance.open_port::<M>();
         handle.bind_to(M::port());
-        let actor_ref = ActorRef::attest(mbox.actor_id().clone());
-        Ok((mbox, actor_ref, rx))
+        let actor_ref = ActorRef::attest(instance.self_id().clone());
+        Ok((instance, actor_ref, rx))
     }
 
     /// Spawn a named (root) actor on this proc. The name of the actor must be
@@ -460,7 +459,8 @@ impl Proc {
             actor_type = std::any::type_name::<A>(),
             actor_id = actor_id.to_string(),
         );
-        let instance = Instance::new(self.clone(), actor_id.clone(), false, None);
+        let (instance, mut actor_loop_receivers, work_rx) =
+            Instance::new(self.clone(), actor_id.clone(), false, None);
         let actor = A::new(params).await?;
         // Add this actor to the proc's actor ledger. We do not actively remove
         // inactive actors from ledger, because the actor's state can be inferred
@@ -469,7 +469,9 @@ impl Proc {
             .ledger
             .insert(actor_id.clone(), instance.cell.downgrade())?;
 
-        instance.start(actor).await
+        instance
+            .start(actor, actor_loop_receivers.take().unwrap(), work_rx)
+            .await
     }
 
     /// Create and return an actor instance and its corresponding handle. This allows actors to be
@@ -486,11 +488,30 @@ impl Proc {
             actor_id = actor_id.to_string(),
         );
 
-        let instance = Instance::new(self.clone(), actor_id.clone(), true, None);
+        let (instance, _, _) = Instance::new(self.clone(), actor_id.clone(), true, None);
         let handle = ActorHandle::new(instance.cell.clone(), instance.ports.clone());
 
         instance.change_status(ActorStatus::Client);
 
+        Ok((instance, handle))
+    }
+
+    /// Create a child instance. Called from `Instance`.
+    fn child_instance(
+        &self,
+        parent: InstanceCell,
+    ) -> Result<(Instance<()>, ActorHandle<()>), anyhow::Error> {
+        let actor_id = self.allocate_child_id(parent.actor_id())?;
+        let _ = tracing::debug_span!(
+            "child_actor_instance",
+            parent_actor_id = %parent.actor_id(),
+            actor_type = std::any::type_name::<()>(),
+            actor_id = %actor_id,
+        );
+
+        let (instance, _, _) = Instance::new(self.clone(), actor_id, false, Some(parent));
+        let handle = ActorHandle::new(instance.cell.clone(), instance.ports.clone());
+        instance.change_status(ActorStatus::Client);
         Ok((instance, handle))
     }
 
@@ -505,9 +526,12 @@ impl Proc {
         params: A::Params,
     ) -> Result<ActorHandle<A>, anyhow::Error> {
         let actor_id = self.allocate_child_id(parent.actor_id())?;
-        let instance = Instance::new(self.clone(), actor_id, false, Some(parent.clone()));
+        let (instance, mut actor_loop_receivers, work_rx) =
+            Instance::new(self.clone(), actor_id, false, Some(parent.clone()));
         let actor = A::new(params).await?;
-        instance.start(actor).await
+        instance
+            .start(actor, actor_loop_receivers.take().unwrap(), work_rx)
+            .await
     }
 
     /// Call `abort` on the `JoinHandle` associated with the given
@@ -648,6 +672,19 @@ impl Proc {
             aborted_actors.len()
         );
         Ok((stopped_actors, aborted_actors))
+    }
+
+    /// Resolve an actor reference to an actor residing on this proc.
+    /// Returns None if the actor is not found on this proc.
+    pub fn resolve_actor_ref<R: RemoteActor + Actor>(
+        &self,
+        actor_ref: &ActorRef<R>,
+    ) -> Option<ActorHandle<R>> {
+        self.inner
+            .instances
+            .get(actor_ref.actor_id())?
+            .upgrade()?
+            .downcast_handle()
     }
 
     /// Create a root allocation in the proc.
@@ -808,31 +845,24 @@ pub struct Instance<A: Actor> {
     /// The mailbox associated with the actor.
     mailbox: Mailbox,
 
-    /// Receivers for the actor loop, if available.
-    actor_loop_receivers: Option<(PortReceiver<Signal>, PortReceiver<ActorSupervisionEvent>)>,
-
     ports: Arc<Ports<A>>,
-
-    /// Handler work queue.
-    work_rx: mpsc::UnboundedReceiver<WorkCell<A>>,
 
     /// A watch for communicating the actor's state.
     status_tx: watch::Sender<ActorStatus>,
-
-    status_span: Mutex<tracing::Span>,
-
-    /// The timestamp of when the currently active status was set.
-    _last_status_change: Arc<tokio::time::Instant>,
 }
 
 impl<A: Actor> Instance<A> {
     /// Create a new actor instance in Created state.
-    pub(crate) fn new(
+    fn new(
         proc: Proc,
         actor_id: ActorId,
         detached: bool,
         parent: Option<InstanceCell>,
-    ) -> Self {
+    ) -> (
+        Self,
+        Option<(PortReceiver<Signal>, PortReceiver<ActorSupervisionEvent>)>,
+        mpsc::UnboundedReceiver<WorkCell<A>>,
+    ) {
         // Set up messaging
         let mailbox = Mailbox::new(actor_id.clone(), BoxedMailboxSender::new(proc.downgrade()));
         let (work_tx, work_rx) = mpsc::unbounded_channel();
@@ -844,9 +874,6 @@ impl<A: Actor> Instance<A> {
             Some(info) => ActorType::Named(info),
             None => ActorType::Anonymous(std::any::type_name::<A>()),
         };
-        let ais = actor_id.to_string();
-        let aid = actor_id.clone();
-        let actor_name = aid.name();
         let actor_loop_ports = if detached {
             None
         } else {
@@ -869,24 +896,18 @@ impl<A: Actor> Instance<A> {
             parent,
             ports.clone(),
         );
-        let start = proc.clock().now();
 
-        Self {
-            proc,
-            cell,
-            mailbox,
+        (
+            Self {
+                proc,
+                cell,
+                mailbox,
+                ports,
+                status_tx,
+            },
             actor_loop_receivers,
-            ports,
             work_rx,
-            status_tx,
-            status_span: Mutex::new(tracing::debug_span!(
-                "actor_status",
-                actor_id = ais,
-                actor_name = actor_name,
-                name = "created"
-            )),
-            _last_status_change: Arc::new(start),
-        }
+        )
     }
 
     /// Notify subscribers of a change in the actors status and bump counters with the duration which
@@ -951,12 +972,18 @@ impl<A: Actor> Instance<A> {
     /// Start an A-typed actor onto this instance with the provided params. When spawn returns,
     /// the actor has been linked with its parent, if it has one.
     #[hyperactor::instrument(fields(actor_id=self.cell.actor_id().clone().to_string(), actor_name=self.cell.actor_id().name()))]
-    async fn start(self, actor: A) -> Result<ActorHandle<A>, anyhow::Error> {
+    async fn start(
+        self,
+        actor: A,
+        actor_loop_receivers: (PortReceiver<Signal>, PortReceiver<ActorSupervisionEvent>),
+        work_rx: mpsc::UnboundedReceiver<WorkCell<A>>,
+    ) -> Result<ActorHandle<A>, anyhow::Error> {
         let instance_cell = self.cell.clone();
         let actor_id = self.cell.actor_id().clone();
         let actor_handle = ActorHandle::new(self.cell.clone(), self.ports.clone());
-        let actor_task_handle =
-            A::spawn_server_task(panic_handler::with_backtrace_tracking(self.serve(actor)));
+        let actor_task_handle = A::spawn_server_task(panic_handler::with_backtrace_tracking(
+            self.serve(actor, actor_loop_receivers, work_rx),
+        ));
         tracing::debug!("{}: spawned with {:?}", actor_id, actor_task_handle);
         instance_cell
             .inner
@@ -967,10 +994,20 @@ impl<A: Actor> Instance<A> {
         Ok(actor_handle)
     }
 
-    async fn serve(mut self, mut actor: A) {
-        let actor_loop_receivers = self.actor_loop_receivers.take().unwrap();
-
-        let result = self.run_actor_tree(&mut actor, actor_loop_receivers).await;
+    async fn serve(
+        mut self,
+        mut actor: A,
+        actor_loop_receivers: (PortReceiver<Signal>, PortReceiver<ActorSupervisionEvent>),
+        mut work_rx: mpsc::UnboundedReceiver<WorkCell<A>>,
+    ) {
+        // `run_actor_tree` borrows `work_rx` instead of taking ownership because
+        // `work_rx` needs to remain alive until this function returns. If the owning
+        // proc's `supervision_coordinator_port` is a port on this instance, if `work_rx`
+        // is dropped before `self.proc.handle_supervision_event` is called, the process
+        // will exit due to a "channel closed" failure.
+        let result = self
+            .run_actor_tree(&mut actor, actor_loop_receivers, &mut work_rx)
+            .await;
 
         let (actor_status, event) = match result {
             Ok(_) => (ActorStatus::Stopped, None),
@@ -1023,13 +1060,14 @@ impl<A: Actor> Instance<A> {
         &mut self,
         actor: &mut A,
         mut actor_loop_receivers: (PortReceiver<Signal>, PortReceiver<ActorSupervisionEvent>),
+        work_rx: &mut mpsc::UnboundedReceiver<WorkCell<A>>,
     ) -> Result<(), ActorError> {
         // It is okay to catch all panics here, because we are in a tokio task,
         // and tokio will catch the panic anyway:
         // https://docs.rs/tokio/latest/tokio/task/struct.JoinError.html#method.is_panic
         // What we do here is just to catch it early so we can handle it.
 
-        let result = match AssertUnwindSafe(self.run(actor, &mut actor_loop_receivers))
+        let result = match AssertUnwindSafe(self.run(actor, &mut actor_loop_receivers, work_rx))
             .catch_unwind()
             .await
         {
@@ -1089,13 +1127,13 @@ impl<A: Actor> Instance<A> {
     }
 
     /// Initialize and run the actor until it fails or is stopped.
+    #[tracing::instrument(level = "info", skip_all, fields(actor_id = %self.self_id()))]
     async fn run(
         &mut self,
         actor: &mut A,
         actor_loop_receivers: &mut (PortReceiver<Signal>, PortReceiver<ActorSupervisionEvent>),
+        work_rx: &mut mpsc::UnboundedReceiver<WorkCell<A>>,
     ) -> Result<(), ActorError> {
-        tracing::debug!("entering actor loop: {}", self.self_id());
-
         let (signal_receiver, supervision_event_receiver) = actor_loop_receivers;
 
         self.change_status(ActorStatus::Initializing);
@@ -1109,7 +1147,7 @@ impl<A: Actor> Instance<A> {
             let metric_pairs =
                 hyperactor_telemetry::kv_pairs!("actor_id" => self.self_id().to_string());
             tokio::select! {
-                work = self.work_rx.recv() => {
+                work = work_rx.recv() => {
                     ACTOR_MESSAGES_RECEIVED.add(1, metric_pairs);
                     ACTOR_MESSAGE_QUEUE_SIZE.add(-1, metric_pairs);
                     let _ = ACTOR_MESSAGE_HANDLER_DURATION.start(metric_pairs);
@@ -1147,7 +1185,7 @@ impl<A: Actor> Instance<A> {
         if need_drain {
             self.change_status(ActorStatus::Stopping);
             let mut n = 0;
-            while let Ok(work) = self.work_rx.try_recv() {
+            while let Ok(work) = work_rx.try_recv() {
                 if let Err(err) = work.handle(actor, self).await {
                     return Err(ActorError::new(
                         self.self_id().clone(),
@@ -1231,13 +1269,31 @@ impl<A: Actor> Instance<A> {
             self.clock().system_time_now(),
             handler,
         ));
-        let span = self.status_span.lock().unwrap().clone();
+        let span = tracing::debug_span!(
+            "actor_status",
+            actor_id = self.self_id().to_string(),
+            actor_name = self.self_id().name(),
+            name = self.cell.status().borrow().to_string(),
+        );
 
         let context = Context::new(self, headers);
         // Pass a reference to the context to the handler, so that deref
         // coercion allows the `this` argument to be treated exactly like
         // &Instance<A>.
         actor.handle(&context, message).instrument(span).await
+    }
+
+    // Spawn on child on this instance. Currently used only by cap::CanSpawn.
+    pub(crate) async fn spawn<C: Actor>(
+        &self,
+        params: C::Params,
+    ) -> anyhow::Result<ActorHandle<C>> {
+        self.proc.spawn_child(self.cell.clone(), params).await
+    }
+
+    /// Create a new direct child instance.
+    pub fn child(&self) -> anyhow::Result<(Instance<()>, ActorHandle<()>)> {
+        self.proc.child_instance(self.cell.clone())
     }
 
     /// Return a handle port handle representing the actor's message
@@ -1274,6 +1330,20 @@ impl<A: Actor> Instance<A> {
     pub fn proc(&self) -> &Proc {
         &self.proc
     }
+
+    /// Clone this Instance to get an owned struct that can be
+    /// plumbed through python. This should really only be called
+    /// for the explicit purpose of being passed into python
+    #[doc(hidden)]
+    pub fn clone_for_py(&self) -> Self {
+        Self {
+            proc: self.proc.clone(),
+            cell: self.cell.clone(),
+            mailbox: self.mailbox.clone(),
+            ports: self.ports.clone(),
+            status_tx: self.status_tx.clone(),
+        }
+    }
 }
 
 impl<A: Actor> Drop for Instance<A> {
@@ -1289,125 +1359,55 @@ impl<A: Actor> Drop for Instance<A> {
     }
 }
 
-impl<A: Actor> cap::sealed::CanSend for Instance<A> {
-    fn post(&self, dest: PortId, headers: Attrs, data: Serialized) {
-        let envelope = MessageEnvelope::new(self.self_id().clone(), dest, data, headers);
-        self.proc.post(envelope, self.ports.get());
-    }
-    fn actor_id(&self) -> &ActorId {
-        self.self_id()
-    }
-}
-
-impl<A: Actor> cap::sealed::CanSend for &Instance<A> {
-    fn post(&self, dest: PortId, headers: Attrs, data: Serialized) {
-        (*self).post(dest, headers, data)
-    }
-    fn actor_id(&self) -> &ActorId {
-        self.self_id()
-    }
-}
-
-impl<A: Actor> cap::sealed::CanOpenPort for Instance<A> {
+impl<A: Actor> context::Mailbox for Instance<A> {
     fn mailbox(&self) -> &Mailbox {
         &self.mailbox
     }
 }
 
-impl<A: Actor> cap::sealed::CanOpenPort for &Instance<A> {
+impl<A: Actor> context::Mailbox for Context<'_, A> {
     fn mailbox(&self) -> &Mailbox {
         &self.mailbox
     }
 }
 
-impl<A: Actor> cap::sealed::CanSplitPort for Instance<A> {
-    fn split(&self, port_id: PortId, reducer_spec: Option<ReducerSpec>) -> anyhow::Result<PortId> {
-        self.mailbox.split(port_id, reducer_spec)
-    }
-}
-
-#[async_trait]
-impl<A: Actor> cap::sealed::CanSpawn for Instance<A> {
-    async fn spawn<C: Actor>(&self, params: C::Params) -> anyhow::Result<ActorHandle<C>> {
-        self.proc.spawn_child(self.cell.clone(), params).await
-    }
-}
-
-impl<A: Actor> cap::sealed::CanResolveActorRef for Instance<A> {
-    fn resolve_actor_ref<R: RemoteActor + Actor>(
-        &self,
-        actor_ref: &ActorRef<R>,
-    ) -> Option<ActorHandle<R>> {
-        self.proc
-            .inner
-            .instances
-            .get(actor_ref.actor_id())?
-            .upgrade()?
-            .downcast_handle()
-    }
-}
-
-impl<A: Actor> cap::HasProc for Instance<A> {
-    fn proc(&self) -> &Proc {
-        &self.proc
-    }
-}
-
-impl<A: Actor> cap::sealed::CanSend for Context<'_, A> {
-    fn post(&self, dest: PortId, headers: Attrs, data: Serialized) {
-        <Instance<A> as cap::sealed::CanSend>::post(self, dest, headers, data)
-    }
-    fn actor_id(&self) -> &ActorId {
-        self.self_id()
-    }
-}
-
-impl<A: Actor> cap::sealed::CanSend for &Context<'_, A> {
-    fn post(&self, dest: PortId, headers: Attrs, data: Serialized) {
-        <Instance<A> as cap::sealed::CanSend>::post(self, dest, headers, data)
-    }
-    fn actor_id(&self) -> &ActorId {
-        self.self_id()
-    }
-}
-
-impl<A: Actor> cap::sealed::CanOpenPort for Context<'_, A> {
+impl<A: Actor> context::Mailbox for &Instance<A> {
     fn mailbox(&self) -> &Mailbox {
-        <Instance<A> as cap::sealed::CanOpenPort>::mailbox(self)
+        &self.mailbox
     }
 }
 
-impl<A: Actor> cap::sealed::CanOpenPort for &Context<'_, A> {
+impl<A: Actor> context::Mailbox for &Context<'_, A> {
     fn mailbox(&self) -> &Mailbox {
-        <Instance<A> as cap::sealed::CanOpenPort>::mailbox(self)
+        &self.mailbox
     }
 }
 
-impl<A: Actor> cap::sealed::CanSplitPort for Context<'_, A> {
-    fn split(&self, port_id: PortId, reducer_spec: Option<ReducerSpec>) -> anyhow::Result<PortId> {
-        <Instance<A> as cap::sealed::CanSplitPort>::split(self, port_id, reducer_spec)
+impl<A: Actor> context::Actor for Instance<A> {
+    type A = A;
+    fn instance(&self) -> &Instance<A> {
+        self
     }
 }
 
-#[async_trait]
-impl<A: Actor> cap::sealed::CanSpawn for Context<'_, A> {
-    async fn spawn<C: Actor>(&self, params: C::Params) -> anyhow::Result<ActorHandle<C>> {
-        <Instance<A> as cap::sealed::CanSpawn>::spawn(self, params).await
+impl<A: Actor> context::Actor for Context<'_, A> {
+    type A = A;
+    fn instance(&self) -> &Instance<A> {
+        self
     }
 }
 
-impl<A: Actor> cap::sealed::CanResolveActorRef for Context<'_, A> {
-    fn resolve_actor_ref<R: RemoteActor + Actor>(
-        &self,
-        actor_ref: &ActorRef<R>,
-    ) -> Option<ActorHandle<R>> {
-        <Instance<A> as cap::sealed::CanResolveActorRef>::resolve_actor_ref(self, actor_ref)
+impl<A: Actor> context::Actor for &Instance<A> {
+    type A = A;
+    fn instance(&self) -> &Instance<A> {
+        self
     }
 }
 
-impl<A: Actor> cap::HasProc for Context<'_, A> {
-    fn proc(&self) -> &Proc {
-        <Instance<A> as cap::HasProc>::proc(self)
+impl<A: Actor> context::Actor for &Context<'_, A> {
+    type A = A;
+    fn instance(&self) -> &Instance<A> {
+        self
     }
 }
 
@@ -2053,7 +2053,7 @@ mod tests {
     #[tokio::test]
     async fn test_actor_lookup() {
         let proc = Proc::local();
-        let client = proc.attach("client").unwrap();
+        let (client, _handle) = proc.instance("client").unwrap();
 
         let target_actor = proc.spawn::<TestActor>("target", ()).await.unwrap();
         let target_actor_ref = target_actor.bind();
@@ -2510,7 +2510,7 @@ mod tests {
         // be actor failure(s) in this test which trigger supervision.
         ProcSupervisionCoordinator::set(&proc).await.unwrap();
 
-        let client = proc.attach("client").unwrap();
+        let (client, _handle) = proc.instance("client").unwrap();
         let actor_handle = proc.spawn::<TestActor>("test", ()).await.unwrap();
         actor_handle
             .panic(&client, "some random failure".to_string())
@@ -2800,7 +2800,7 @@ mod tests {
             // should cause the process to terminate.
             // ProcSupervisionCoordinator::set(&proc).await.unwrap();
             let root = proc.spawn::<TestActor>("root", ()).await.unwrap();
-            let client = proc.attach("client").unwrap();
+            let (client, _handle) = proc.instance("client").unwrap();
             root.fail(&client, anyhow::anyhow!("some random failure"))
                 .await
                 .unwrap();
