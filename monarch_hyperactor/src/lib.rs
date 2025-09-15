@@ -19,6 +19,7 @@ pub mod buffers;
 pub mod channel;
 pub mod code_sync;
 pub mod config;
+pub mod context;
 pub mod local_state_broker;
 pub mod logging;
 pub mod mailbox;

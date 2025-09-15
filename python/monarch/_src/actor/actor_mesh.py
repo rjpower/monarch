@@ -120,7 +120,7 @@ class Point(HyPoint, collections.abc.Mapping):
     pass
 
 
-@rust_struct("monarch_hyperactor::mailbox::Instance")
+@rust_struct("monarch_hyperactor::context::Instance")
 class Instance(abc.ABC):
     @abstractproperty
     def _mailbox(self) -> Mailbox:
@@ -171,7 +171,7 @@ class Instance(abc.ABC):
             self._children.append(child)
 
 
-@rust_struct("monarch_hyperactor::mailbox::Context")
+@rust_struct("monarch_hyperactor::context::Context")
 class Context:
     @property
     def actor_instance(self) -> Instance:

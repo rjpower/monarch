@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use hyperactor::Actor;
 use hyperactor::ActorHandle;
 use hyperactor::ActorId;
@@ -50,7 +49,6 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tracing::Instrument;
 
-use crate::buffers::Buffer;
 use crate::buffers::FrozenBuffer;
 use crate::config::SHARED_ASYNCIO_RUNTIME;
 use crate::local_state_broker::BrokerId;
@@ -476,7 +474,7 @@ pub struct PythonActor {
     /// instance object that we keep across handle calls
     /// so that we can store information from the Init (spawn rank, controller controller)
     /// and provide it to other calls
-    instance: Option<Py<crate::mailbox::Instance>>,
+    instance: Option<Py<crate::context::PyInstance>>,
 }
 
 impl PythonActor {
@@ -694,14 +692,14 @@ impl Handler<PythonMessage> for PythonActor {
 
         let future = Python::with_gil(|py| -> Result<_, SerializablePyErr> {
             let instance = self.instance.get_or_insert_with(|| {
-                let instance: crate::mailbox::Instance = cx.into();
+                let instance: crate::context::PyInstance = cx.into();
                 instance.into_pyobject(py).unwrap().into()
             });
             let awaitable = self.actor.call_method(
                 py,
                 "handle",
                 (
-                    crate::mailbox::Context::new(cx, instance.clone_ref(py)),
+                    crate::context::PyContext::new(cx, instance.clone_ref(py)),
                     resolved.method,
                     resolved.bytes,
                     PanicFlag {
