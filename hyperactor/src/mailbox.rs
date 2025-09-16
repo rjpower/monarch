@@ -1628,6 +1628,24 @@ impl<M: Message> PortHandle<M> {
             )
         })
     }
+
+    /// Unmap this port, using the provided function to translate
+    /// `R`-typed messages to `M`-typed ones, delivered on this port.
+    pub fn unmap<R, F>(&self, unmap: F) -> PortHandle<R>
+    where
+        R: Message,
+        F: Fn(R) -> M + Send + Sync + 'static,
+    {
+        let port_index = self.mailbox.inner.allocate_port();
+        let sender = self.sender.clone();
+        PortHandle::new(
+            self.mailbox.clone(),
+            port_index,
+            UnboundedPortSender::Func(Arc::new(move |headers, value: R| {
+                sender.send(headers, unmap(value))
+            })),
+        )
+    }
 }
 
 impl<M: RemoteMessage> PortHandle<M> {
@@ -3497,5 +3515,14 @@ mod tests {
         expected.sort();
 
         assert_eq!(prefixes, expected);
+    }
+
+    #[tokio::test]
+    async fn test_port_unmap() {
+        let mbox = Mailbox::new_detached(id!(test[0].test));
+        let (handle, mut rx) = mbox.open_port();
+
+        handle.unmap(|m| (1, m)).send("hello".to_string());
+        assert_eq!(rx.recv().await.unwrap(), (1, "hello".to_string()));
     }
 }
