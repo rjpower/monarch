@@ -17,30 +17,30 @@ use crate::mailbox::PyMailbox;
 use crate::proc::PyActorId;
 use crate::shape::PyPoint;
 
-enum ErasedInstance {
-    Unit(hyperactor::Instance<()>),
+enum ContextInstance {
+    Client(hyperactor::Instance<()>),
     PythonActor(hyperactor::Instance<PythonActor>),
 }
 
-impl ErasedInstance {
+impl ContextInstance {
     fn mailbox_for_py(&self) -> &hyperactor::Mailbox {
         match self {
-            ErasedInstance::Unit(ins) => ins.mailbox_for_py(),
-            ErasedInstance::PythonActor(ins) => ins.mailbox_for_py(),
+            ContextInstance::Client(ins) => ins.mailbox_for_py(),
+            ContextInstance::PythonActor(ins) => ins.mailbox_for_py(),
         }
     }
 
     fn self_id(&self) -> &hyperactor::ActorId {
         match self {
-            ErasedInstance::Unit(ins) => ins.self_id(),
-            ErasedInstance::PythonActor(ins) => ins.self_id(),
+            ContextInstance::Client(ins) => ins.self_id(),
+            ContextInstance::PythonActor(ins) => ins.self_id(),
         }
     }
 }
 
 #[pyclass(name = "Instance", module = "monarch._src.actor.actor_mesh")]
 pub(crate) struct PyInstance {
-    inner: ErasedInstance,
+    inner: ContextInstance,
     #[pyo3(get, set)]
     proc_mesh: Option<PyObject>,
     #[pyo3(get, set, name = "_controller_controller")]
@@ -66,31 +66,31 @@ impl PyInstance {
     }
 }
 
-impl From<&hyperactor::Instance<PythonActor>> for ErasedInstance {
+impl From<&hyperactor::Instance<PythonActor>> for ContextInstance {
     fn from(ins: &hyperactor::Instance<PythonActor>) -> Self {
-        ErasedInstance::PythonActor(ins.clone_for_py())
+        ContextInstance::PythonActor(ins.clone_for_py())
     }
 }
 
-impl From<&hyperactor::Instance<()>> for ErasedInstance {
+impl From<&hyperactor::Instance<()>> for ContextInstance {
     fn from(ins: &hyperactor::Instance<()>) -> Self {
-        ErasedInstance::Unit(ins.clone_for_py())
+        ContextInstance::Client(ins.clone_for_py())
     }
 }
 
-impl From<&hyperactor::Context<'_, PythonActor>> for ErasedInstance {
+impl From<&hyperactor::Context<'_, PythonActor>> for ContextInstance {
     fn from(cx: &hyperactor::Context<'_, PythonActor>) -> Self {
-        ErasedInstance::PythonActor(cx.clone_for_py())
+        ContextInstance::PythonActor(cx.clone_for_py())
     }
 }
 
-impl From<&hyperactor::Context<'_, ()>> for ErasedInstance {
+impl From<&hyperactor::Context<'_, ()>> for ContextInstance {
     fn from(cx: &hyperactor::Context<'_, ()>) -> Self {
-        ErasedInstance::Unit(cx.clone_for_py())
+        ContextInstance::Client(cx.clone_for_py())
     }
 }
 
-impl<I: Into<ErasedInstance>> From<I> for PyInstance {
+impl<I: Into<ContextInstance>> From<I> for PyInstance {
     fn from(ins: I) -> Self {
         PyInstance {
             inner: ins.into(),
