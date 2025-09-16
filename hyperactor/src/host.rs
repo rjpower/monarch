@@ -30,17 +30,18 @@
 //!                      ┌────────────┐
 //!                  ┌───▶  proc *,1  │
 //!                  │ #1└────────────┘
-//!                  │                 
+//!                  │
 //!  ┌──────────┐    │   ┌────────────┐
 //!  │   Host   │◀───┼───▶  proc *,2  │
 //! *└──────────┘#   │ #2└────────────┘
-//!                  │                 
+//!                  │
 //!                  │   ┌────────────┐
 //!                  └───▶  proc *,3  │
 //!                    #3└────────────┘
 //! ```
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use std::sync::Arc;
