@@ -47,7 +47,7 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 
 const REPLY_VARIANT_ERROR: &str = indoc! {r#"
-`call` message expects a typed `OncePortRef` or `OncePortHandle` argument in the last position
+`call` message expects a typed port ref (`OncePortRef` or `PortRef`) or handle (`OncePortHandle` or `PortHandle`) argument in the last position
 
 = help: use `MyCall(Arg1Type, Arg2Type, .., OncePortRef<ReplyType>)`
 = help: use `MyCall(Arg1Type, Arg2Type, .., OncePortHandle<ReplyType>)`
@@ -74,6 +74,8 @@ enum Variant {
         field_names: Vec<Ident>,
         field_types: Vec<Type>,
         field_flags: Vec<FieldFlag>,
+        is_struct: bool,
+        generics: syn::Generics,
     },
     /// An anonymous variant (i.e., `MyVariant(..)`).
     Anon {
@@ -81,6 +83,8 @@ enum Variant {
         name: Ident,
         field_types: Vec<Type>,
         field_flags: Vec<FieldFlag>,
+        is_struct: bool,
+        generics: syn::Generics,
     },
 }
 
@@ -88,6 +92,14 @@ impl Variant {
     /// The number of fields in the variant.
     fn len(&self) -> usize {
         self.field_types().len()
+    }
+
+    /// Returns whether this variant was defined as a struct.
+    fn is_struct(&self) -> bool {
+        match self {
+            Variant::Named { is_struct, .. } => *is_struct,
+            Variant::Anon { is_struct, .. } => *is_struct,
+        }
     }
 
     /// The name of the enum containing the variant.
@@ -106,6 +118,14 @@ impl Variant {
         }
     }
 
+    /// The generics of the variant itself.
+    fn generics(&self) -> &syn::Generics {
+        match self {
+            Variant::Named { generics, .. } => generics,
+            Variant::Anon { generics, .. } => generics,
+        }
+    }
+
     /// The snake_name of the variant itself.
     fn snake_name(&self) -> Ident {
         Ident::new(
@@ -118,7 +138,12 @@ impl Variant {
     fn qualified_name(&self) -> proc_macro2::TokenStream {
         let enum_name = self.enum_name();
         let name = self.name();
-        quote! { #enum_name::#name }
+
+        if self.is_struct() {
+            quote! { #enum_name }
+        } else {
+            quote! { #enum_name::#name }
+        }
     }
 
     /// Names of the fields in the variant. Anonymous variants are named
@@ -159,6 +184,36 @@ impl Variant {
     }
 }
 
+struct ReplyPort {
+    is_handle: bool,
+    is_once: bool,
+}
+
+impl ReplyPort {
+    fn from_last_segment(last_segment: &proc_macro2::Ident) -> ReplyPort {
+        ReplyPort {
+            is_handle: last_segment == "PortHandle" || last_segment == "OncePortHandle",
+            is_once: last_segment == "OncePortHandle" || last_segment == "OncePortRef",
+        }
+    }
+
+    fn open_op(&self) -> proc_macro2::TokenStream {
+        if self.is_once {
+            quote! { hyperactor::mailbox::open_once_port }
+        } else {
+            quote! { hyperactor::mailbox::open_port }
+        }
+    }
+
+    fn rx_modifier(&self) -> proc_macro2::TokenStream {
+        if self.is_once {
+            quote! {}
+        } else {
+            quote! { mut }
+        }
+    }
+}
+
 /// Represents a message that can be sent to a handler, each message is associated with
 /// a variant.
 #[allow(clippy::large_enum_variant)]
@@ -168,7 +223,7 @@ enum Message {
     Call {
         variant: Variant,
         /// Tells whether the reply argument is a handle.
-        reply_port_is_handle: bool,
+        reply_port: ReplyPort,
         /// The underlying return type (i.e., the type of the reply port).
         return_type: Type,
         /// the log level for generated instrumentation for handlers of this message.
@@ -201,7 +256,11 @@ impl Message {
                 let Some(last_segment) = type_path.path.segments.last() else {
                     return Err(syn::Error::new(span, REPLY_VARIANT_ERROR));
                 };
-                if last_segment.ident != "OncePortRef" && last_segment.ident != "OncePortHandle" {
+                if last_segment.ident != "OncePortRef"
+                    && last_segment.ident != "OncePortHandle"
+                    && last_segment.ident != "PortRef"
+                    && last_segment.ident != "PortHandle"
+                {
                     return Err(syn::Error::new_spanned(last_segment, REPLY_VARIANT_ERROR));
                 }
                 let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments else {
@@ -210,11 +269,11 @@ impl Message {
                 let Some(syn::GenericArgument::Type(return_ty)) = args.args.first() else {
                     return Err(syn::Error::new_spanned(&args.args, REPLY_VARIANT_ERROR));
                 };
-                let reply_port_is_handle = last_segment.ident == "OncePortHandle";
+                let reply_port = ReplyPort::from_last_segment(&last_segment.ident);
                 let return_type = return_ty.clone();
                 Ok(Self::Call {
                     variant,
-                    reply_port_is_handle,
+                    reply_port,
                     return_type,
                     log_level,
                 })
@@ -333,71 +392,119 @@ fn parse_field_flag(field: &Field) -> FieldFlag {
     FieldFlag::None
 }
 
-/// Parse a message enum into its constituent messages.
-fn parse_message_enum(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
-    let variants = if let Data::Enum(data_enum) = &input.data {
-        &data_enum.variants
-    } else {
-        return Err(syn::Error::new_spanned(
-            input,
-            "handlers can only be derived for enums",
-        ));
-    };
+/// Parse a message enum or struct into its constituent messages.
+fn parse_messages(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
+    match &input.data {
+        Data::Enum(data_enum) => {
+            let mut messages = Vec::new();
 
-    let mut messages = Vec::new();
+            for variant in &data_enum.variants {
+                let name = variant.ident.clone();
+                let attrs = &variant.attrs;
 
-    for variant in variants {
-        let name = variant.ident.clone();
-        let attrs = &variant.attrs;
+                let message_variant = match &variant.fields {
+                    syn::Fields::Unnamed(fields_) => Variant::Anon {
+                        enum_name: input.ident.clone(),
+                        name,
+                        field_types: fields_
+                            .unnamed
+                            .iter()
+                            .map(|field| field.ty.clone())
+                            .collect(),
+                        field_flags: fields_.unnamed.iter().map(parse_field_flag).collect(),
+                        is_struct: false,
+                        generics: input.generics.clone(),
+                    },
+                    syn::Fields::Named(fields_) => Variant::Named {
+                        enum_name: input.ident.clone(),
+                        name,
+                        field_names: fields_
+                            .named
+                            .iter()
+                            .map(|field| field.ident.clone().unwrap())
+                            .collect(),
+                        field_types: fields_.named.iter().map(|field| field.ty.clone()).collect(),
+                        field_flags: fields_.named.iter().map(parse_field_flag).collect(),
+                        is_struct: false,
+                        generics: input.generics.clone(),
+                    },
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            variant,
+                            indoc! {r#"
+                                `Handler` currently only supports named or tuple struct variants
 
-        let message_variant = match &variant.fields {
-            syn::Fields::Unnamed(fields_) => Variant::Anon {
-                enum_name: input.ident.clone(),
-                name,
-                field_types: fields_
-                    .unnamed
-                    .iter()
-                    .map(|field| field.ty.clone())
-                    .collect(),
-                field_flags: fields_.unnamed.iter().map(parse_field_flag).collect(),
-            },
-            syn::Fields::Named(fields_) => Variant::Named {
-                enum_name: input.ident.clone(),
-                name,
-                field_names: fields_
-                    .named
-                    .iter()
-                    .map(|field| field.ident.clone().unwrap())
-                    .collect(),
-                field_types: fields_.named.iter().map(|field| field.ty.clone()).collect(),
-                field_flags: fields_.named.iter().map(parse_field_flag).collect(),
-            },
-            _ => {
-                return Err(syn::Error::new_spanned(
-                    variant,
-                    indoc! {r#"
-                      `Handler` currently only supports named or tuple struct variants
+                                = help use `MyCall(Arg1Type, Arg2Type, ..)`,
+                                = help use `MyCall { arg1: Arg1Type, arg2: Arg2Type, .. }`,
+                                = help use `MyCall(Arg1Type, Arg2Type, .., #[reply] OncePortRef<ReplyType>)`
+                                = help use `MyCall { arg1: Arg1Type, arg2: Arg2Type, .., reply: #[reply] OncePortRef<ReplyType>}`
+                                = help use `MyCall(Arg1Type, Arg2Type, .., #[reply] OncePortHandle<ReplyType>)`
+                                = help use `MyCall { arg1: Arg1Type, arg2: Arg2Type, .., reply: #[reply] OncePortHandle<ReplyType>}`
+                              "#},
+                        ));
+                    }
+                };
+                let log_level = parse_log_level(attrs)?;
 
-                      = help use `MyCall(Arg1Type, Arg2Type, ..)`,
-                      = help use `MyCall { arg1: Arg1Type, arg2: Arg2Type, .. }`,
-                      = help use `MyCall(Arg1Type, Arg2Type, .., #[reply] OncePortRef<ReplyType>)`
-                      = help use `MyCall { arg1: Arg1Type, arg2: Arg2Type, .., reply: #[reply] OncePortRef<ReplyType>)`
-                      = help use `MyCall(Arg1Type, Arg2Type, .., #[reply] OncePortHandle<ReplyType>)`
-                      = help use `MyCall { arg1: Arg1Type, arg2: Arg2Type, .., reply: #[reply] OncePortHandle<ReplyType>)`
-                    "#},
-                ));
+                messages.push(Message::new(
+                    variant.fields.span(),
+                    message_variant,
+                    log_level,
+                )?);
             }
-        };
-        let log_level = parse_log_level(attrs)?;
 
-        messages.push(Message::new(
-            variant.fields.span(),
-            message_variant,
-            log_level,
-        )?);
+            Ok(messages)
+        }
+        Data::Struct(data_struct) => {
+            let struct_name = input.ident.clone();
+            let attrs = &input.attrs;
+
+            let message_variant = match &data_struct.fields {
+                syn::Fields::Unnamed(fields_) => Variant::Anon {
+                    enum_name: struct_name.clone(),
+                    name: struct_name,
+                    field_types: fields_
+                        .unnamed
+                        .iter()
+                        .map(|field| field.ty.clone())
+                        .collect(),
+                    field_flags: fields_.unnamed.iter().map(parse_field_flag).collect(),
+                    is_struct: true,
+                    generics: input.generics.clone(),
+                },
+                syn::Fields::Named(fields_) => Variant::Named {
+                    enum_name: struct_name.clone(),
+                    name: struct_name,
+                    field_names: fields_
+                        .named
+                        .iter()
+                        .map(|field| field.ident.clone().unwrap())
+                        .collect(),
+                    field_types: fields_.named.iter().map(|field| field.ty.clone()).collect(),
+                    field_flags: fields_.named.iter().map(parse_field_flag).collect(),
+                    is_struct: true,
+                    generics: input.generics.clone(),
+                },
+                syn::Fields::Unit => Variant::Anon {
+                    enum_name: struct_name.clone(),
+                    name: struct_name,
+                    field_types: Vec::new(),
+                    field_flags: Vec::new(),
+                    is_struct: true,
+                    generics: input.generics.clone(),
+                },
+            };
+
+            let log_level = parse_log_level(attrs)?;
+            let message = Message::new(data_struct.fields.span(), message_variant, log_level)?;
+
+            Ok(vec![message])
+        }
+        _ => Err(syn::Error::new_spanned(
+            input,
+            "handlers can only be derived for enums and structs",
+        )),
     }
-
-    Ok(messages)
 }
 
 /// Derive a custom handler trait for given an enum containing tuple
@@ -560,9 +667,9 @@ fn parse_message_enum(input: DeriveInput) -> Result<Vec<Message>, syn::Error> {
 pub fn derive_handler(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name: Ident = input.ident.clone();
-    let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
+    let (_, ty_generics, _) = input.generics.split_for_impl();
 
-    let messages = match parse_message_enum(input.clone()) {
+    let messages = match parse_messages(input.clone()) {
         Ok(messages) => messages,
         Err(err) => return TokenStream::from(err.to_compile_error()),
     };
@@ -578,13 +685,13 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
 
     let global_log_level = parse_log_level(&input.attrs).ok().unwrap_or(None);
 
-    for message in messages {
+    for message in &messages {
         match message {
             Message::Call {
-                ref variant,
-                ref reply_port_is_handle,
-                ref return_type,
-                ref log_level,
+                variant,
+                reply_port,
+                return_type,
+                log_level,
             } => {
                 let (arg_names, arg_types): (Vec<_>, Vec<_>) = message.args().into_iter().unzip();
                 let variant_name_snake = variant.snake_name();
@@ -597,7 +704,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                     (Some(global), None) => global.clone(),
                     _ => Ident::new("DEBUG", Span::call_site()),
                 };
-                let _log_level = if *reply_port_is_handle {
+                let _log_level = if reply_port.is_handle {
                     quote! {
                         tracing::Level::#log_level
                     }
@@ -644,7 +751,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                 let constructor = variant.constructor();
                 let result_ident = Ident::new("result", Span::mixed_site());
                 let construct_result_future = quote! { use hyperactor::Message; let #result_ident = self.#variant_name_snake(cx, #(#arg_names),*).await?; };
-                if *reply_port_is_handle {
+                if reply_port.is_handle {
                     match_arms.push(quote! {
                         #constructor => {
                             #log_message
@@ -666,10 +773,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
                     });
                 }
             }
-            Message::OneWay {
-                ref variant,
-                ref log_level,
-            } => {
+            Message::OneWay { variant, log_level } => {
                 let (arg_names, arg_types): (Vec<_>, Vec<_>) = message.args().into_iter().unzip();
                 let variant_name_snake = variant.snake_name();
                 let variant_name_snake_deprecated =
@@ -732,10 +836,27 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
     let handler_trait_name = format_ident!("{}Handler", name);
     let client_trait_name = format_ident!("{}Client", name);
 
+    // We impose additional constraints on the generics in the implementation;
+    // but the trait itself should not impose additional constraints:
+
+    let mut handler_generics = input.generics.clone();
+    for param in handler_generics.type_params_mut() {
+        param.bounds.push(syn::parse_quote!(serde::Serialize));
+        param
+            .bounds
+            .push(syn::parse_quote!(for<'de> serde::Deserialize<'de>));
+        param.bounds.push(syn::parse_quote!(Send));
+        param.bounds.push(syn::parse_quote!(Sync));
+        param.bounds.push(syn::parse_quote!(std::fmt::Debug));
+        param.bounds.push(syn::parse_quote!(hyperactor::Named));
+    }
+    let (handler_impl_generics, _, _) = handler_generics.split_for_impl();
+    let (client_impl_generics, _, _) = input.generics.split_for_impl();
+
     let expanded = quote! {
         #[doc = "The custom handler trait for this message type."]
         #[hyperactor::async_trait::async_trait]
-        pub trait #handler_trait_name #impl_generics: hyperactor::Actor + Send + Sync  {
+        pub trait #handler_trait_name #handler_impl_generics: hyperactor::Actor + Send + Sync  {
             #(#handler_trait_methods)*
 
             #[doc = "Handle the next message."]
@@ -753,7 +874,7 @@ pub fn derive_handler(input: TokenStream) -> TokenStream {
 
         #[doc = "The custom client trait for this message type."]
         #[hyperactor::async_trait::async_trait]
-        pub trait #client_trait_name #impl_generics: Send + Sync  {
+        pub trait #client_trait_name #client_impl_generics: Send + Sync  {
             #(#client_trait_methods)*
         }
     };
@@ -779,7 +900,7 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident.clone();
 
-    let messages = match parse_message_enum(input.clone()) {
+    let messages = match parse_messages(input.clone()) {
         Ok(messages) => messages,
         Err(err) => return TokenStream::from(err.to_compile_error()),
     };
@@ -794,13 +915,13 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
     };
     let global_log_level = parse_log_level(&input.attrs).ok().unwrap_or(None);
 
-    for message in messages {
+    for message in &messages {
         match message {
             Message::Call {
-                ref variant,
-                ref reply_port_is_handle,
-                ref return_type,
-                ref log_level,
+                variant,
+                reply_port,
+                return_type,
+                log_level,
             } => {
                 let (arg_names, arg_types): (Vec<_>, Vec<_>) = message.args().into_iter().unzip();
                 let variant_name_snake = variant.snake_name();
@@ -833,7 +954,9 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                         ));
 
                 };
-                if *reply_port_is_handle {
+                let open_port = reply_port.open_op();
+                let rx_mod = reply_port.rx_modifier();
+                if reply_port.is_handle {
                     impl_methods.push(quote! {
                         #[hyperactor::instrument(level=#log_level, rpc = "call", message_type=#name)]
                         async fn #variant_name_snake(
@@ -841,8 +964,8 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                             cx: &impl hyperactor::context::Actor,
                             #(#arg_names: #arg_types),*)
                             -> Result<#return_type, hyperactor::anyhow::Error> {
-                            let (#reply_port_arg, reply_receiver) =
-                                hyperactor::mailbox::open_once_port::<#return_type>(cx);
+                            let (#reply_port_arg, #rx_mod reply_receiver) =
+                                #open_port::<#return_type>(cx);
                             let message = #constructor;
                             #log_message;
                             #send_message;
@@ -855,8 +978,8 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                             cx: &(impl hyperactor::cap::CanSend + hyperactor::cap::CanOpenPort),
                             #(#arg_names: #arg_types),*)
                             -> Result<#return_type, hyperactor::anyhow::Error> {
-                            let (#reply_port_arg, reply_receiver) =
-                                hyperactor::mailbox::open_once_port::<#return_type>(cx);
+                            let (#reply_port_arg, #rx_mod reply_receiver) =
+                                #open_port::<#return_type>(cx);
                             let message = #constructor;
                             #log_message;
                             #send_message;
@@ -871,8 +994,8 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                             cx: &impl hyperactor::context::Actor,
                             #(#arg_names: #arg_types),*)
                             -> Result<#return_type, hyperactor::anyhow::Error> {
-                            let (#reply_port_arg, reply_receiver) =
-                                hyperactor::mailbox::open_once_port::<#return_type>(cx);
+                            let (#reply_port_arg, #rx_mod reply_receiver) =
+                                #open_port::<#return_type>(cx);
                             let #reply_port_arg = #reply_port_arg.bind();
                             let message = #constructor;
                             #log_message;
@@ -886,8 +1009,8 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                             cx: &(impl hyperactor::cap::CanSend + hyperactor::cap::CanOpenPort),
                             #(#arg_names: #arg_types),*)
                             -> Result<#return_type, hyperactor::anyhow::Error> {
-                            let (#reply_port_arg, reply_receiver) =
-                                hyperactor::mailbox::open_once_port::<#return_type>(cx);
+                            let (#reply_port_arg, #rx_mod reply_receiver) =
+                                #open_port::<#return_type>(cx);
                             let #reply_port_arg = #reply_port_arg.bind();
                             let message = #constructor;
                             #log_message;
@@ -897,10 +1020,7 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
                     });
                 }
             }
-            Message::OneWay {
-                ref variant,
-                ref log_level,
-            } => {
+            Message::OneWay { variant, log_level } => {
                 let (arg_names, arg_types): (Vec<_>, Vec<_>) = message.args().into_iter().unzip();
                 let variant_name_snake = variant.snake_name();
                 let variant_name_snake_deprecated =
@@ -961,12 +1081,12 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
     let (_, ty_generics, _) = input.generics.split_for_impl();
 
     // Add a new generic parameter 'A'
-    let a_ident = Ident::new("A", proc_macro2::Span::from(proc_macro::Span::def_site()));
+    let actor_ident = Ident::new("A", proc_macro2::Span::from(proc_macro::Span::def_site()));
     let mut trait_generics = input.generics.clone();
     trait_generics.params.insert(
         0,
         syn::GenericParam::Type(syn::TypeParam {
-            ident: a_ident.clone(),
+            ident: actor_ident.clone(),
             attrs: vec![],
             colon_token: None,
             bounds: Punctuated::new(),
@@ -974,21 +1094,36 @@ fn derive_client(input: TokenStream, is_handle: bool) -> TokenStream {
             default: None,
         }),
     );
+
+    for param in trait_generics.type_params_mut() {
+        if param.ident == actor_ident {
+            continue;
+        }
+        param.bounds.push(syn::parse_quote!(serde::Serialize));
+        param
+            .bounds
+            .push(syn::parse_quote!(for<'de> serde::Deserialize<'de>));
+        param.bounds.push(syn::parse_quote!(Send));
+        param.bounds.push(syn::parse_quote!(Sync));
+        param.bounds.push(syn::parse_quote!(std::fmt::Debug));
+        param.bounds.push(syn::parse_quote!(hyperactor::Named));
+    }
+
     let (impl_generics, _, _) = trait_generics.split_for_impl();
 
     let expanded = if is_handle {
         quote! {
             #[hyperactor::async_trait::async_trait]
-            impl #impl_generics #trait_name #ty_generics for hyperactor::ActorHandle<#a_ident>
-              where #a_ident: hyperactor::Handler<#name #ty_generics> {
+            impl #impl_generics #trait_name #ty_generics for hyperactor::ActorHandle<#actor_ident>
+              where #actor_ident: hyperactor::Handler<#name #ty_generics> {
                 #(#impl_methods)*
             }
         }
     } else {
         quote! {
             #[hyperactor::async_trait::async_trait]
-            impl #impl_generics #trait_name #ty_generics for hyperactor::ActorRef<#a_ident>
-              where #a_ident: hyperactor::actor::RemoteHandles<#name #ty_generics> {
+            impl #impl_generics #trait_name #ty_generics for hyperactor::ActorRef<#actor_ident>
+              where #actor_ident: hyperactor::actor::RemoteHandles<#name #ty_generics> {
                 #(#impl_methods)*
             }
         }
