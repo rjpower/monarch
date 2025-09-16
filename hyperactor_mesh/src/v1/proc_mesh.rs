@@ -22,7 +22,6 @@ use hyperactor::actor::remote::Remote;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::context;
-use hyperactor::mailbox;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxServer;
 use ndslice::Extent;
@@ -367,6 +366,7 @@ impl view::RankedRef for ProcMeshRef {
 mod tests {
     use std::collections::HashSet;
 
+    use hyperactor::mailbox;
     use ndslice::ViewExt;
     use ndslice::extent;
 
