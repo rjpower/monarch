@@ -7,6 +7,7 @@
  */
 
 use std::collections::HashSet;
+use std::fmt::Debug;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -16,10 +17,12 @@ use hyperactor::HandleClient;
 use hyperactor::Handler;
 use hyperactor::Named;
 use hyperactor::OncePortRef;
+use hyperactor::PortRef;
 use hyperactor::RefClient;
 use hyperactor::proc::Proc;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 #[derive(Handler, HandleClient, RefClient, Debug, Serialize, Deserialize, Named)]
 enum ShoppingList {
@@ -34,12 +37,27 @@ enum ShoppingList {
     List(#[reply] OncePortRef<Vec<String>>),
 }
 
+// Example struct-based message types (demonstrating the new struct support)
+#[derive(Handler, HandleClient, RefClient, Debug, Serialize, Deserialize, Named)]
+struct ClearList {
+    reason: String,
+}
+
+#[derive(Handler, HandleClient, RefClient, Debug, Serialize, Deserialize, Named)]
+struct GetItemCount<C> {
+    category_filter: String,
+    #[reply]
+    reply: OncePortRef<C>,
+}
+
 // Define an actor.
 #[derive(Debug, Actor, Default)]
 #[hyperactor::export(
     spawn = true,
     handlers = [
         ShoppingList,
+        ClearList,
+        GetItemCount<usize>,
     ],
 )]
 struct ShoppingListActor(HashSet<String>);
@@ -77,6 +95,39 @@ impl ShoppingListHandler for ShoppingListActor {
 
     async fn list(&mut self, _cx: &Context<Self>) -> Result<Vec<String>, anyhow::Error> {
         Ok(self.0.iter().cloned().collect())
+    }
+}
+
+#[async_trait]
+#[hyperactor::forward(ClearList)]
+impl ClearListHandler for ShoppingListActor {
+    async fn clear_list(
+        &mut self,
+        _cx: &Context<Self>,
+        reason: String,
+    ) -> Result<(), anyhow::Error> {
+        eprintln!("clearing list: {}", reason);
+        self.0.clear();
+        Ok(())
+    }
+}
+
+#[async_trait]
+#[hyperactor::forward(GetItemCount<usize>)]
+impl GetItemCountHandler<usize> for ShoppingListActor {
+    async fn get_item_count(
+        &mut self,
+        _cx: &Context<Self>,
+        category_filter: String,
+    ) -> Result<usize, anyhow::Error> {
+        // Simple filter: count items containing the category_filter string
+        let count = self
+            .0
+            .iter()
+            .filter(|item| item.contains(&category_filter))
+            .count();
+        eprintln!("counting items with '{}': {}", category_filter, count);
+        Ok(count)
     }
 }
 
@@ -119,6 +170,35 @@ async fn main() -> Result<(), anyhow::Error> {
 
     println!(
         "shopping list: {:?}",
+        shopping_list_actor.list(&client).await?
+    );
+
+    // Add some more items to test filtering
+    shopping_list_actor
+        .add(&client, "dairy milk".into())
+        .await?;
+    shopping_list_actor
+        .add(&client, "whole grain bread".into())
+        .await?;
+
+    // Test the GetItemCount struct message (call message with reply)
+    let dairy_count = shopping_list_actor
+        .get_item_count(&client, "dairy".into())
+        .await?;
+    println!("items containing 'dairy': {}", dairy_count);
+
+    let grain_count = shopping_list_actor
+        .get_item_count(&client, "grain".into())
+        .await?;
+    println!("items containing 'grain': {}", grain_count);
+
+    // Test the ClearList struct message (oneway message)
+    shopping_list_actor
+        .clear_list(&client, "end of shopping session".into())
+        .await?;
+
+    println!(
+        "shopping list after clear: {:?}",
         shopping_list_actor.list(&client).await?
     );
 
