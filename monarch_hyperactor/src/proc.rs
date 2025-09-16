@@ -20,8 +20,6 @@ use std::collections::HashMap;
 use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -34,11 +32,9 @@ use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::clock::Clock;
 use hyperactor::clock::ClockKind;
-use hyperactor::context;
 use hyperactor::data::Serialized;
 use hyperactor::mailbox::BoxedMailboxSender;
 use hyperactor::mailbox::DialMailboxRouter;
-use hyperactor::mailbox::Mailbox;
 use hyperactor::mailbox::MailboxClient;
 use hyperactor::mailbox::PortHandle;
 use hyperactor::mailbox::PortReceiver;
@@ -128,7 +124,7 @@ impl PyProc {
         let mut inner = self.inner.clone();
         let (_stopped, aborted) = signal_safe_block_on(py, async move {
             inner
-                .destroy_and_wait(Duration::from_secs(timeout_in_secs), None)
+                .destroy_and_wait::<()>(Duration::from_secs(timeout_in_secs), None)
                 .await
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))
         })??;
