@@ -160,6 +160,7 @@ pub struct BootstrapProcManager {
 }
 
 impl BootstrapProcManager {
+    #[allow(dead_code)]
     pub(crate) fn new(program: std::path::PathBuf) -> Self {
         Self { program }
     }
@@ -249,7 +250,7 @@ pub async fn bootstrap() -> anyhow::Error {
                     future::pending::<()>().await;
                     unreachable!()
                 }
-                Err(e) => return e.into(),
+                Err(e) => e.into(),
             }
         }
         BootstrapMode::V0ProcMesh => bootstrap_v0_proc_mesh().await,

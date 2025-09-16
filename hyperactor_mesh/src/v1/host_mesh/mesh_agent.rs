@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
 //! The mesh agent actor that manages a host.
 
 use std::collections::HashMap;
@@ -71,7 +79,7 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
             )
             .is_none();
 
-        create_or_update.reply.send(cx, ok);
+        create_or_update.reply.send(cx, ok)?;
         Ok(())
     }
 }
@@ -110,7 +118,7 @@ impl Handler<resource::GetState<ProcState>> for HostMeshAgent {
             },
         };
 
-        get_state.reply.send(cx, state);
+        get_state.reply.send(cx, state)?;
         Ok(())
     }
 }
