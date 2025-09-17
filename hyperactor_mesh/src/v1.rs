@@ -77,6 +77,9 @@ pub enum Error {
 
     #[error("error while sending message to actor {0}: {1}")]
     SendingError(ActorId, Box<MailboxSenderError>),
+
+    #[error("error while casting message to {0}: {1}")]
+    CastingError(Name, anyhow::Error),
 }
 
 impl From<crate::alloc::AllocatorError> for Error {
@@ -119,7 +122,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// and a unique UUID.
 ///
 /// Names have a concrete syntax--`{name}-{uuid}`--printed by `Display` and parsed by `FromStr`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize
+)]
 pub struct Name(pub String, pub ShortUuid);
 
 impl Name {
