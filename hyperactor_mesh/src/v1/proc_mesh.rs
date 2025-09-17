@@ -343,7 +343,7 @@ impl ProcMeshRef {
                             actor_type: actor_type.clone(),
                             params_data: serialized_params.clone(),
                         },
-                        reply: completed_handle.unmap(move |ok| (rank, ok)).bind(),
+                        reply: completed_handle.contramap(move |ok| (rank, ok)).bind(),
                     },
                 )
                 .map_err(|e| Error::SendingError(proc_ref.agent.actor_id().clone(), Box::new(e)))?;
