@@ -3,6 +3,8 @@
 //! the bootstrap binary, which is not built in test mode (and anyway, test mode
 //! does not work across crate boundaries)
 
+use std::collections::VecDeque;
+
 use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::ActorId;
@@ -21,6 +23,7 @@ use serde::Serialize;
     spawn = true,
     handlers = [
         GetActorId,
+        Forward,
     ]
 )]
 pub struct TestActor;
@@ -37,6 +40,36 @@ impl Handler<GetActorId> for TestActor {
         GetActorId(reply): GetActorId,
     ) -> Result<(), anyhow::Error> {
         reply.send(cx, cx.self_id().clone())?;
+        Ok(())
+    }
+}
+
+/// A message to forward to a visit list of ports.
+/// Each port removes the next entry, and adds it to the
+/// 'visited' list.
+#[derive(Debug, Clone, Named, Bind, Unbind, Serialize, Deserialize)]
+pub struct Forward {
+    pub to_visit: VecDeque<PortRef<Forward>>,
+    pub visited: Vec<PortRef<Forward>>,
+}
+
+#[async_trait]
+impl Handler<Forward> for TestActor {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        Forward {
+            mut to_visit,
+            mut visited,
+        }: Forward,
+    ) -> Result<(), anyhow::Error> {
+        let Some(this) = to_visit.pop_front() else {
+            anyhow::bail!("unexpected forward chain termination");
+        };
+        visited.push(this);
+        let next = to_visit.front().cloned();
+        anyhow::ensure!(next.is_some(), "unexpected forward chain termination");
+        next.unwrap().send(cx, Forward { to_visit, visited })?;
         Ok(())
     }
 }

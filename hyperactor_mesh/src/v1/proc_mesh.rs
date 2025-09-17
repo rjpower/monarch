@@ -25,6 +25,7 @@ use hyperactor::context;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxServer;
 use ndslice::Extent;
+use ndslice::ViewExt as _;
 use ndslice::view;
 use ndslice::view::MapIntoRefExt;
 use ndslice::view::Region;
@@ -35,16 +36,14 @@ use crate::alloc::Alloc;
 use crate::alloc::AllocExt;
 use crate::alloc::AllocatedProc;
 use crate::assign::Ranks;
-use crate::proc_mesh;
 use crate::proc_mesh::mesh_agent;
-use crate::proc_mesh::mesh_agent::GspawnResult;
 use crate::proc_mesh::mesh_agent::MeshAgentMessageClient;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
-use crate::resource::CreateOrUpdateClient;
 use crate::v1;
 use crate::v1::ActorMesh;
 use crate::v1::Error;
+use crate::v1::HostMeshRef;
 use crate::v1::Name;
 use crate::v1::ValueMesh;
 
@@ -59,6 +58,14 @@ pub struct ProcRef {
 }
 
 impl ProcRef {
+    pub(crate) fn new(proc_id: ProcId, create_rank: usize, agent: ActorRef<ProcMeshAgent>) -> Self {
+        Self {
+            proc_id,
+            create_rank,
+            agent,
+        }
+    }
+
     /// Pings the proc, returning whether it is alive. This will be replaced by a
     /// finer-grained lifecycle status in the near future.
     #[allow(dead_code)]
@@ -96,12 +103,27 @@ pub struct ProcMesh {
 }
 
 impl ProcMesh {
+    pub(crate) fn new_owned_unchecked(name: Name, hosts: HostMeshRef, ranks: Vec<ProcRef>) -> Self {
+        let extent = hosts.extent();
+        Self {
+            name,
+            allocation: ProcMeshAllocation::Owned {
+                hosts,
+                extent,
+                ranks: Arc::new(ranks),
+            },
+        }
+    }
+
     /// Freeze this proc mesh in its current state, returning a stable
     /// reference that may be serialized.
     pub fn freeze(&self) -> ProcMeshRef {
         let region = self.allocation.extent().clone().into();
         match &self.allocation {
             ProcMeshAllocation::Allocated { ranks, .. } => {
+                ProcMeshRef::new(self.name.clone(), region, Arc::clone(ranks)).unwrap()
+            }
+            ProcMeshAllocation::Owned { ranks, .. } => {
                 ProcMeshRef::new(self.name.clone(), region, Arc::clone(ranks)).unwrap()
             }
         }
@@ -207,12 +229,24 @@ enum ProcMeshAllocation {
         // The allocated ranks.
         ranks: Arc<Vec<ProcRef>>,
     },
+
+    /// An owned allocation: this ProcMesh fully owns the set of ranks.
+    Owned {
+        /// The host mesh from which the proc mesh was spawned.
+        hosts: HostMeshRef,
+        // This is purely for storage: `hosts.extent()` returns a computed (by value)
+        // extent.
+        extent: Extent,
+        /// A proc reference for each rank in the mesh.
+        ranks: Arc<Vec<ProcRef>>,
+    },
 }
 
 impl ProcMeshAllocation {
     fn extent(&self) -> &Extent {
         match self {
             ProcMeshAllocation::Allocated { alloc, .. } => alloc.extent(),
+            ProcMeshAllocation::Owned { extent, .. } => extent,
         }
     }
 }
@@ -221,8 +255,17 @@ impl fmt::Debug for ProcMeshAllocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProcMeshAllocation::Allocated { ranks, .. } => f
-                .debug_struct("ProcMeshAllocation")
+                .debug_struct("ProcMeshAllocation::Allocated")
                 .field("alloc", &"<dyn Alloc>")
+                .field("ranks", ranks)
+                .finish(),
+            ProcMeshAllocation::Owned {
+                hosts,
+                ranks,
+                extent: _,
+            } => f
+                .debug_struct("ProcMeshAllocation::Owned")
+                .field("hosts", hosts)
                 .field("ranks", ranks)
                 .finish(),
         }
@@ -279,8 +322,7 @@ impl ProcMeshRef {
     }
 
     /// Spawn an actor on all of the procs in this mesh, returning a new ActorMesh.
-    #[allow(dead_code)]
-    async fn spawn<A: Actor + RemoteActor>(
+    pub async fn spawn<A: Actor + RemoteActor>(
         &self,
         cx: &impl context::Actor,
         name: &str,
@@ -422,7 +464,7 @@ mod tests {
     async fn test_spawn_actor() {
         hyperactor_telemetry::initialize_logging(hyperactor::clock::ClockKind::default());
 
-        let instance = testing::instance();
+        let instance = testing::instance().await;
 
         for proc_mesh in testing::proc_meshes(&instance, extent!(replicas = 4, hosts = 2)).await {
             let actor_mesh: ActorMeshRef<testactor::TestActor> = proc_mesh

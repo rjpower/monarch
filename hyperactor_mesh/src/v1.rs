@@ -77,6 +77,9 @@ pub enum Error {
 
     #[error("error while sending message to actor {0}: {1}")]
     SendingError(ActorId, Box<MailboxSenderError>),
+
+    #[error("error configuring host mesh agent {0}: {1}")]
+    HostMeshAgentConfigurationError(ActorId, String),
 }
 
 /// Errors that occur during serialization and deserialization.

@@ -108,13 +108,14 @@ pub enum HostError {
 
 /// A host, managing the lifecycle of several procs, and their backend
 /// routing, as described in this module's documentation.
+#[derive(Debug)]
 pub struct Host<M> {
     procs: HashMap<String, ChannelAddr>,
     frontend_addr: ChannelAddr,
     backend_addr: ChannelAddr,
     router: DialMailboxRouter,
     manager: M,
-    system_proc: Proc,
+    service_proc: Proc,
 }
 
 impl<M: ProcManager> Host<M> {
@@ -138,8 +139,8 @@ impl<M: ProcManager> Host<M> {
             channel::serve(ChannelAddr::any(manager.transport())).await?;
 
         // Set up a system proc. This is often used to manage the host itself.
-        let system_proc_id = ProcId::Direct(frontend_addr.clone(), "system".to_string());
-        let system_proc = Proc::new(system_proc_id, router.boxed());
+        let service_proc_id = ProcId::Direct(frontend_addr.clone(), "service".to_string());
+        let service_proc = Proc::new(service_proc_id, router.boxed());
 
         let host = Host {
             procs: HashMap::new(),
@@ -147,11 +148,11 @@ impl<M: ProcManager> Host<M> {
             backend_addr,
             router: router.clone(),
             manager,
-            system_proc: system_proc.clone(),
+            service_proc: service_proc.clone(),
         };
 
         let router = ProcOrDial {
-            proc: system_proc,
+            proc: service_proc,
             router,
         };
 
@@ -169,7 +170,7 @@ impl<M: ProcManager> Host<M> {
 
     /// The system proc associated with this host.
     pub fn system_proc(&self) -> &Proc {
-        &self.system_proc
+        &self.service_proc
     }
 
     /// Spawn a new process with the given `name`. On success, the proc has been
