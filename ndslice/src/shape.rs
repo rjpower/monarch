@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::DimSliceIterator;
+use crate::Region;
 use crate::Slice;
 use crate::SliceError;
 use crate::selection::Selection;
@@ -201,6 +202,17 @@ impl Shape {
     /// The extent corresponding to this shape.
     pub fn extent(&self) -> Extent {
         Extent::new(self.labels.clone(), self.slice.sizes().to_vec()).unwrap()
+    }
+
+    /// The region corresponding to this shape.
+    pub fn region(&self) -> Region {
+        self.into()
+    }
+}
+
+impl From<&Region> for Shape {
+    fn from(region: &Region) -> Self {
+        Shape::new(region.labels().to_vec(), region.slice().clone()).unwrap()
     }
 }
 
