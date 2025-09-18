@@ -11,6 +11,7 @@ use std::fmt;
 use std::ops::Deref;
 use std::panic::Location;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
@@ -48,6 +49,7 @@ use ndslice::Range;
 use ndslice::Shape;
 use ndslice::ShapeError;
 use strum::AsRefStr;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 use tracing::Level;
@@ -138,50 +140,66 @@ pub(crate) fn get_global_supervision_sink() -> Option<PortHandle<ActorSupervisio
 /// Context use by root client to send messages.
 /// This mailbox allows us to open ports before we know which proc the
 /// messages will be sent to.
-pub fn global_root_client() -> &'static Instance<()> {
+pub async fn global_root_client() -> &'static Instance<()> {
+    static CLIENT_PROC: LazyLock<Mutex<OnceLock<Proc>>> =
+        LazyLock::new(|| Mutex::new(OnceLock::new()));
     static GLOBAL_INSTANCE: OnceLock<(Instance<()>, ActorHandle<()>)> = OnceLock::new();
-    let (instance, _) = GLOBAL_INSTANCE.get_or_init(|| {
-        let world_id = WorldId(ShortUuid::generate().to_string());
-        let client_proc_id = ProcId::Ranked(world_id.clone(), 0);
-        let client_proc = Proc::new(client_proc_id.clone(), router::global().boxed());
-        router::global().bind(world_id.clone().into(), client_proc.clone());
+    if let Some((instance, _)) = GLOBAL_INSTANCE.get() {
+        instance
+    } else {
+        let lock = CLIENT_PROC.lock().await;
+        if lock.get().is_some() {
+            // Guaranteed to have been set while another task was holding the lock.
+            &GLOBAL_INSTANCE.get().unwrap().0
+        } else {
+            let client_proc = Proc::direct_with_default(
+                ChannelAddr::any(channel::ChannelTransport::Unix),
+                "root_client_proc".into(),
+                router::global().clone().boxed(),
+            )
+            .await
+            .unwrap();
 
-        let (client, handle) = client_proc
-            .instance("client")
-            .expect("root instance create");
+            lock.get_or_init(|| client_proc.clone());
 
-        // Bind the global root client's undeliverable port and
-        // forward any undeliverable messages to the currently active
-        // supervision sink.
-        //
-        // The resolver (`get_global_supervision_sink`) is passed as a
-        // function pointer, so each time an undeliverable is
-        // processed, we look up the *latest* sink. This allows the
-        // root client to seamlessly track whichever ProcMesh most
-        // recently installed a supervision sink (e.g., the
-        // application mesh instead of an internal controller mesh).
-        //
-        // The hook logs each undeliverable, along with whether a sink
-        // was present at the time of receipt, which helps diagnose
-        // lost or misrouted events.
-        let (undeliverable_tx, undeliverable_rx) =
-            client.open_port::<Undeliverable<MessageEnvelope>>();
-        undeliverable_tx.bind_to(Undeliverable::<MessageEnvelope>::port());
-        hyperactor::mailbox::supervise_undeliverable_messages_with(
-            undeliverable_rx,
-            crate::proc_mesh::get_global_supervision_sink,
-            |env| {
-                let sink_present = crate::proc_mesh::get_global_supervision_sink().is_some();
-                tracing::info!(
-                    actor_id = %env.dest().actor_id(),
-                    "global root client undeliverable observed with headers {:?} {}", env.headers(), sink_present
-                );
-            },
-        );
+            router::global().bind(client_proc.proc_id().clone().into(), client_proc.clone());
 
-        (client, handle)
-    });
-    instance
+            let (client, handle) = client_proc
+                .instance("client")
+                .expect("root instance create");
+
+            // Bind the global root client's undeliverable port and
+            // forward any undeliverable messages to the currently active
+            // supervision sink.
+            //
+            // The resolver (`get_global_supervision_sink`) is passed as a
+            // function pointer, so each time an undeliverable is
+            // processed, we look up the *latest* sink. This allows the
+            // root client to seamlessly track whichever ProcMesh most
+            // recently installed a supervision sink (e.g., the
+            // application mesh instead of an internal controller mesh).
+            //
+            // The hook logs each undeliverable, along with whether a sink
+            // was present at the time of receipt, which helps diagnose
+            // lost or misrouted events.
+            let (undeliverable_tx, undeliverable_rx) =
+                client.open_port::<Undeliverable<MessageEnvelope>>();
+            undeliverable_tx.bind_to(Undeliverable::<MessageEnvelope>::port());
+            hyperactor::mailbox::supervise_undeliverable_messages_with(
+                undeliverable_rx,
+                crate::proc_mesh::get_global_supervision_sink,
+                |env| {
+                    let sink_present = crate::proc_mesh::get_global_supervision_sink().is_some();
+                    tracing::info!(
+                        actor_id = %env.dest().actor_id(),
+                        "global root client undeliverable observed with headers {:?} {}", env.headers(), sink_present
+                    );
+                },
+            );
+
+            &GLOBAL_INSTANCE.get_or_init(move || (client, handle)).0
+        }
+    }
 }
 
 type ActorEventRouter = Arc<DashMap<ActorMeshName, mpsc::UnboundedSender<ActorSupervisionEvent>>>;
