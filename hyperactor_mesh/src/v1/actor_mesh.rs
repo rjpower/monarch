@@ -24,6 +24,7 @@ use hyperactor::supervision::ActorSupervisionEvent;
 use hyperactor_mesh_macros::sel;
 use ndslice::Selection;
 use ndslice::Shape;
+use ndslice::ViewExt as _;
 use ndslice::view;
 use ndslice::view::Region;
 use ndslice::view::View;
@@ -324,7 +325,7 @@ mod tests {
     #[tokio::test]
     async fn test_actor_mesh_ref_lazy_materialization() {
         // 1) Bring up procs and spawn actors.
-        let instance = testing::instance();
+        let instance = testing::instance().await;
         // Small mesh so the test runs fast, but > page_size so we
         // cross a boundary
         let extent = extent!(replicas = 3, hosts = 2); // 6 ranks
