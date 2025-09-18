@@ -245,7 +245,7 @@ impl HostMeshRef {
             ));
         }
 
-        Ok(ProcMesh::new_owned_unchecked(name, self.clone(), procs))
+        ProcMesh::create_owned_unchecked(cx, name, self.clone(), procs).await
     }
 }
 

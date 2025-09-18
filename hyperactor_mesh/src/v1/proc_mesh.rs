@@ -24,9 +24,12 @@ use hyperactor::channel::ChannelAddr;
 use hyperactor::context;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxServer;
+use hyperactor::supervision::ActorSupervisionEvent;
 use ndslice::Extent;
 use ndslice::ViewExt as _;
+use ndslice::ViewExt;
 use ndslice::view;
+use ndslice::view::CollectMeshExt;
 use ndslice::view::MapIntoExt;
 use ndslice::view::Ranked;
 use ndslice::view::Region;
@@ -39,11 +42,13 @@ use crate::alloc::AllocExt;
 use crate::alloc::AllocatedProc;
 use crate::assign::Ranks;
 use crate::proc_mesh::mesh_agent;
+use crate::proc_mesh::mesh_agent::ActorState;
 use crate::proc_mesh::mesh_agent::MeshAgentMessageClient;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
 use crate::v1;
 use crate::v1::ActorMesh;
+use crate::v1::ActorMeshRef;
 use crate::v1::Error;
 use crate::v1::HostMeshRef;
 use crate::v1::Name;
@@ -88,6 +93,50 @@ impl ProcRef {
         }
     }
 
+    /// Get the supervision events for one actor with the given name.
+    async fn supervision_events(
+        &self,
+        cx: &impl context::Actor,
+        name: Name,
+    ) -> v1::Result<Vec<ActorSupervisionEvent>> {
+        let (port, mut rx) = cx.mailbox().open_port::<resource::State<ActorState>>();
+        self.agent
+            .send(
+                cx,
+                resource::GetState::<ActorState> {
+                    name: name.clone(),
+                    reply: port.bind(),
+                },
+            )
+            .map_err(|e| Error::CallError(self.agent.actor_id().clone(), e.into()))?;
+        let state = rx
+            .recv()
+            .await
+            .map_err(|e| Error::CallError(self.agent.actor_id().clone(), e.into()))?;
+        if let Some(state) = state.state {
+            let rank = state.create_rank;
+            let events = state.supervision_events;
+            if rank == self.create_rank {
+                Ok(events)
+            } else {
+                Err(Error::CallError(
+                    self.agent.actor_id().clone(),
+                    anyhow::anyhow!(
+                        "Rank on mesh agent not matching for Actor {}: returned {}, expected {}",
+                        name,
+                        rank,
+                        self.create_rank
+                    ),
+                ))
+            }
+        } else {
+            Err(Error::CallError(
+                self.agent.actor_id().clone(),
+                anyhow::anyhow!("Actor {} does not exist", name),
+            ))
+        }
+    }
+
     pub(crate) fn actor_id(&self, name: &Name) -> ActorId {
         self.proc_id.actor_id(name.to_string(), 0)
     }
@@ -102,43 +151,76 @@ impl ProcRef {
 pub struct ProcMesh {
     name: Name,
     allocation: ProcMeshAllocation,
-    comm_actor_name: Name,
+    comm_actor_name: Option<Name>,
 }
 
 impl ProcMesh {
-    pub(crate) fn new_owned_unchecked(name: Name, hosts: HostMeshRef, ranks: Vec<ProcRef>) -> Self {
-        let extent = hosts.extent();
-        Self {
+    async fn create(
+        cx: &impl context::Actor,
+        name: Name,
+        allocation: ProcMeshAllocation,
+        spawn_comm_actor: bool,
+    ) -> v1::Result<Self> {
+        let comm_actor_name = if spawn_comm_actor {
+            Some(Name::new("comm"))
+        } else {
+            None
+        };
+        let proc_mesh = Self {
             name,
-            allocation: ProcMeshAllocation::Owned {
+            allocation,
+            comm_actor_name: comm_actor_name.clone(),
+        };
+        if let Some(comm_actor_name) = comm_actor_name {
+            proc_mesh
+                .freeze()
+                .spawn_with_name::<CommActor>(cx, comm_actor_name, &Default::default())
+                .await?;
+        }
+        Ok(proc_mesh)
+    }
+
+    pub(crate) async fn create_owned_unchecked(
+        cx: &impl context::Actor,
+        name: Name,
+        hosts: HostMeshRef,
+        ranks: Vec<ProcRef>,
+    ) -> v1::Result<Self> {
+        let extent = hosts.extent();
+        Self::create(
+            cx,
+            name,
+            ProcMeshAllocation::Owned {
                 hosts,
                 extent,
                 ranks: Arc::new(ranks),
             },
-        }
+            false, // comm actors not yet supported for owned meshes
+        )
+        .await
     }
 
     /// Freeze this proc mesh in its current state, returning a stable
     /// reference that may be serialized.
     pub fn freeze(&self) -> ProcMeshRef {
         let region = self.allocation.extent().clone().into();
-        match &self.allocation {
-            ProcMeshAllocation::Allocated { ranks, .. } => {
-                let root_mesh_rank_0 = ranks.first().expect("root mesh cannot be empty").clone();
-                ProcMeshRef::new(
-                    self.name.clone(),
-                    region,
-                    Arc::clone(ranks),
-                    self.comm_actor_name.clone(),
-                    None, // this is the root mesh
-                    root_mesh_rank_0,
-                )
-                .unwrap()
-            }
-            ProcMeshAllocation::Owned { ranks, .. } => {
-                ProcMeshRef::new(self.name.clone(), region, Arc::clone(ranks)).unwrap()
-            }
-        }
+        let ranks = self.allocation.ranks();
+        let root_comm_actor = self.comm_actor_name.as_ref().map(|name| {
+            ActorRef::attest(
+                ranks
+                    .first()
+                    .expect("root mesh cannot be empty")
+                    .actor_id(name),
+            )
+        });
+        ProcMeshRef::new(
+            self.name.clone(),
+            region,
+            ranks,
+            None, // this is the root mesh
+            root_comm_actor,
+        )
+        .unwrap()
     }
 
     /// Allocate a new ProcMesh from the provided alloc.
@@ -195,6 +277,7 @@ impl ProcMesh {
                     None, // no supervisor; we just crash
                     address_book.clone(),
                     config_handle.bind(),
+                    true,
                 )
                 .await
                 .map_err(Error::ConfigurationError)?;
@@ -220,23 +303,16 @@ impl ProcMesh {
             })
             .collect();
 
-        let proc_mesh = Self {
-            name: Name::new(name),
-            allocation: ProcMeshAllocation::Allocated {
+        Self::create(
+            cx,
+            Name::new(name),
+            ProcMeshAllocation::Allocated {
                 alloc: Box::new(alloc),
                 ranks: Arc::new(ranks),
             },
-            comm_actor_name: Name::new("comm"),
-        };
-        // Spawn a comm actor on each proc, so that they can be used to perform
-        // tree distribution and accumulation.
-        let comm_actor_name = proc_mesh.comm_actor_name.clone();
-        proc_mesh
-            .freeze()
-            .spawn_with_name::<CommActor>(cx, comm_actor_name, &Default::default())
-            .await?;
-
-        Ok(proc_mesh)
+            true, // alloc-based meshes support comm actors
+        )
+        .await
     }
 }
 
@@ -270,6 +346,13 @@ impl ProcMeshAllocation {
             ProcMeshAllocation::Allocated { alloc, .. } => alloc.extent(),
             ProcMeshAllocation::Owned { extent, .. } => extent,
         }
+    }
+
+    fn ranks(&self) -> Arc<Vec<ProcRef>> {
+        Arc::clone(match self {
+            ProcMeshAllocation::Allocated { ranks, .. } => ranks,
+            ProcMeshAllocation::Owned { ranks, .. } => ranks,
+        })
     }
 }
 
@@ -305,7 +388,6 @@ pub struct ProcMeshRef {
     name: Name,
     region: Region,
     ranks: Arc<Vec<ProcRef>>,
-    comm_actor_name: Name,
     // Temporary: used to fit v1 ActorMesh with v0's casting implementation. This
     // should be removed after we remove the v0 code.
     // The root region of this mesh. None means this mesh itself is the root.
@@ -314,7 +396,7 @@ pub struct ProcMeshRef {
     // should be removed after we remove the v0 code.
     // v0 casting requires root mesh rank 0 as the 1st hop, so we need to provide
     // it here. For v1, this can be removed since v1 can use any rank.
-    pub(crate) root_mesh_rank_0: ProcRef,
+    pub(crate) root_comm_actor: Option<ActorRef<CommActor>>,
 }
 
 impl ProcMeshRef {
@@ -323,9 +405,8 @@ impl ProcMeshRef {
         name: Name,
         region: Region,
         ranks: Arc<Vec<ProcRef>>,
-        comm_actor_name: Name,
         root_region: Option<Region>,
-        root_mesh_rank_0: ProcRef,
+        root_comm_actor: Option<ActorRef<CommActor>>,
     ) -> v1::Result<Self> {
         if region.num_ranks() != ranks.len() {
             return Err(v1::Error::InvalidRankCardinality {
@@ -337,22 +418,34 @@ impl ProcMeshRef {
             name,
             region,
             ranks,
-            comm_actor_name,
             root_region,
-            root_mesh_rank_0,
+            root_comm_actor,
         })
     }
 
-    pub(crate) fn comm_actor_name(&self) -> &Name {
-        &self.comm_actor_name
+    pub(crate) fn root_comm_actor(&self) -> Option<&ActorRef<CommActor>> {
+        self.root_comm_actor.as_ref()
     }
 
     /// The current statuses of procs in this mesh.
-    #[allow(dead_code)]
-    async fn status(&self, cx: &impl context::Actor) -> v1::Result<ValueMesh<bool>> {
+    pub async fn status(&self, cx: &impl context::Actor) -> v1::Result<ValueMesh<bool>> {
         let vm: ValueMesh<_> = self.map_into(|proc_ref| {
             let proc_ref = proc_ref.clone();
             async move { proc_ref.status(cx).await }
+        });
+        vm.join().await.transpose()
+    }
+
+    /// The supervision events of procs in this mesh.
+    pub async fn supervision_events(
+        &self,
+        cx: &impl context::Actor,
+        name: Name,
+    ) -> v1::Result<ValueMesh<Vec<ActorSupervisionEvent>>> {
+        let vm: ValueMesh<_> = self.map_into(|proc_ref| {
+            let proc_ref = proc_ref.clone();
+            let name = name.clone();
+            async move { proc_ref.supervision_events(cx, name).await }
         });
         vm.join().await.transpose()
     }
@@ -370,8 +463,7 @@ impl ProcMeshRef {
         self.spawn_with_name(cx, Name::new(name), params).await
     }
 
-    #[allow(dead_code)]
-    async fn spawn_with_name<A: Actor + RemoteActor>(
+    pub async fn spawn_with_name<A: Actor + RemoteActor>(
         &self,
         cx: &impl context::Actor,
         name: Name,
@@ -472,9 +564,8 @@ impl view::RankedSliceable for ProcMeshRef {
             self.name.clone(),
             region,
             Arc::new(ranks),
-            self.comm_actor_name.clone(),
             Some(self.root_region.as_ref().unwrap_or(&self.region).clone()),
-            self.root_mesh_rank_0.clone(),
+            self.root_comm_actor.clone(),
         )
         .unwrap()
     }
@@ -492,6 +583,7 @@ mod tests {
     use timed_test::async_timed_test;
 
     use crate::v1::ActorMeshRef;
+    use crate::v1::Name;
     use crate::v1::testactor;
     use crate::v1::testing;
 

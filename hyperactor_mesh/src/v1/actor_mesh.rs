@@ -16,6 +16,7 @@ use hyperactor::actor::RemoteActor;
 use hyperactor::context;
 use hyperactor::message::Castable;
 use hyperactor::message::IndexedErasedUnbound;
+use hyperactor::supervision::ActorSupervisionEvent;
 use hyperactor_mesh_macros::sel;
 use ndslice::Selection;
 use ndslice::Shape;
@@ -28,11 +29,13 @@ use serde::Serialize;
 
 use crate::CommActor;
 use crate::actor_mesh as v0_actor_mesh;
+use crate::comm::multicast::CAST_ORIGINATING_SENDER;
 use crate::reference::ActorMeshId;
 use crate::v1;
 use crate::v1::Error;
 use crate::v1::Name;
 use crate::v1::ProcMeshRef;
+use crate::v1::ValueMesh;
 
 /// An ActorMesh is a collection of ranked A-typed actors.
 #[derive(Debug)]
@@ -90,39 +93,52 @@ impl<A: Actor + RemoteActor> ActorMeshRef<A> {
     pub fn cast<M>(&self, cx: &impl context::Actor, message: M) -> v1::Result<()>
     where
         A: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
-        M: Castable + RemoteMessage,
+        M: Castable + RemoteMessage + Clone, // Clone is required until we are fully onto comm actor
     {
-        let cast_mesh_shape = to_shape(view::Ranked::region(self));
-        let comm_actor_ref = self
-            .proc_mesh
-            .root_mesh_rank_0
-            .attest::<CommActor>(self.proc_mesh.comm_actor_name());
-        let actor_mesh_id = ActorMeshId::V1(self.name.clone());
-        match &self.proc_mesh.root_region {
-            Some(root_region) => {
-                let root_mesh_shape = to_shape(root_region);
-                v0_actor_mesh::cast_to_sliced_mesh::<A, M>(
+        if let Some(root_comm_actor) = self.proc_mesh.root_comm_actor() {
+            let cast_mesh_shape = to_shape(view::Ranked::region(self));
+            let actor_mesh_id = ActorMeshId::V1(self.name.clone());
+            match &self.proc_mesh.root_region {
+                Some(root_region) => {
+                    let root_mesh_shape = to_shape(root_region);
+                    v0_actor_mesh::cast_to_sliced_mesh::<A, M>(
+                        cx,
+                        actor_mesh_id,
+                        root_comm_actor,
+                        &sel!(*),
+                        message,
+                        &cast_mesh_shape,
+                        &root_mesh_shape,
+                    )
+                    .map_err(|e| Error::CastingError(self.name.clone(), e.into()))
+                }
+                None => v0_actor_mesh::actor_mesh_cast::<A, M>(
                     cx,
                     actor_mesh_id,
-                    &comm_actor_ref,
-                    &sel!(*),
-                    message,
+                    root_comm_actor,
+                    sel!(*),
                     &cast_mesh_shape,
-                    &root_mesh_shape,
+                    &cast_mesh_shape,
+                    message,
                 )
-                .map_err(|e| Error::CastingError(self.name.clone(), e.into()))
+                .map_err(|e| Error::CastingError(self.name.clone(), e.into())),
             }
-            None => v0_actor_mesh::actor_mesh_cast::<A, M>(
-                cx,
-                actor_mesh_id,
-                &comm_actor_ref,
-                sel!(*),
-                &cast_mesh_shape,
-                &cast_mesh_shape,
-                message,
-            )
-            .map_err(|e| Error::CastingError(self.name.clone(), e.into())),
+        } else {
+            for (_point, actor) in self.iter() {
+                actor
+                    .send(cx, message.clone())
+                    .map_err(|e| Error::SendingError(actor.actor_id().clone(), Box::new(e)))?;
+            }
+            Ok(())
         }
+    }
+
+    pub async fn supervision_events(
+        &self,
+        cx: &impl context::Actor,
+        name: Name,
+    ) -> v1::Result<ValueMesh<Vec<ActorSupervisionEvent>>> {
+        self.proc_mesh.supervision_events(cx, name).await
     }
 }
 
@@ -155,4 +171,94 @@ impl<A: RemoteActor> view::RankedSliceable for ActorMeshRef<A> {
 fn to_shape(region: &Region) -> Shape {
     Shape::new(region.labels().to_vec(), region.slice().clone())
         .expect("Shape::new should not fail because a Region by definition is a valid Shape")
+}
+
+#[cfg(test)]
+mod tests {
+
+    use std::assert_matches::assert_matches;
+
+    use hyperactor::actor::ActorStatus;
+    use hyperactor::supervision::ActorSupervisionEvent;
+    use ndslice::ViewExt;
+    use ndslice::extent;
+    use timed_test::async_timed_test;
+
+    use crate::v1::Name;
+    use crate::v1::testactor;
+    use crate::v1::testing;
+
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_status() {
+        hyperactor_telemetry::initialize_logging_for_test();
+
+        let instance = testing::instance().await;
+        // Listen for supervision events sent to the parent instance.
+        let (supervision_port, mut supervision_receiver) =
+            instance.open_port::<ActorSupervisionEvent>();
+        let supervisor = supervision_port.bind();
+        let num_replicas = 4;
+        let meshes = testing::proc_meshes(&instance, extent!(replicas = num_replicas)).await;
+        let proc_mesh = &meshes[1];
+        let child_name = Name::new("child");
+
+        let actor_mesh = proc_mesh
+            .freeze()
+            .spawn_with_name::<testactor::TestActor>(&instance, child_name.clone(), &())
+            .await
+            .unwrap();
+
+        actor_mesh
+            .freeze()
+            .cast(
+                &instance,
+                testactor::CauseSupervisionEvent(testactor::SupervisionEventType::Panic),
+            )
+            .unwrap();
+
+        // Wait for the casted message to cause a panic on all actors.
+        // We can't use a reply port because the handler for the message will
+        // by definition not complete and send a reply.
+        #[allow(clippy::disallowed_methods)]
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        // Now that all ranks have completed, set up a continuous poll of the
+        // status such that when a process switches to unhealthy it sets a
+        // supervision event.
+        let actor_mesh_ref = actor_mesh.freeze();
+        let child_name_clone = child_name.clone();
+        let supervision_task = tokio::spawn(async move {
+            match actor_mesh_ref
+                .supervision_events(&instance, child_name_clone)
+                .await
+            {
+                Ok(events) => {
+                    for event_list in events.values() {
+                        assert!(!event_list.is_empty());
+                        for event in event_list {
+                            supervisor.send(&instance, event).unwrap();
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("error: {:?}", e);
+                }
+            };
+        });
+        // Make sure the task completes first without a panic.
+        supervision_task.await.unwrap();
+
+        for _ in 0..num_replicas {
+            match supervision_receiver.recv().await {
+                Ok(event) => {
+                    println!("receiving event: {:?}", event);
+                    assert_eq!(event.actor_id.name(), format!("{}", child_name.clone()));
+                    assert_matches!(event.actor_status, ActorStatus::Failed(_));
+                }
+                Err(e) => {
+                    panic!("error: {:?}", e);
+                }
+            }
+        }
+    }
 }
