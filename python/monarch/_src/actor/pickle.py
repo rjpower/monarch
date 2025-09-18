@@ -17,7 +17,10 @@ import cloudpickle
 
 def maybe_torch():
     """
-    We have to do some special pickling if torch is loaded but not if it isn't loaded?
+    XXX: there is a minor bug if we are sending a gpu tensor to a host that hasn't loaded
+    torch yet: the patch to load the tensor on the cpu will not have been applied and it
+    will end up on the gpu. The right fix is to switch cpu loading to the save side,
+    or to delete the custom behavior entirely.
     """
     return sys.modules.get("torch")
 
