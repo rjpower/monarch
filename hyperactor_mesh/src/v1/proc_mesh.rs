@@ -27,7 +27,6 @@ use hyperactor::mailbox::MailboxServer;
 use hyperactor::supervision::ActorSupervisionEvent;
 use ndslice::Extent;
 use ndslice::ViewExt as _;
-use ndslice::ViewExt;
 use ndslice::view;
 use ndslice::view::MapIntoExt;
 use ndslice::view::Ranked;
