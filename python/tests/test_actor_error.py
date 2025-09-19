@@ -259,7 +259,7 @@ async def test_broken_pickle_class(raise_on_getstate, raise_on_setstate, num_pro
         # Pass this test trivially
         return
 
-    proc = await proc_mesh(gpus=num_procs)
+    proc = proc_mesh(gpus=num_procs)
     exception_actor = proc.spawn("exception_actor", ExceptionActor)
 
     # Create a BrokenPickleClass instance configured to raise exceptions
@@ -449,7 +449,7 @@ class Worker(Actor):
 class Manager(Actor):
     @endpoint
     async def init(self):
-        mesh = await proc_mesh(gpus=1)
+        mesh = proc_mesh(gpus=1)
         self.workers = await mesh.spawn("Worker", Worker)
 
     @endpoint
@@ -497,7 +497,7 @@ async def test_proc_mesh_monitoring(mesh):
 
     # should not be able to spawn actors anymore as proc mesh is unhealthy
     with pytest.raises(SupervisionError, match="proc mesh is stopped with reason"):
-        proc.spawn("ex", ExceptionActorSync).initialized
+        await proc.spawn("ex", ExceptionActorSync).initialized
 
 
 @pytest.mark.parametrize(
@@ -533,7 +533,7 @@ async def test_actor_mesh_supervision_handling(mesh):
 
     # should not be able to spawn actors anymore as proc mesh is unhealthy
     with pytest.raises(SupervisionError, match="proc mesh is stopped with reason"):
-        proc.spawn("ex", ExceptionActorSync).initialized
+        await proc.spawn("ex", ExceptionActorSync).initialized
 
 
 class HealthyActor(Actor):
@@ -555,7 +555,7 @@ class Intermediate(Actor):
 
     @endpoint
     async def init_proc_mesh(self):
-        mesh = await proc_mesh(gpus=1)
+        mesh = proc_mesh(gpus=1)
         self._error_actor = await mesh.spawn("error", ErrorActor)
         self._healthy_actor = await mesh.spawn("healthy", HealthyActor)
 
@@ -657,7 +657,7 @@ async def test_supervision_with_proc_mesh_stopped(mesh):
 
     # proc mesh cannot spawn new actors anymore
     with pytest.raises(RuntimeError, match="`ProcMesh` has already been stopped"):
-        proc.spawn("immediate", Intermediate).initialized
+        await proc.spawn("immediate", Intermediate).initialized
 
 
 # TODO - re-enable after resolving T232206970
@@ -669,7 +669,7 @@ async def test_supervision_with_sending_error():
     # Limit retries for sending before giving up.
     os.environ["HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT_SECS"] = "5"
 
-    proc = await proc_mesh(gpus=1)
+    proc = proc_mesh(gpus=1)
     actor_mesh = proc.spawn("healthy", HealthyActor)
 
     await actor_mesh.check.call()
