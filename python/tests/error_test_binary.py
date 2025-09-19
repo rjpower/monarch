@@ -113,7 +113,7 @@ def _run_error_test(num_procs, sync_endpoint, endpoint_name):
 
     async def run_test():
         proc = await proc_mesh(gpus=num_procs)
-        error_actor = await proc.spawn("error_actor", actor_class)
+        error_actor = proc.spawn("error_actor", actor_class)
 
         # This output is checked in the test to make sure that the process actually got here
         print("Started function error_test", flush=True)
@@ -168,7 +168,7 @@ async def _error_unmonitored():
     print("Started function _error_unmonitored", flush=True)
 
     proc = await proc_mesh(gpus=1)
-    actor = await proc.spawn("error_actor", ErrorActor)
+    actor = proc.spawn("error_actor", ErrorActor)
 
     # fire and forget
     send(actor.await_then_error, (), {}, None, "all")
@@ -188,7 +188,7 @@ async def _error_unmonitored():
     sys.stdout.flush()
 
     proc = await proc_mesh(gpus=1)
-    actor = await proc.spawn("error_actor", ErrorActor)
+    actor = proc.spawn("error_actor", ErrorActor)
 
     # fire and forget
     send(actor.cause_stuck, (), {}, None, "all")
@@ -214,7 +214,7 @@ async def _error_cleanup():
 
     # Spawn an 8 process procmesh
     proc = await proc_mesh(gpus=8)
-    error_actor = await proc.spawn("error_actor", ErrorActor)
+    error_actor = proc.spawn("error_actor", ErrorActor)
 
     print("Procmesh spawned, collecting child PIDs from actors", flush=True)
 

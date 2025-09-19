@@ -102,7 +102,7 @@ async def test_actor_exception(mesh, actor_class, num_procs):
     Test that exceptions raised in actor endpoints are propagated to the client.
     """
     proc = await mesh(gpus=num_procs)
-    exception_actor = await proc.spawn("exception_actor", actor_class)
+    exception_actor = proc.spawn("exception_actor", actor_class)
 
     with pytest.raises(ActorError, match="This is a test exception"):
         if num_procs == 1:
@@ -145,7 +145,7 @@ async def test_actor_error_message(mesh):
     Test that exceptions raised in actor endpoints capture nested exceptions.
     """
     proc = mesh(gpus=2)
-    exception_actor = await proc.spawn("exception_actor", NestedExceptionActor)
+    exception_actor = proc.spawn("exception_actor", NestedExceptionActor)
 
     with pytest.raises(ActorError) as exc_info:
         await exception_actor.raise_exception_with_cause.call()
@@ -260,7 +260,7 @@ async def test_broken_pickle_class(raise_on_getstate, raise_on_setstate, num_pro
         return
 
     proc = await proc_mesh(gpus=num_procs)
-    exception_actor = await proc.spawn("exception_actor", ExceptionActor)
+    exception_actor = proc.spawn("exception_actor", ExceptionActor)
 
     # Create a BrokenPickleClass instance configured to raise exceptions
     broken_obj = BrokenPickleClass(
@@ -482,7 +482,7 @@ async def test_proc_mesh_monitoring(mesh):
     proc = await mesh(hosts=1, gpus=1)
     monitor = await proc.monitor()
 
-    e = await proc.spawn("error", ErrorActor)
+    e = proc.spawn("error", ErrorActor)
 
     with pytest.raises(Exception):
         await e.fail_with_supervision_error.call_one()
@@ -497,7 +497,7 @@ async def test_proc_mesh_monitoring(mesh):
 
     # should not be able to spawn actors anymore as proc mesh is unhealthy
     with pytest.raises(SupervisionError, match="proc mesh is stopped with reason"):
-        await proc.spawn("ex", ExceptionActorSync).initialized
+        proc.spawn("ex", ExceptionActorSync).initialized
 
 
 @pytest.mark.parametrize(
@@ -508,7 +508,7 @@ async def test_proc_mesh_monitoring(mesh):
 async def test_actor_mesh_supervision_handling(mesh):
     proc = await mesh(hosts=1, gpus=1)
 
-    e = await proc.spawn("error", ErrorActor)
+    e = proc.spawn("error", ErrorActor)
 
     # first check() call should succeed
     await e.check.call()
@@ -533,7 +533,7 @@ async def test_actor_mesh_supervision_handling(mesh):
 
     # should not be able to spawn actors anymore as proc mesh is unhealthy
     with pytest.raises(SupervisionError, match="proc mesh is stopped with reason"):
-        await proc.spawn("ex", ExceptionActorSync).initialized
+        proc.spawn("ex", ExceptionActorSync).initialized
 
 
 class HealthyActor(Actor):
@@ -578,7 +578,7 @@ class Intermediate(Actor):
 async def test_actor_mesh_supervision_handling_chained_error(mesh):
     proc = await mesh(hosts=1, gpus=1)
 
-    intermediate_actor = await proc.spawn("intermediate", Intermediate)
+    intermediate_actor = proc.spawn("intermediate", Intermediate)
     if mesh is proc_mesh:
         await intermediate_actor.init_proc_mesh.call()
     elif mesh is local_proc_mesh:
@@ -621,7 +621,7 @@ async def test_base_exception_handling(mesh, method_name):
 
     """
     proc = await mesh(hosts=1, gpus=1)
-    error_actor = await proc.spawn("error", ErrorActor)
+    error_actor = proc.spawn("error", ErrorActor)
 
     # Get the method to call based on the parameter
     method = getattr(error_actor, method_name)
@@ -643,7 +643,7 @@ async def test_base_exception_handling(mesh, method_name):
 )
 async def test_supervision_with_proc_mesh_stopped(mesh):
     proc = await mesh(hosts=1, gpus=1)
-    actor_mesh = await proc.spawn("healthy", HealthyActor)
+    actor_mesh = proc.spawn("healthy", HealthyActor)
 
     await actor_mesh.check.call()
 
@@ -657,7 +657,7 @@ async def test_supervision_with_proc_mesh_stopped(mesh):
 
     # proc mesh cannot spawn new actors anymore
     with pytest.raises(RuntimeError, match="`ProcMesh` has already been stopped"):
-        await proc.spawn("immediate", Intermediate).initialized
+        proc.spawn("immediate", Intermediate).initialized
 
 
 # TODO - re-enable after resolving T232206970
@@ -670,7 +670,7 @@ async def test_supervision_with_sending_error():
     os.environ["HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT_SECS"] = "5"
 
     proc = await proc_mesh(gpus=1)
-    actor_mesh = await proc.spawn("healthy", HealthyActor)
+    actor_mesh = proc.spawn("healthy", HealthyActor)
 
     await actor_mesh.check.call()
 
