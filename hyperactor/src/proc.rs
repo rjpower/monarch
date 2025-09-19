@@ -638,7 +638,7 @@ impl Proc {
 
         let (this_handle, this_actor_id) = cx.map_or((None, None), |cx| {
             (
-                Some(cx.actor_task_handle().expect("cannot call destroy_and_wait from inside an actor unless actor has finished starting")), 
+                Some(cx.actor_task_handle().expect("cannot call destroy_and_wait from inside an actor unless actor has finished starting")),
                 Some(cx.self_id())
             )
         });
