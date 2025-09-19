@@ -120,9 +120,24 @@ impl Named for std::time::Duration {
     }
 }
 
+impl Named for std::time::SystemTime {
+    fn typename() -> &'static str {
+        "std::time::SystemTime"
+    }
+}
+
 impl Named for bytes::Bytes {
     fn typename() -> &'static str {
         "bytes::Bytes"
+    }
+}
+
+// This is somewhat unfortunate. We should separate this module out into
+// its own crate, and just derive(Named) in `ndslice`. As it is, this would
+// create a circular (and heavy!) dependency for `ndslice`.
+impl Named for ndslice::Point {
+    fn typename() -> &'static str {
+        "ndslice::Point"
     }
 }
 
@@ -181,6 +196,12 @@ impl<T: Named + 'static> Named for Option<T> {
 impl<T: Named + 'static> Named for Vec<T> {
     fn typename() -> &'static str {
         intern_typename!(Self, "Vec<{}>", T)
+    }
+}
+
+impl<K: Named + 'static, V: Named + 'static> Named for HashMap<K, V> {
+    fn typename() -> &'static str {
+        intern_typename!(Self, "HashMap<{}, {}>", K, V)
     }
 }
 

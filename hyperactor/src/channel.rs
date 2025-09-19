@@ -256,7 +256,7 @@ pub enum TlsMode {
 }
 
 /// Types of channel transports.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Named)]
 pub enum ChannelTransport {
     /// Transport over a TCP connection.
     Tcp,
@@ -326,6 +326,11 @@ impl ChannelTransport {
             // TODO ChannelTransport::Sim(Box::new(ChannelTransport::Tcp)),
             // TODO ChannelTransport::Sim(Box::new(ChannelTransport::Local)),
         ]
+    }
+
+    /// Return an "any" address for this transport.
+    pub fn any(&self) -> ChannelAddr {
+        ChannelAddr::any(self.clone())
     }
 }
 

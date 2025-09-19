@@ -208,7 +208,7 @@ pub trait ActorMesh: Mesh<Id = ActorMeshId> {
     /// Get a serializeable reference to this mesh similar to ActorHandle::bind
     fn bind(&self) -> ActorMeshRef<Self::Actor> {
         ActorMeshRef::attest(
-            ActorMeshId(
+            ActorMeshId::V0(
                 ProcMeshId(self.world_id().to_string()),
                 self.name().to_string(),
             ),
@@ -344,7 +344,7 @@ impl<'a, A: RemoteActor> Mesh for RootActorMesh<'a, A> {
     }
 
     fn id(&self) -> Self::Id {
-        ActorMeshId(self.proc_mesh.id(), self.name.clone())
+        ActorMeshId::V0(self.proc_mesh.id(), self.name.clone())
     }
 }
 
@@ -1314,8 +1314,9 @@ mod tests {
             // Calculate the frame length for the given message.
             fn frame_length(src: &ActorId, dst: &PortId, pay: &Payload) -> usize {
                 let serialized = Serialized::serialize(pay).unwrap();
-                let envelope =
-                    MessageEnvelope::new(src.clone(), dst.clone(), serialized, Attrs::new());
+                let mut headers = Attrs::new();
+                hyperactor::mailbox::headers::set_send_timestamp(&mut headers);
+                let envelope = MessageEnvelope::new(src.clone(), dst.clone(), serialized, headers);
                 let frame = Frame::Message(0u64, envelope);
                 let message = serde_multipart::serialize_illegal_bincode(&frame).unwrap();
                 message.frame_len()
@@ -1352,7 +1353,7 @@ mod tests {
 
             // Message sized to exactly max frame length.
             let payload = Payload {
-                part: Part::from(Bytes::from(vec![0u8; 764])),
+                part: Part::from(Bytes::from(vec![0u8; 699])),
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
@@ -1372,7 +1373,7 @@ mod tests {
 
             // Message sized to max frame length + 1.
             let payload = Payload {
-                part: Part::from(Bytes::from(vec![0u8; 765])),
+                part: Part::from(Bytes::from(vec![0u8; 700])),
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
