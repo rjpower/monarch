@@ -188,8 +188,8 @@ async def test_gpu_trainer_generator():
 def test_gpu_trainer_generator_sync() -> None:
     trainer_proc = this_host().spawn_procs(per_host={"gpus": 1})
     gen_proc = this_host().spawn_procs(per_host={"gpus": 1})
-    trainer = trainer_proc.spawn("trainer", TrainerActor).get()
-    generator = gen_proc.spawn("gen", GeneratorActor).get()
+    trainer = trainer_proc.spawn("trainer", TrainerActor)
+    generator = gen_proc.spawn("gen", GeneratorActor)
 
     generator.init.call(trainer).get()
     trainer.init.call(generator).get()

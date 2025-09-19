@@ -692,9 +692,9 @@ async def test_supervision_with_sending_error():
 
 
 async def test_slice_supervision() -> None:
-    pm = await proc_mesh(gpus=4)
-    healthy_mesh = await pm.spawn("healthy", HealthyActor)
-    error_mesh = await pm.spawn("error", ErrorActor)
+    pm = proc_mesh(gpus=4)
+    healthy_mesh = pm.spawn("healthy", HealthyActor)
+    error_mesh = pm.spawn("error", ErrorActor)
     slice_1 = error_mesh.slice(gpus=slice(2, 4))
     slice_2 = error_mesh.slice(gpus=2)
     slice_3 = error_mesh.slice(gpus=3)
@@ -727,8 +727,8 @@ async def test_slice_supervision() -> None:
 
 
 async def test_mesh_slices_inherit_parent_errors() -> None:
-    pm = await proc_mesh(gpus=4)
-    error_mesh = await pm.spawn("error", ErrorActor)
+    pm = proc_mesh(gpus=4)
+    error_mesh = pm.spawn("error", ErrorActor)
     slice_1 = error_mesh.slice(gpus=slice(2, 4))
 
     # Trigger supervision error on gpus=2, 3, 4
