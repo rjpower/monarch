@@ -1394,7 +1394,7 @@ impl<A: Actor> Instance<A> {
     }
 
     /// Get the join handle associated with this actor.
-    pub fn actor_task_handle(&self) -> Option<&JoinHandle<()>> {
+    fn actor_task_handle(&self) -> Option<&JoinHandle<()>> {
         self.cell.inner.actor_task_handle.get()
     }
 }
