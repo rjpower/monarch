@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-unsafe
+
 """
 Distributed PPO-like Reinforcement Learning with Monarch Actors
 ==============================================================
@@ -19,6 +21,10 @@ The example shows how to:
 - Use RDMA buffers for efficient parameter sharing
 - Create an asynchronous training loop with multiple components
 """
+
+import os
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # %%
 import asyncio
@@ -292,11 +298,10 @@ class Learner(Actor):
         Returns:
             Dictionary mapping parameter names to RDMA buffers
         """
-        cpu_tensors = {
-            k: v.cpu().view(torch.uint8).flatten()
+        self._weights_handle = {
+            k: (v, RDMABuffer(v.view(torch.uint8).flatten()))
             for k, v in self.model.state_dict().items()
         }
-        self._weights_handle = {k: (v, RDMABuffer(v)) for k, v in cpu_tensors.items()}
         return self._weights_handle
 
     def _compute_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
@@ -371,11 +376,6 @@ class Learner(Actor):
         nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.optim.step()
         self.policy_version += 1
-
-        # update buffers
-        sd = self.model.state_dict()
-        for n, (t, _) in self._weights_handle.items():
-            t.copy_(sd[n].view(torch.uint8).flatten())
 
         # Return loss value
         return loss.detach()
@@ -486,9 +486,8 @@ class Generator(Actor):
         async with self.cond:
             # Copy weights from RDMA buffers
             sd = self.model.state_dict()
-            cpu_sd = {k: torch.zeros_like(v, device="cpu") for k, v in sd.items()}
             for n, (_, b) in self.weight_buffers.items():
-                await b.read_into(cpu_sd[n].view(torch.uint8).flatten())
+                await b.read_into(sd[n].view(torch.uint8).flatten())
             self.model.load_state_dict(sd)
             # Update version and state
             self.policy_version = version

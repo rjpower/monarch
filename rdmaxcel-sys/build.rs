@@ -10,127 +10,7 @@ use std::env;
 use std::path::Path;
 use std::path::PathBuf;
 
-use glob::glob;
-use which::which;
-
-const PYTHON_PRINT_DIRS: &str = r"
-import sysconfig
-print('PYTHON_INCLUDE_DIR:', sysconfig.get_config_var('INCLUDEDIR'))
-print('PYTHON_LIB_DIR:', sysconfig.get_config_var('LIBDIR'))
-";
-
-// Translated from torch/utils/cpp_extension.py
-fn find_cuda_home() -> Option<String> {
-    // Guess #1
-    let mut cuda_home = env::var("CUDA_HOME")
-        .ok()
-        .or_else(|| env::var("CUDA_PATH").ok());
-
-    if cuda_home.is_none() {
-        // Guess #2
-        if let Ok(nvcc_path) = which("nvcc") {
-            // Get parent directory twice
-            if let Some(cuda_dir) = nvcc_path.parent().and_then(|p| p.parent()) {
-                cuda_home = Some(cuda_dir.to_string_lossy().into_owned());
-            }
-        } else {
-            // Guess #3
-            if cfg!(windows) {
-                // Windows code
-                let pattern = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*.*";
-                let cuda_homes: Vec<_> = glob(pattern).unwrap().filter_map(Result::ok).collect();
-                if !cuda_homes.is_empty() {
-                    cuda_home = Some(cuda_homes[0].to_string_lossy().into_owned());
-                } else {
-                    cuda_home = None;
-                }
-            } else {
-                // Not Windows
-                let cuda_candidate = "/usr/local/cuda";
-                if Path::new(cuda_candidate).exists() {
-                    cuda_home = Some(cuda_candidate.to_string());
-                } else {
-                    cuda_home = None;
-                }
-            }
-        }
-    }
-    cuda_home
-}
-
-fn get_cuda_lib_dir() -> String {
-    // Check if user explicitly set CUDA_LIB_DIR
-    if let Ok(cuda_lib_dir) = env::var("CUDA_LIB_DIR") {
-        return cuda_lib_dir;
-    }
-
-    // Try to deduce from CUDA_HOME
-    if let Some(cuda_home) = find_cuda_home() {
-        let lib64_path = format!("{}/lib64", cuda_home);
-        if Path::new(&lib64_path).exists() {
-            return lib64_path;
-        }
-    }
-
-    // If we can't find it, error out with helpful message
-    eprintln!("Error: CUDA library directory not found!");
-    eprintln!("Please set CUDA_LIB_DIR environment variable to your CUDA library directory.");
-    eprintln!();
-    eprintln!("Example: export CUDA_LIB_DIR=/usr/local/cuda-12.0/lib64");
-    eprintln!("Or: export CUDA_LIB_DIR=/usr/lib64");
-    std::process::exit(1);
-}
-
-fn python_env_dirs() -> (Option<String>, Option<String>) {
-    let output = std::process::Command::new(PathBuf::from("python3"))
-        .arg("-c")
-        .arg(PYTHON_PRINT_DIRS)
-        .output()
-        .unwrap_or_else(|_| panic!("error running python"));
-
-    let mut include_dir = None;
-    let mut lib_dir = None;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Some(path) = line.strip_prefix("PYTHON_INCLUDE_DIR: ") {
-            include_dir = Some(path.to_string());
-        }
-        if let Some(path) = line.strip_prefix("PYTHON_LIB_DIR: ") {
-            lib_dir = Some(path.to_string());
-        }
-    }
-    (include_dir, lib_dir)
-}
-
-fn validate_cuda_installation() -> String {
-    // Check for CUDA availability
-    let cuda_home = find_cuda_home();
-    if cuda_home.is_none() {
-        eprintln!("Error: CUDA installation not found!");
-        eprintln!("Please ensure CUDA is installed and one of the following is true:");
-        eprintln!("  1. Set CUDA_HOME environment variable to your CUDA installation directory");
-        eprintln!("  2. Set CUDA_PATH environment variable to your CUDA installation directory");
-        eprintln!("  3. Ensure 'nvcc' is in your PATH");
-        eprintln!("  4. Install CUDA to the default location (/usr/local/cuda on Linux)");
-        eprintln!();
-        eprintln!("Example: export CUDA_HOME=/usr/local/cuda-12.0");
-        std::process::exit(1);
-    }
-
-    let cuda_home = cuda_home.unwrap();
-
-    // Verify CUDA include directory exists
-    let cuda_include_path = format!("{}/include", cuda_home);
-    if !Path::new(&cuda_include_path).exists() {
-        eprintln!(
-            "Error: CUDA include directory not found at {}",
-            cuda_include_path
-        );
-        eprintln!("Please verify your CUDA installation is complete.");
-        std::process::exit(1);
-    }
-
-    cuda_home
-}
+use build_utils::*;
 
 #[cfg(target_os = "macos")]
 fn main() {}
@@ -150,9 +30,16 @@ fn main() {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=src/rdmaxcel.h");
     println!("cargo:rerun-if-changed=src/rdmaxcel.c");
+    println!("cargo:rerun-if-changed=src/rdmaxcel.cpp");
 
     // Validate CUDA installation and get CUDA home path
-    let cuda_home = validate_cuda_installation();
+    let cuda_home = match build_utils::validate_cuda_installation() {
+        Ok(home) => home,
+        Err(_) => {
+            build_utils::print_cuda_error_help();
+            std::process::exit(1);
+        }
+    };
 
     // Get the directory of the current crate
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| {
@@ -202,12 +89,17 @@ fn main() {
         .allowlist_function("launch_cqe_poll")
         .allowlist_function("launch_send_wqe")
         .allowlist_function("launch_recv_wqe")
+        .allowlist_function("rdma_get_active_segment_count")
+        .allowlist_function("rdma_get_all_segment_info")
+        .allowlist_function("register_segments")
+        .allowlist_function("pt_cuda_allocator_compatibility")
         .allowlist_type("ibv_.*")
         .allowlist_type("mlx5dv_.*")
         .allowlist_type("mlx5_wqe_.*")
         .allowlist_type("cqe_poll_result_t")
         .allowlist_type("wqe_params_t")
         .allowlist_type("cqe_poll_params_t")
+        .allowlist_type("rdma_segment_info_t")
         .allowlist_var("MLX5_.*")
         .allowlist_var("IBV_.*")
         // Block specific types that are manually defined in lib.rs
@@ -234,18 +126,35 @@ fn main() {
     builder = builder.clang_arg(format!("-I{}", cuda_include_path));
 
     // Include headers and libs from the active environment.
-    let (include_dir, lib_dir) = python_env_dirs();
-    if let Some(include_dir) = include_dir {
+    let python_config = match build_utils::python_env_dirs_with_interpreter("python3") {
+        Ok(config) => config,
+        Err(_) => {
+            eprintln!("Warning: Failed to get Python environment directories");
+            build_utils::PythonConfig {
+                include_dir: None,
+                lib_dir: None,
+            }
+        }
+    };
+
+    if let Some(include_dir) = &python_config.include_dir {
         builder = builder.clang_arg(format!("-I{}", include_dir));
     }
-    if let Some(lib_dir) = lib_dir {
+    if let Some(lib_dir) = &python_config.lib_dir {
         println!("cargo:rustc-link-search=native={}", lib_dir);
         // Set cargo metadata to inform dependent binaries about how to set their
         // RPATH (see controller/build.rs for an example).
         println!("cargo:metadata=LIB_PATH={}", lib_dir);
     }
+
     // Get CUDA library directory and emit link directives
-    let cuda_lib_dir = get_cuda_lib_dir();
+    let cuda_lib_dir = match build_utils::get_cuda_lib_dir() {
+        Ok(dir) => dir,
+        Err(_) => {
+            build_utils::print_cuda_lib_error_help();
+            std::process::exit(1);
+        }
+    };
     println!("cargo:rustc-link-search=native={}", cuda_lib_dir);
     println!("cargo:rustc-link-lib=cuda");
     println!("cargo:rustc-link-lib=cudart");
@@ -280,6 +189,68 @@ fn main() {
                 build.compile("rdmaxcel");
             } else {
                 panic!("C source file not found at {}", c_source_path);
+            }
+
+            // Compile the C++ source file for CUDA allocator compatibility
+            let cpp_source_path = format!("{}/src/rdmaxcel.cpp", manifest_dir);
+            if Path::new(&cpp_source_path).exists() {
+                let mut libtorch_include_dirs: Vec<PathBuf> = vec![];
+
+                // Use the same approach as torch-sys: Python discovery first, env vars as fallback
+                let use_pytorch_apis =
+                    build_utils::get_env_var_with_rerun("TORCH_SYS_USE_PYTORCH_APIS")
+                        .unwrap_or_else(|_| "1".to_owned());
+
+                if use_pytorch_apis == "1" {
+                    // Use Python to get PyTorch include paths (same as torch-sys)
+                    let python_interpreter = PathBuf::from("python");
+                    let output = std::process::Command::new(&python_interpreter)
+                        .arg("-c")
+                        .arg(build_utils::PYTHON_PRINT_PYTORCH_DETAILS)
+                        .output()
+                        .unwrap_or_else(|_| panic!("error running {python_interpreter:?}"));
+
+                    for line in String::from_utf8_lossy(&output.stdout).lines() {
+                        if let Some(path) = line.strip_prefix("LIBTORCH_INCLUDE: ") {
+                            libtorch_include_dirs.push(PathBuf::from(path));
+                        }
+                    }
+                } else {
+                    // Use environment variables (fallback approach)
+                    libtorch_include_dirs.extend(
+                        build_utils::get_env_var_with_rerun("LIBTORCH_INCLUDE")
+                            .unwrap_or_default()
+                            .split(':')
+                            .filter(|s| !s.is_empty())
+                            .map(PathBuf::from),
+                    );
+                }
+
+                let mut cpp_build = cc::Build::new();
+                cpp_build
+                    .file(&cpp_source_path)
+                    .include(format!("{}/src", manifest_dir))
+                    .flag("-fPIC")
+                    .cpp(true)
+                    .flag("-std=gnu++20")
+                    .define("PYTORCH_C10_DRIVER_API_SUPPORTED", "1");
+
+                // Add CUDA include paths
+                cpp_build.include(&cuda_include_path);
+
+                // Add PyTorch/C10 include paths
+                for include_dir in &libtorch_include_dirs {
+                    cpp_build.include(include_dir);
+                }
+
+                // Add Python include path if available
+                if let Some(include_dir) = &python_config.include_dir {
+                    cpp_build.include(include_dir);
+                }
+
+                cpp_build.compile("rdmaxcel_cpp");
+            } else {
+                panic!("C++ source file not found at {}", cpp_source_path);
             }
         }
         Err(_) => {

@@ -73,7 +73,10 @@ impl CastMessageEnvelope {
         M: Castable + RemoteMessage,
     {
         let data = ErasedUnbound::try_from_message(message)?;
-        let actor_name = actor_mesh_id.1.to_string();
+        let actor_name = match &actor_mesh_id {
+            ActorMeshId::V0(_, actor_name) => actor_name.clone(),
+            ActorMeshId::V1(name) => name.to_string(),
+        };
         Ok(Self {
             actor_mesh_id,
             sender,
@@ -236,6 +239,10 @@ declare_attrs! {
     attr CAST_SHAPE: Shape;
     /// Used inside headers to store the originating sender of a cast.
     pub attr CAST_ORIGINATING_SENDER: ActorId;
+
+    /// The point in the casted region that this message was sent to.
+    /// Used for "v1" casting.
+    pub attr CAST_POINT: Point;
 }
 
 pub fn set_cast_info_on_headers(
@@ -261,6 +268,9 @@ pub trait CastInfo {
 impl<A: Actor> CastInfo for Context<'_, A> {
     fn cast_info(&self) -> Point {
         let headers = self.headers();
+        if let Some(point) = headers.get(CAST_POINT) {
+            return point.clone();
+        }
         match (headers.get(CAST_RANK), headers.get(CAST_SHAPE)) {
             (Some(rank), Some(shape)) => shape.extent().point_of_rank(*rank).unwrap(),
             (None, None) => Extent::unity().point_of_rank(0).unwrap(),

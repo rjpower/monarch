@@ -56,7 +56,7 @@ pub enum Error {
     MailboxError(#[from] Box<hyperactor::mailbox::MailboxError>),
 
     #[error(transparent)]
-    BincodeError(#[from] Box<bincode::Error>),
+    CodecError(#[from] CodecError),
 
     #[error("error during mesh configuration: {0}")]
     ConfigurationError(anyhow::Error),
@@ -77,6 +77,49 @@ pub enum Error {
 
     #[error("error while sending message to actor {0}: {1}")]
     SendingError(ActorId, Box<MailboxSenderError>),
+
+    #[error("error while casting message to {0}: {1}")]
+    CastingError(Name, anyhow::Error),
+
+    #[error("error configuring host mesh agent {0}: {1}")]
+    HostMeshAgentConfigurationError(ActorId, String),
+}
+
+/// Errors that occur during serialization and deserialization.
+#[derive(Debug, thiserror::Error)]
+pub enum CodecError {
+    #[error(transparent)]
+    BincodeError(#[from] Box<bincode::Error>),
+    #[error(transparent)]
+    JsonError(#[from] Box<serde_json::Error>),
+    #[error(transparent)]
+    Base64Error(#[from] Box<base64::DecodeError>),
+    #[error(transparent)]
+    Utf8Error(#[from] Box<std::str::Utf8Error>),
+}
+
+impl From<bincode::Error> for Error {
+    fn from(e: bincode::Error) -> Self {
+        Error::CodecError(Box::new(e).into())
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Error::CodecError(Box::new(e).into())
+    }
+}
+
+impl From<base64::DecodeError> for Error {
+    fn from(e: base64::DecodeError) -> Self {
+        Error::CodecError(Box::new(e).into())
+    }
+}
+
+impl From<std::str::Utf8Error> for Error {
+    fn from(e: std::str::Utf8Error) -> Self {
+        Error::CodecError(Box::new(e).into())
+    }
 }
 
 impl From<crate::alloc::AllocatorError> for Error {
@@ -97,12 +140,6 @@ impl From<hyperactor::mailbox::MailboxError> for Error {
     }
 }
 
-impl From<bincode::Error> for Error {
-    fn from(e: bincode::Error) -> Self {
-        Error::BincodeError(Box::new(e))
-    }
-}
-
 impl From<view::InvalidCardinality> for crate::v1::Error {
     fn from(e: view::InvalidCardinality) -> Self {
         crate::v1::Error::InvalidRankCardinality {
@@ -119,7 +156,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// and a unique UUID.
 ///
 /// Names have a concrete syntax--`{name}-{uuid}`--printed by `Display` and parsed by `FromStr`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize
+)]
 pub struct Name(pub String, pub ShortUuid);
 
 impl Name {

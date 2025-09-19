@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::mem::replace;
+use std::mem::take;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -49,6 +50,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::proc_mesh::SupervisionEventState;
+use crate::resource;
+use crate::v1::Name;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Named)]
 pub enum GspawnResult {
@@ -88,6 +91,8 @@ pub(crate) enum MeshAgentMessage {
         /// The agent should write its rank to this port when it successfully
         /// configured.
         configured: PortRef<usize>,
+        /// If true, and supervisor is None, record supervision events to be reported
+        record_supervision_events: bool,
     },
 
     Status {
@@ -121,15 +126,62 @@ pub(crate) enum MeshAgentMessage {
     },
 }
 
+/// Internal configuration state of the mesh agent.
+#[derive(Debug, EnumAsInner, Default)]
+enum State {
+    UnconfiguredV0 {
+        sender: ReconfigurableMailboxSender,
+    },
+
+    ConfiguredV0 {
+        sender: ReconfigurableMailboxSender,
+        rank: usize,
+        supervisor: Option<PortRef<ActorSupervisionEvent>>,
+    },
+
+    V1,
+
+    #[default]
+    Invalid,
+}
+
+impl State {
+    fn rank(&self) -> Option<usize> {
+        match self {
+            State::ConfiguredV0 { rank, .. } => Some(*rank),
+            _ => None,
+        }
+    }
+
+    fn supervisor(&self) -> Option<PortRef<ActorSupervisionEvent>> {
+        match self {
+            State::ConfiguredV0 { supervisor, .. } => supervisor.clone(),
+            _ => None,
+        }
+    }
+}
+
 /// A mesh agent is responsible for managing procs in a [`ProcMesh`].
 #[derive(Debug)]
-#[hyperactor::export(handlers=[MeshAgentMessage])]
+#[hyperactor::export(
+    handlers=[
+        MeshAgentMessage,
+        resource::CreateOrUpdate<ActorSpec>,
+        resource::GetState<ActorState>
+    ]
+)]
 pub struct ProcMeshAgent {
     proc: Proc,
     remote: Remote,
-    sender: ReconfigurableMailboxSender,
-    rank: Option<usize>,
-    supervisor: Option<PortRef<ActorSupervisionEvent>>,
+    state: State,
+    /// Actors created and tracked through the resource behavior.
+    created: HashMap<Name, Result<ActorId, anyhow::Error>>,
+    /// If true, and supervisor is None, record supervision events to be reported
+    /// to owning actors later.
+    record_supervision_events: bool,
+    /// If record_supervision_events is true, then this will contain the list
+    /// of all events that were received.
+    supervision_events: Vec<ActorSupervisionEvent>,
 }
 
 impl ProcMeshAgent {
@@ -147,12 +199,25 @@ impl ProcMeshAgent {
         let agent = ProcMeshAgent {
             proc: proc.clone(),
             remote: Remote::collect(),
-            sender,
-            rank: None,       // not yet assigned
-            supervisor: None, // not yet assigned
+            state: State::UnconfiguredV0 { sender },
+            created: HashMap::new(),
+            record_supervision_events: false,
+            supervision_events: Vec::new(),
         };
         let handle = proc.spawn::<Self>("mesh", agent).await?;
         Ok((proc, handle))
+    }
+
+    pub(crate) async fn boot_v1(proc: Proc) -> Result<ActorHandle<Self>, anyhow::Error> {
+        let agent = ProcMeshAgent {
+            proc: proc.clone(),
+            remote: Remote::collect(),
+            state: State::V1,
+            created: HashMap::new(),
+            record_supervision_events: true,
+            supervision_events: Vec::new(),
+        };
+        proc.spawn::<Self>("agent", agent).await
     }
 }
 
@@ -181,11 +246,13 @@ impl MeshAgentMessageHandler for ProcMeshAgent {
         supervisor: Option<PortRef<ActorSupervisionEvent>>,
         address_book: HashMap<ProcId, ChannelAddr>,
         configured: PortRef<usize>,
+        record_supervision_events: bool,
     ) -> Result<(), anyhow::Error> {
-        // Set the supervisor first so that we can handle supervison events that might
-        // occur from configuration failures. Though we should instead report these directly
-        // for better ergonomics in the allocator.
-        self.supervisor = supervisor;
+        anyhow::ensure!(
+            self.state.is_unconfigured_v0(),
+            "mesh agent cannot be (re-)configured"
+        );
+        self.record_supervision_events = record_supervision_events;
 
         // Wire up the local proc to the global (process) router. This ensures that child
         // meshes are reachable from any actor created by this mesh.
@@ -205,12 +272,19 @@ impl MeshAgentMessageHandler for ProcMeshAgent {
             router.bind(proc_id.into(), addr);
         }
 
-        if self.sender.configure(router.into_boxed()) {
-            self.rank = Some(rank);
-            configured.send(cx, rank)?;
-        } else {
-            tracing::error!("tried to reconfigure mesh agent");
-        }
+        let sender = take(&mut self.state).into_unconfigured_v0().unwrap();
+        assert!(sender.configure(router.into_boxed()));
+
+        // This is a bit suboptimal: ideally we'd set the supervisor first, to correctly report
+        // any errors that occur during configuration. However, these should anyway be correctly
+        // caught on process exit.
+        self.state = State::ConfiguredV0 {
+            sender,
+            rank,
+            supervisor,
+        };
+        configured.send(cx, rank)?;
+
         Ok(())
     }
 
@@ -222,6 +296,10 @@ impl MeshAgentMessageHandler for ProcMeshAgent {
         params_data: Data,
         status_port: PortRef<GspawnResult>,
     ) -> Result<(), anyhow::Error> {
+        anyhow::ensure!(
+            self.state.is_configured_v0(),
+            "mesh agent is not v0 configured"
+        );
         let actor_id = match self
             .remote
             .gspawn(&self.proc, &actor_type, &actor_name, params_data)
@@ -233,15 +311,13 @@ impl MeshAgentMessageHandler for ProcMeshAgent {
                 return Err(anyhow::anyhow!("gspawn failed"));
             }
         };
-        let rank = match self.rank {
-            Some(rank) => rank,
-            None => {
-                let err = "tried to spawn on unconfigured proc";
-                status_port.send(cx, GspawnResult::Error(err.to_string()))?;
-                return Err(anyhow::anyhow!(err));
-            }
-        };
-        status_port.send(cx, GspawnResult::Success { rank, actor_id })?;
+        status_port.send(
+            cx,
+            GspawnResult::Success {
+                rank: self.state.rank().unwrap(),
+                actor_id,
+            },
+        )?;
         Ok(())
     }
 
@@ -279,7 +355,8 @@ impl MeshAgentMessageHandler for ProcMeshAgent {
         status_port: PortRef<(usize, bool)>,
     ) -> Result<(), anyhow::Error> {
         let rank = self
-            .rank
+            .state
+            .rank()
             .ok_or_else(|| anyhow::anyhow!("tried to get status of unconfigured proc"))?;
         status_port.send(cx, (rank, true))?;
         Ok(())
@@ -293,9 +370,15 @@ impl Handler<ActorSupervisionEvent> for ProcMeshAgent {
         cx: &Context<Self>,
         event: ActorSupervisionEvent,
     ) -> anyhow::Result<()> {
-        if let Some(supervisor) = &self.supervisor {
+        if self.record_supervision_events {
+            tracing::info!("Received supervision event: {:?}, recording", event);
+            self.supervision_events.push(event.clone());
+        }
+        if let Some(supervisor) = self.state.supervisor() {
             supervisor.send(cx, event)?;
-        } else {
+        } else if !self.record_supervision_events {
+            // If there is no supervisor, and nothing is recording these, crash
+            // the whole process.
             tracing::error!(
                 name = SupervisionEventState::SupervisionEventTransmitFailed.as_ref(),
                 "proc {}: could not propagate supervision event {:?}: crashing",
@@ -307,6 +390,99 @@ impl Handler<ActorSupervisionEvent> for ProcMeshAgent {
             // in testing of the LocalAllocator, etc.
             std::process::exit(1);
         }
+        Ok(())
+    }
+}
+
+// Implement the resource behavior for managing actors:
+
+/// Actor spec.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+pub struct ActorSpec {
+    /// registered actor type
+    pub actor_type: String,
+    /// serialized parameters
+    pub params_data: Data,
+}
+
+/// Actor state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+pub struct ActorState {
+    /// The actor's ID.
+    pub actor_id: ActorId,
+    /// The rank of the proc that created the actor. This is before any slicing.
+    pub create_rank: usize,
+    // TODO status: ActorStatus,
+    pub supervision_events: Vec<ActorSupervisionEvent>,
+}
+
+#[async_trait]
+impl Handler<resource::CreateOrUpdate<ActorSpec>> for ProcMeshAgent {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        create_or_update: resource::CreateOrUpdate<ActorSpec>,
+    ) -> anyhow::Result<()> {
+        if self.created.contains_key(&create_or_update.name) {
+            // There is no update.
+            return Ok(());
+        }
+
+        let ActorSpec {
+            actor_type,
+            params_data,
+        } = create_or_update.spec;
+        self.created.insert(
+            create_or_update.name.clone(),
+            self.remote
+                .gspawn(
+                    &self.proc,
+                    &actor_type,
+                    &create_or_update.name.to_string(),
+                    params_data,
+                )
+                .await,
+        );
+
+        create_or_update.reply.send(cx, true)?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<resource::GetState<ActorState>> for ProcMeshAgent {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        get_state: resource::GetState<ActorState>,
+    ) -> anyhow::Result<()> {
+        let rank = self
+            .state
+            .rank()
+            .ok_or_else(|| anyhow::anyhow!("tried to get status of unconfigured proc"))?;
+        let state = match self.created.get(&get_state.name) {
+            Some(Ok(actor_id)) => resource::State {
+                name: get_state.name.clone(),
+                status: resource::Status::Running,
+                state: Some(ActorState {
+                    actor_id: actor_id.clone(),
+                    create_rank: rank,
+                    supervision_events: self.supervision_events.clone(),
+                }),
+            },
+            Some(Err(e)) => resource::State {
+                name: get_state.name.clone(),
+                status: resource::Status::Failed(e.to_string()),
+                state: None,
+            },
+            None => resource::State {
+                name: get_state.name.clone(),
+                status: resource::Status::NotExist,
+                state: None,
+            },
+        };
+
+        get_state.reply.send(cx, state)?;
         Ok(())
     }
 }
@@ -380,6 +556,21 @@ impl MailboxSender for ReconfigurableMailboxSender {
             }
         }
     }
+
+    fn post_unchecked(
+        &self,
+        envelope: MessageEnvelope,
+        return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
+    ) {
+        match *self.state.read().unwrap() {
+            ReconfigurableMailboxSenderState::Queueing(ref queue) => {
+                queue.lock().unwrap().push((envelope, return_handle));
+            }
+            ReconfigurableMailboxSenderState::Configured(ref sender) => {
+                sender.post_unchecked(envelope, return_handle);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -416,7 +607,7 @@ mod tests {
     }
 
     impl MailboxSender for QueueingMailboxSender {
-        fn post(
+        fn post_unchecked(
             &self,
             envelope: MessageEnvelope,
             _return_handle: PortHandle<Undeliverable<MessageEnvelope>>,

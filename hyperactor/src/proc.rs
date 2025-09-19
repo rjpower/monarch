@@ -739,7 +739,7 @@ impl Proc {
 
 #[async_trait]
 impl MailboxSender for Proc {
-    fn post(
+    fn post_unchecked(
         &self,
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
@@ -767,7 +767,7 @@ impl WeakProc {
 
 #[async_trait]
 impl MailboxSender for WeakProc {
-    fn post(
+    fn post_unchecked(
         &self,
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
@@ -1284,6 +1284,10 @@ impl<A: Actor> Instance<A> {
             self.clock().system_time_now(),
             handler,
         ));
+        crate::mailbox::headers::log_message_latency_if_sampling(
+            &headers,
+            self.self_id().to_string(),
+        );
         let span = tracing::debug_span!(
             "actor_status",
             actor_id = self.self_id().to_string(),
