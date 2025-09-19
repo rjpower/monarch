@@ -167,7 +167,7 @@ def test_actor_slicing():
 @pytest.mark.timeout(60)
 async def test_aggregate():
     proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
-    counter = await proc.spawn("counter", Counter, 1)
+    counter = proc.spawn("counter", Counter, 1)
     counter.incr.broadcast()
     acc = Accumulator(counter.value, 0, operator.add)
     r = await acc.accumulate()
@@ -187,7 +187,7 @@ class RunIt(Actor):
 @pytest.mark.timeout(60)
 async def test_rank_size():
     proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
-    r = await proc.spawn("runit", RunIt)
+    r = proc.spawn("runit", RunIt)
 
     acc = Accumulator(r.run, 0, operator.add)
 
@@ -215,8 +215,8 @@ class SyncActor(Actor):
 @pytest.mark.timeout(60)
 async def test_sync_actor():
     proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
-    a = await proc.spawn("actor", SyncActor)
-    c = await proc.spawn("counter", Counter, 5)
+    a = proc.spawn("actor", SyncActor)
+    c = proc.spawn("counter", Counter, 5)
     r = await a.sync_endpoint.choose(c)
     assert r == 5
 

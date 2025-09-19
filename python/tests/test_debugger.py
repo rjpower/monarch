@@ -787,7 +787,7 @@ async def test_debug_command_parser_invalid_inputs(invalid_input):
 @pytest.mark.timeout(60)
 async def test_debug_cli():
     proc = proc_mesh(hosts=2, gpus=2)
-    debugee = await proc.spawn("debugee", DebugeeActor)
+    debugee = proc.spawn("debugee", DebugeeActor)
     debug_controller = actor.get_or_spawn_controller(
         "debug_controller", DebugControllerForTesting
     ).get()
