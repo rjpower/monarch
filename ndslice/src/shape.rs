@@ -212,12 +212,6 @@ impl Shape {
 
 impl From<&Region> for Shape {
     fn from(region: &Region) -> Self {
-        Shape::new(region.labels().to_vec(), region.slice().clone()).unwrap()
-    }
-}
-
-impl From<&Region> for Shape {
-    fn from(region: &Region) -> Self {
         Shape::new(region.labels().to_vec(), region.slice().clone())
             .expect("Shape::new should not fail because a Region by definition is a valid Shape")
     }
