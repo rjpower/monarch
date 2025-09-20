@@ -216,6 +216,13 @@ impl From<&Region> for Shape {
     }
 }
 
+impl From<&Region> for Shape {
+    fn from(region: &Region) -> Self {
+        Shape::new(region.labels().to_vec(), region.slice().clone())
+            .expect("Shape::new should not fail because a Region by definition is a valid Shape")
+    }
+}
+
 /// Iterator over subshapes obtained by fixing a prefix of dimensions.
 ///
 /// This iterator is produced by [`Shape::select_iter(dims)`], and
