@@ -20,7 +20,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-// use strum::EnumIter;
 use crate as hyperactor;
 use crate::config;
 
@@ -107,28 +106,16 @@ impl_basic!(usize);
 impl_basic!(f32);
 impl_basic!(f64);
 impl_basic!(String);
+impl_basic!(std::net::IpAddr);
+impl_basic!(std::net::Ipv4Addr);
+impl_basic!(std::net::Ipv6Addr);
+impl_basic!(std::time::Duration);
+impl_basic!(std::time::SystemTime);
+impl_basic!(bytes::Bytes);
 
 impl Named for &'static str {
     fn typename() -> &'static str {
         "&str"
-    }
-}
-
-impl Named for std::time::Duration {
-    fn typename() -> &'static str {
-        "std::time::Duration"
-    }
-}
-
-impl Named for std::time::SystemTime {
-    fn typename() -> &'static str {
-        "std::time::SystemTime"
-    }
-}
-
-impl Named for bytes::Bytes {
-    fn typename() -> &'static str {
-        "bytes::Bytes"
     }
 }
 
@@ -324,6 +311,7 @@ macro_rules! register_type {
     Deserialize,
     PartialEq,
     Eq,
+    crate::AttrValue,
     crate::Named,
     strum::EnumIter,
     strum::Display,

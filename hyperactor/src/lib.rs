@@ -113,6 +113,8 @@ pub use data::Named;
 #[doc(hidden)]
 pub use hyperactor_macros::Actor;
 #[doc(inline)]
+pub use hyperactor_macros::AttrValue;
+#[doc(inline)]
 pub use hyperactor_macros::Bind;
 #[doc(inline)]
 pub use hyperactor_macros::HandleClient;
