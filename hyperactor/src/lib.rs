@@ -104,6 +104,7 @@ pub use actor::RemoteHandles;
 pub use anyhow;
 #[doc(hidden)]
 pub use async_trait;
+pub use attrs::AttrValue;
 // Re-exported to use in Named derive macro.
 #[doc(hidden)]
 pub use cityhasher;
