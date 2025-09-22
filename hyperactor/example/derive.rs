@@ -17,12 +17,10 @@ use hyperactor::HandleClient;
 use hyperactor::Handler;
 use hyperactor::Named;
 use hyperactor::OncePortRef;
-use hyperactor::PortRef;
 use hyperactor::RefClient;
 use hyperactor::proc::Proc;
 use serde::Deserialize;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 #[derive(Handler, HandleClient, RefClient, Debug, Serialize, Deserialize, Named)]
 enum ShoppingList {
@@ -202,6 +200,8 @@ async fn main() -> Result<(), anyhow::Error> {
         shopping_list_actor.list(&client).await?
     );
 
-    let _ = proc.destroy_and_wait(Duration::from_secs(1), None).await?;
+    let _ = proc
+        .destroy_and_wait::<()>(Duration::from_secs(1), None)
+        .await?;
     Ok(())
 }
