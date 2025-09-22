@@ -112,6 +112,10 @@ impl_basic!(std::net::Ipv6Addr);
 impl_basic!(std::time::Duration);
 impl_basic!(std::time::SystemTime);
 impl_basic!(bytes::Bytes);
+// This is somewhat unfortunate. We should separate this module out into
+// its own crate, and just derive(Named) in `ndslice`. As it is, this would
+// create a circular (and heavy!) dependency for `ndslice`.
+impl_basic!(ndslice::Point);
 
 impl Named for &'static str {
     fn typename() -> &'static str {
