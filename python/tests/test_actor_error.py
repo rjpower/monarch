@@ -101,7 +101,7 @@ async def test_actor_exception(mesh, actor_class, num_procs):
     """
     Test that exceptions raised in actor endpoints are propagated to the client.
     """
-    proc = await mesh(gpus=num_procs)
+    proc = mesh(gpus=num_procs)
     exception_actor = proc.spawn("exception_actor", actor_class)
 
     with pytest.raises(ActorError, match="This is a test exception"):
@@ -208,7 +208,7 @@ def test_actor_supervision(num_procs, sync_endpoint, sync_test_impl, endpoint_na
 
     # Assert that the subprocess exited with a non-zero code
     assert "Started function error_test" in process.stdout.decode()
-    assert (
+    assert (>
         process.returncode != 0
     ), f"Expected non-zero exit code, got {process.returncode}"
 '''
@@ -431,7 +431,7 @@ class ErrorActor(Actor):
     ids=["local_proc_mesh", "distributed_proc_mesh"],
 )
 async def test_proc_mesh_redundant_monitoring(mesh):
-    proc = await mesh(hosts=1, gpus=1)
+    proc = mesh(hosts=1, gpus=1)
     await proc.monitor()
 
     with pytest.raises(
@@ -463,7 +463,7 @@ class Manager(Actor):
     ids=["local_proc_mesh", "distributed_proc_mesh"],
 )
 async def test_errors_propagated(mesh):
-    p_mesh = await mesh(gpus=1)
+    p_mesh = mesh(gpus=1)
     mesh = p_mesh.spawn("manager", Manager)
 
     await mesh.init.call_one()
@@ -479,7 +479,7 @@ async def test_errors_propagated(mesh):
     ids=["local_proc_mesh", "distributed_proc_mesh"],
 )
 async def test_proc_mesh_monitoring(mesh):
-    proc = await mesh(hosts=1, gpus=1)
+    proc = mesh(hosts=1, gpus=1)
     monitor = await proc.monitor()
 
     e = proc.spawn("error", ErrorActor)
@@ -506,7 +506,7 @@ async def test_proc_mesh_monitoring(mesh):
     ids=["local_proc_mesh", "distributed_proc_mesh"],
 )
 async def test_actor_mesh_supervision_handling(mesh):
-    proc = await mesh(hosts=1, gpus=1)
+    proc = mesh(hosts=1, gpus=1)
 
     e = proc.spawn("error", ErrorActor)
 
@@ -576,7 +576,7 @@ class Intermediate(Actor):
     "mesh", [local_proc_mesh, proc_mesh], ids=["local_proc_mesh", "proc_mesh"]
 )
 async def test_actor_mesh_supervision_handling_chained_error(mesh):
-    proc = await mesh(hosts=1, gpus=1)
+    proc = mesh(hosts=1, gpus=1)
 
     intermediate_actor = proc.spawn("intermediate", Intermediate)
     if mesh is proc_mesh:
@@ -620,7 +620,7 @@ async def test_base_exception_handling(mesh, method_name):
     supervision errors properly.
 
     """
-    proc = await mesh(hosts=1, gpus=1)
+    proc = mesh(hosts=1, gpus=1)
     error_actor = proc.spawn("error", ErrorActor)
 
     # Get the method to call based on the parameter
@@ -642,7 +642,7 @@ async def test_base_exception_handling(mesh, method_name):
     "mesh", [local_proc_mesh, proc_mesh], ids=["local_proc_mesh", "proc_mesh"]
 )
 async def test_supervision_with_proc_mesh_stopped(mesh):
-    proc = await mesh(hosts=1, gpus=1)
+    proc = mesh(hosts=1, gpus=1)
     actor_mesh = proc.spawn("healthy", HealthyActor)
 
     await actor_mesh.check.call()
