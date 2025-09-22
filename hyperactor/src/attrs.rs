@@ -581,7 +581,6 @@ macro_rules! declare_attrs {
     ($(
         $(#[$attr:meta])*
         $(@meta($($meta_key:ident = $meta_value:expr),* $(,)?))*
-        $(#[$attr:meta])*
         $vis:vis attr $name:ident: $type:ty $(= $default:expr)?;
     )*) => {
         $(
