@@ -10,6 +10,7 @@ use std::fmt;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::sync::OnceLock as OnceCell;
 
 use hyperactor::Actor;
@@ -17,21 +18,24 @@ use hyperactor::ActorRef;
 use hyperactor::RemoteHandles;
 use hyperactor::RemoteMessage;
 use hyperactor::actor::RemoteActor;
+use hyperactor::attrs::Attrs;
 use hyperactor::context;
 use hyperactor::message::Castable;
 use hyperactor::message::IndexedErasedUnbound;
 use hyperactor::supervision::ActorSupervisionEvent;
 use hyperactor_mesh_macros::sel;
 use ndslice::Selection;
-use ndslice::Shape;
+use ndslice::ViewExt as _;
 use ndslice::view;
 use ndslice::view::Region;
 use ndslice::view::View;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
+use serde::Serializer;
 
-use crate::CommActor;
 use crate::actor_mesh as v0_actor_mesh;
+use crate::comm::multicast;
 use crate::reference::ActorMeshId;
 use crate::v1;
 use crate::v1::Error;
@@ -41,32 +45,42 @@ use crate::v1::ValueMesh;
 
 /// An ActorMesh is a collection of ranked A-typed actors.
 #[derive(Debug)]
-pub struct ActorMesh<A> {
+pub struct ActorMesh<A: RemoteActor> {
     proc_mesh: ProcMeshRef,
     name: Name,
-    _phantom: PhantomData<A>,
+    current_ref: ActorMeshRef<A>,
 }
 
-impl<A> ActorMesh<A> {
+impl<A: RemoteActor> ActorMesh<A> {
     pub(crate) fn new(proc_mesh: ProcMeshRef, name: Name) -> Self {
+        let current_ref =
+            ActorMeshRef::with_page_size(name.clone(), proc_mesh.clone(), DEFAULT_PAGE);
+
         Self {
             proc_mesh,
             name,
-            _phantom: PhantomData,
+            current_ref,
         }
     }
 }
 
-impl<A: RemoteActor> ActorMesh<A> {
-    /// Freeze this actor mesh in its current state, returning a
-    /// stable reference that may be serialized.
-    pub fn freeze(&self) -> ActorMeshRef<A> {
-        ActorMeshRef::new(self.name.clone(), self.proc_mesh.clone())
-    }
+impl<A: RemoteActor> Deref for ActorMesh<A> {
+    type Target = ActorMeshRef<A>;
 
-    /// Freeze with a specific page size for the lazy cache.
-    pub fn freeze_with_page_size(&self, page_size: usize) -> ActorMeshRef<A> {
-        ActorMeshRef::with_page_size(self.name.clone(), self.proc_mesh.clone(), page_size)
+    fn deref(&self) -> &Self::Target {
+        &self.current_ref
+    }
+}
+
+/// Manual implementation of Clone because `A` doesn't need to implement Clone
+/// but we still want to be able to clone the ActorMesh.
+impl<A: RemoteActor> Clone for ActorMesh<A> {
+    fn clone(&self) -> Self {
+        Self {
+            proc_mesh: self.proc_mesh.clone(),
+            name: self.name.clone(),
+            current_ref: self.current_ref.clone(),
+        }
     }
 }
 
@@ -93,7 +107,6 @@ impl<A: RemoteActor> Page<A> {
 }
 
 /// A reference to a stable snapshot of an [`ActorMesh`].
-#[derive(Serialize, Deserialize)]
 pub struct ActorMeshRef<A: RemoteActor> {
     proc_mesh: ProcMeshRef,
     name: Name,
@@ -107,10 +120,8 @@ pub struct ActorMeshRef<A: RemoteActor> {
     /// - A `Page<A>` is a boxed slice of `OnceCell<ActorRef<A>>`,
     ///   i.e. the actual storage for actor references within that
     ///   page.
-    #[serde(skip, default)]
     pages: OnceCell<Vec<OnceCell<Box<Page<A>>>>>,
     // Page size knob (not serialize; defaults after deserialize).
-    #[serde(skip, default)]
     page_size: usize,
 
     _phantom: PhantomData<A>,
@@ -121,38 +132,50 @@ impl<A: Actor + RemoteActor> ActorMeshRef<A> {
     pub fn cast<M>(&self, cx: &impl context::Actor, message: M) -> v1::Result<()>
     where
         A: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
-        M: Castable + RemoteMessage,
+        M: Castable + RemoteMessage + Clone, // Clone is required until we are fully onto comm actor
     {
-        let cast_mesh_shape = to_shape(view::Ranked::region(self));
-        let comm_actor_ref = self
-            .proc_mesh
-            .root_mesh_rank_0
-            .attest::<CommActor>(self.proc_mesh.comm_actor_name());
-        let actor_mesh_id = ActorMeshId::V1(self.name.clone());
-        match &self.proc_mesh.root_region {
-            Some(root_region) => {
-                let root_mesh_shape = to_shape(root_region);
-                v0_actor_mesh::cast_to_sliced_mesh::<A, M>(
+        if let Some(root_comm_actor) = self.proc_mesh.root_comm_actor() {
+            let cast_mesh_shape = view::Ranked::region(self).into();
+            let actor_mesh_id = ActorMeshId::V1(self.name.clone());
+            match &self.proc_mesh.root_region {
+                Some(root_region) => {
+                    let root_mesh_shape = root_region.into();
+                    v0_actor_mesh::cast_to_sliced_mesh::<A, M>(
+                        cx,
+                        actor_mesh_id,
+                        root_comm_actor,
+                        &sel!(*),
+                        message,
+                        &cast_mesh_shape,
+                        &root_mesh_shape,
+                    )
+                    .map_err(|e| Error::CastingError(self.name.clone(), e.into()))
+                }
+                None => v0_actor_mesh::actor_mesh_cast::<A, M>(
                     cx,
                     actor_mesh_id,
-                    &comm_actor_ref,
-                    &sel!(*),
-                    message,
+                    root_comm_actor,
+                    sel!(*),
                     &cast_mesh_shape,
-                    &root_mesh_shape,
+                    &cast_mesh_shape,
+                    message,
                 )
-                .map_err(|e| Error::CastingError(self.name.clone(), e.into()))
+                .map_err(|e| Error::CastingError(self.name.clone(), e.into())),
             }
-            None => v0_actor_mesh::actor_mesh_cast::<A, M>(
-                cx,
-                actor_mesh_id,
-                &comm_actor_ref,
-                sel!(*),
-                &cast_mesh_shape,
-                &cast_mesh_shape,
-                message,
-            )
-            .map_err(|e| Error::CastingError(self.name.clone(), e.into())),
+        } else {
+            for (point, actor) in self.iter() {
+                let mut headers = Attrs::new();
+                headers.set(
+                    multicast::CAST_ORIGINATING_SENDER,
+                    cx.instance().self_id().clone(),
+                );
+                headers.set(multicast::CAST_POINT, point);
+
+                actor
+                    .send_with_headers(cx, headers, message.clone())
+                    .map_err(|e| Error::SendingError(actor.actor_id().clone(), Box::new(e)))?;
+            }
+            Ok(())
         }
     }
 
@@ -264,6 +287,28 @@ impl<A: RemoteActor> fmt::Debug for ActorMeshRef<A> {
     }
 }
 
+// Implement Serialize manually, without requiring A: Serialize
+impl<A: RemoteActor> Serialize for ActorMeshRef<A> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize only the fields that don't depend on A
+        (&self.proc_mesh, &self.name).serialize(serializer)
+    }
+}
+
+// Implement Deserialize manually, without requiring A: Deserialize
+impl<'de, A: RemoteActor> Deserialize<'de> for ActorMeshRef<A> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let (proc_mesh, name) = <(ProcMeshRef, Name)>::deserialize(deserializer)?;
+        Ok(ActorMeshRef::with_page_size(name, proc_mesh, DEFAULT_PAGE))
+    }
+}
+
 impl<A: RemoteActor> view::Ranked for ActorMeshRef<A> {
     type Item = ActorRef<A>;
 
@@ -286,11 +331,6 @@ impl<A: RemoteActor> view::RankedSliceable for ActorMeshRef<A> {
     }
 }
 
-fn to_shape(region: &Region) -> Shape {
-    Shape::new(region.labels().to_vec(), region.slice().clone())
-        .expect("Shape::new should not fail because a Region by definition is a valid Shape")
-}
-
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
@@ -299,6 +339,7 @@ mod tests {
     use hyperactor::actor::ActorStatus;
     use hyperactor::clock::Clock;
     use hyperactor::clock::RealClock;
+    use hyperactor::context::Mailbox as _;
     use hyperactor::mailbox;
     use hyperactor::supervision::ActorSupervisionEvent;
     use ndslice::ViewExt;
@@ -311,30 +352,29 @@ mod tests {
     use crate::v1::ActorMeshRef;
     use crate::v1::Name;
     use crate::v1::ProcMesh;
-    use crate::v1::ProcMeshRef;
     use crate::v1::testactor;
     use crate::v1::testing;
 
     #[tokio::test]
     async fn test_actor_mesh_ref_lazy_materialization() {
         // 1) Bring up procs and spawn actors.
-        let instance = testing::instance();
+        let instance = testing::instance().await;
         // Small mesh so the test runs fast, but > page_size so we
         // cross a boundary
         let extent = extent!(replicas = 3, hosts = 2); // 6 ranks
-        let pm: ProcMesh = testing::proc_meshes(&instance, extent.clone())
+        let pm: ProcMesh = testing::proc_meshes(instance, extent.clone())
             .await
             .into_iter()
             .next()
             .expect("at least one proc mesh");
-        let pmr: ProcMeshRef = pm.freeze();
-        let am: ActorMesh<testactor::TestActor> = pmr.spawn(&instance, "test", &()).await.unwrap();
+        let am: ActorMesh<testactor::TestActor> = pm.spawn(instance, "test", &()).await.unwrap();
 
         // 2) Build our ActorMeshRef with a tiny page size (2) to
         // force multiple pages:
         // page 0: ranks [0,1], page 1: [2,3], page 2: [4,5]
         let page_size = 2;
-        let amr: ActorMeshRef<testactor::TestActor> = am.freeze_with_page_size(page_size);
+        let amr: ActorMeshRef<testactor::TestActor> =
+            ActorMeshRef::with_page_size(am.name.clone(), pm.clone(), page_size);
         assert_eq!(amr.extent(), extent);
         assert_eq!(amr.region().num_ranks(), 6);
 
@@ -390,16 +430,16 @@ mod tests {
 
         // 9) As a sanity check, cast to ensure the refs are indeed
         // usable/live.
-        let (port, mut rx) = mailbox::open_port(&instance);
+        let (port, mut rx) = mailbox::open_port(instance);
         // Send to rank 0 and rank 3 (extent 3x2 => at least 4 ranks
         // exist).
         amr.get(0)
             .expect("rank 0 exists")
-            .send(&instance, testactor::GetActorId(port.bind()))
+            .send(instance, testactor::GetActorId(port.bind()))
             .expect("send to rank 0 should succeed");
         amr.get(3)
             .expect("rank 3 exists")
-            .send(&instance, testactor::GetActorId(port.bind()))
+            .send(instance, testactor::GetActorId(port.bind()))
             .expect("send to rank 3 should succeed");
         let id_a = RealClock
             .timeout(Duration::from_secs(3), rx.recv())
@@ -418,26 +458,24 @@ mod tests {
     async fn test_status() {
         hyperactor_telemetry::initialize_logging_for_test();
 
-        let instance = testing::instance();
+        let instance = testing::instance().await;
         // Listen for supervision events sent to the parent instance.
         let (supervision_port, mut supervision_receiver) =
             instance.open_port::<ActorSupervisionEvent>();
         let supervisor = supervision_port.bind();
         let num_replicas = 4;
-        let meshes = testing::proc_meshes(&instance, extent!(replicas = num_replicas)).await;
+        let meshes = testing::proc_meshes(instance, extent!(replicas = num_replicas)).await;
         let proc_mesh = &meshes[1];
         let child_name = Name::new("child");
 
         let actor_mesh = proc_mesh
-            .freeze()
-            .spawn_with_name::<testactor::TestActor>(&instance, child_name.clone(), &())
+            .spawn_with_name::<testactor::TestActor>(instance, child_name.clone(), &())
             .await
             .unwrap();
 
         actor_mesh
-            .freeze()
             .cast(
-                &instance,
+                instance,
                 testactor::CauseSupervisionEvent(testactor::SupervisionEventType::Panic),
             )
             .unwrap();
@@ -451,18 +489,17 @@ mod tests {
         // Now that all ranks have completed, set up a continuous poll of the
         // status such that when a process switches to unhealthy it sets a
         // supervision event.
-        let actor_mesh_ref = actor_mesh.freeze();
         let child_name_clone = child_name.clone();
         let supervision_task = tokio::spawn(async move {
-            match actor_mesh_ref
-                .supervision_events(&instance, child_name_clone)
+            match actor_mesh
+                .supervision_events(instance, child_name_clone)
                 .await
             {
                 Ok(events) => {
                     for event_list in events.values() {
                         assert!(!event_list.is_empty());
                         for event in event_list {
-                            supervisor.send(&instance, event).unwrap();
+                            supervisor.send(instance, event).unwrap();
                         }
                     }
                 }
@@ -485,6 +522,39 @@ mod tests {
                     panic!("error: {:?}", e);
                 }
             }
+        }
+    }
+
+    #[async_timed_test(timeout_secs = 30)]
+    async fn test_cast() {
+        let instance = testing::instance().await;
+        let host_mesh = testing::host_mesh(extent!(host = 4)).await;
+        let proc_mesh = host_mesh.spawn(instance, "test").await.unwrap();
+        let actor_mesh = proc_mesh
+            .spawn::<testactor::TestActor>(instance, "test", &())
+            .await
+            .unwrap();
+
+        let (cast_info, mut cast_info_rx) = instance.mailbox().open_port();
+        actor_mesh
+            .cast(
+                instance,
+                testactor::GetCastInfo {
+                    cast_info: cast_info.bind(),
+                },
+            )
+            .unwrap();
+
+        let mut point_to_actor: HashSet<_> = actor_mesh.iter().collect();
+        while !point_to_actor.is_empty() {
+            let (point, origin_actor_ref, sender_actor_id) = cast_info_rx.recv().await.unwrap();
+            let key = (point, origin_actor_ref);
+            assert!(
+                point_to_actor.remove(&key),
+                "key {:?} not present or removed twice",
+                key
+            );
+            assert_eq!(&sender_actor_id, instance.self_id());
         }
     }
 }
