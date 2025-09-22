@@ -169,8 +169,8 @@ class GeneratorActor(Actor):
 async def test_gpu_trainer_generator():
     trainer_proc = this_host().spawn_procs(per_host={"gpus": 2})
     gen_proc = this_host().spawn_procs(per_host={"gpus": 2})
-    trainer = await trainer_proc.spawn("trainer", TrainerActor)
-    generator = await gen_proc.spawn("gen", GeneratorActor)
+    trainer = trainer_proc.spawn("trainer", TrainerActor)
+    generator = gen_proc.spawn("gen", GeneratorActor)
 
     await generator.init.call(trainer)
     await trainer.init.call(generator)
