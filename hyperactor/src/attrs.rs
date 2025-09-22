@@ -290,6 +290,9 @@ impl_attrvalue!(
     std::net::IpAddr,
     std::net::Ipv4Addr,
     std::net::Ipv6Addr,
+    crate::ActorId,
+    ndslice::Shape,
+    ndslice::Point,
 );
 
 impl AttrValue for std::time::Duration {
