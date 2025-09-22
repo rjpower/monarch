@@ -125,8 +125,8 @@ def test_actor_exception_sync(mesh, actor_class, num_procs):
     """
     Test that exceptions raised in actor endpoints are propagated to the client.
     """
-    proc = mesh(gpus=num_procs).get()
-    exception_actor = proc.spawn("exception_actor", actor_class).get()
+    proc = mesh(gpus=num_procs)
+    exception_actor = proc.spawn("exception_actor", actor_class)
 
     with pytest.raises(ActorError, match="This is a test exception"):
         if num_procs == 1:
@@ -549,7 +549,7 @@ class HealthyActor(Actor):
 class Intermediate(Actor):
     @endpoint
     async def init_local_mesh(self):
-        mesh = await local_proc_mesh(gpus=1)
+        mesh = local_proc_mesh(gpus=1)
         self._error_actor = mesh.spawn("error", ErrorActor)
         self._healthy_actor = mesh.spawn("healthy", HealthyActor)
 
