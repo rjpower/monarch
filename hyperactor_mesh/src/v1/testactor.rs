@@ -11,19 +11,26 @@
 //! the bootstrap binary, which is not built in test mode (and anyway, test mode
 //! does not work across crate boundaries)
 
+use std::collections::VecDeque;
+
 use async_trait::async_trait;
 use hyperactor::Actor;
 use hyperactor::ActorId;
+use hyperactor::ActorRef;
 use hyperactor::Bind;
 use hyperactor::Context;
 use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::PortRef;
+use hyperactor::RefClient;
 use hyperactor::Unbind;
 use hyperactor::supervision::ActorSupervisionEvent;
+use ndslice::Point;
 use serde::Deserialize;
 use serde::Serialize;
+
+use crate::comm::multicast::CastInfo;
 
 /// A simple test actor used by various unit tests.
 #[derive(Actor, Default, Debug)]
@@ -31,7 +38,9 @@ use serde::Serialize;
     spawn = true,
     handlers = [
         GetActorId { cast = true },
+        GetCastInfo { cast = true },
         CauseSupervisionEvent { cast = true },
+        Forward,
     ]
 )]
 pub struct TestActor;
@@ -122,6 +131,66 @@ impl Handler<ActorSupervisionEvent> for TestActorWithSupervisionHandling {
         _cx: &Context<Self>,
         _msg: ActorSupervisionEvent,
     ) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+}
+
+/// A message to forward to a visit list of ports.
+/// Each port removes the next entry, and adds it to the
+/// 'visited' list.
+#[derive(Debug, Clone, Named, Bind, Unbind, Serialize, Deserialize)]
+pub struct Forward {
+    pub to_visit: VecDeque<PortRef<Forward>>,
+    pub visited: Vec<PortRef<Forward>>,
+}
+
+#[async_trait]
+impl Handler<Forward> for TestActor {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        Forward {
+            mut to_visit,
+            mut visited,
+        }: Forward,
+    ) -> Result<(), anyhow::Error> {
+        let Some(this) = to_visit.pop_front() else {
+            anyhow::bail!("unexpected forward chain termination");
+        };
+        visited.push(this);
+        let next = to_visit.front().cloned();
+        anyhow::ensure!(next.is_some(), "unexpected forward chain termination");
+        next.unwrap().send(cx, Forward { to_visit, visited })?;
+        Ok(())
+    }
+}
+
+/// Just return the cast info of the sender.
+#[derive(
+    Debug,
+    Clone,
+    Named,
+    Bind,
+    Unbind,
+    Serialize,
+    Deserialize,
+    Handler,
+    RefClient
+)]
+pub struct GetCastInfo {
+    /// Originating actor, point, sender.
+    #[reply]
+    pub cast_info: PortRef<(Point, ActorRef<TestActor>, ActorId)>,
+}
+
+#[async_trait]
+impl Handler<GetCastInfo> for TestActor {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        GetCastInfo { cast_info }: GetCastInfo,
+    ) -> Result<(), anyhow::Error> {
+        cast_info.send(cx, (cx.cast_info(), cx.bind(), cx.sender().clone()))?;
         Ok(())
     }
 }

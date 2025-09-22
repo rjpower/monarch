@@ -817,7 +817,7 @@ mod tests {
 
     declare_attrs! {
         attr TEST_TIMEOUT: Duration;
-        attr TEST_COUNT: u32 = 23;
+        attr TEST_COUNT: u32;
         @meta(TEST_COUNT = 42)
         pub attr TEST_NAME: String;
     }
