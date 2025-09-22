@@ -108,6 +108,7 @@ pub fn from_env() -> Attrs {
         };
         let Ok(val) = env::var(env_var) else {
             // Default value
+            output.push_str("# ");
             output.push_str(&export(env_var, key.default));
             continue;
         };
@@ -121,6 +122,7 @@ pub fn from_env() -> Attrs {
                     env_var,
                     e
                 );
+                output.push_str("# ");
                 output.push_str(&export(env_var, key.default));
             }
             Ok(parsed) => {
@@ -339,17 +341,17 @@ mod tests {
         ); // Default value
 
         let expected_lines: HashSet<&str> = indoc! {"
-            export HYPERACTOR_MESSAGE_LATENCY_SAMPLING_RATE=0.01
-            export HYPERACTOR_CHANNEL_NET_RX_BUFFER_FULL_CHECK_INTERVAL=5s
-            export HYPERACTOR_CHANNEL_MULTIPART=true
-            export HYPERACTOR_DEFAULT_ENCODING=serde_multipart
-            export HYPERACTOR_REMOTE_ALLOCATOR_HEARTBEAT_INTERVAL=5s
-            export HYPERACTOR_STOP_ACTOR_TIMEOUT=1s
-            export HYPERACTOR_SPLIT_MAX_BUFFER_SIZE=5
-            export HYPERACTOR_MESSAGE_TTL_DEFAULT=64
-            export HYPERACTOR_MESSAGE_ACK_EVERY_N_MESSAGES=1000
-            export HYPERACTOR_MESSAGE_ACK_TIME_INTERVAL=500ms
-            export HYPERACTOR_PROCESS_EXIT_TIMEOUT=10s
+            # export HYPERACTOR_MESSAGE_LATENCY_SAMPLING_RATE=0.01
+            # export HYPERACTOR_CHANNEL_NET_RX_BUFFER_FULL_CHECK_INTERVAL=5s
+            # export HYPERACTOR_CHANNEL_MULTIPART=true
+            # export HYPERACTOR_DEFAULT_ENCODING=serde_multipart
+            # export HYPERACTOR_REMOTE_ALLOCATOR_HEARTBEAT_INTERVAL=5s
+            # export HYPERACTOR_STOP_ACTOR_TIMEOUT=1s
+            # export HYPERACTOR_SPLIT_MAX_BUFFER_SIZE=5
+            # export HYPERACTOR_MESSAGE_TTL_DEFAULT=64
+            # export HYPERACTOR_MESSAGE_ACK_EVERY_N_MESSAGES=1000
+            # export HYPERACTOR_MESSAGE_ACK_TIME_INTERVAL=500ms
+            # export HYPERACTOR_PROCESS_EXIT_TIMEOUT=10s
             # export HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT=30s
             export HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT=1m
             # export HYPERACTOR_CODEC_MAX_FRAME_LENGTH=10737418240
