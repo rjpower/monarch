@@ -89,7 +89,7 @@ class Indirect(Actor):
 
 @pytest.mark.timeout(60)
 async def test_choose():
-    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
+    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     v = proc.spawn("counter", Counter, 3)
     i = proc.spawn("indirect", Indirect)
     v.incr.broadcast()
@@ -108,7 +108,7 @@ async def test_choose():
 
 @pytest.mark.timeout(60)
 async def test_stream():
-    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
+    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     v = proc.spawn("counter2", Counter, 3)
     v.incr.broadcast()
 
@@ -129,7 +129,7 @@ class From(Actor):
 
 @pytest.mark.timeout(60)
 async def test_mesh_passed_to_mesh():
-    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
+    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     f = proc.spawn("from", From)
     t = proc.spawn("to", To)
     all = [y for x in f.fetch.stream(t) for y in await x]
@@ -139,8 +139,8 @@ async def test_mesh_passed_to_mesh():
 
 @pytest.mark.timeout(60)
 async def test_mesh_passed_to_mesh_on_different_proc_mesh():
-    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
-    proc2 = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
+    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
+    proc2 = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     f = proc.spawn("from", From)
     t = proc2.spawn("to", To)
     all = [y for x in f.fetch.stream(t) for y in await x]
@@ -166,7 +166,7 @@ def test_actor_slicing():
 
 @pytest.mark.timeout(60)
 async def test_aggregate():
-    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
+    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     counter = proc.spawn("counter", Counter, 1)
     counter.incr.broadcast()
     acc = Accumulator(counter.value, 0, operator.add)
@@ -186,7 +186,7 @@ class RunIt(Actor):
 
 @pytest.mark.timeout(60)
 async def test_rank_size():
-    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
+    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     r = proc.spawn("runit", RunIt)
 
     acc = Accumulator(r.run, 0, operator.add)
@@ -214,7 +214,7 @@ class SyncActor(Actor):
 
 @pytest.mark.timeout(60)
 async def test_sync_actor():
-    proc = await fake_in_process_host().spawn_procs(per_host={"gpus": 2})
+    proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     a = proc.spawn("actor", SyncActor)
     c = proc.spawn("counter", Counter, 5)
     r = await a.sync_endpoint.choose(c)
@@ -398,8 +398,8 @@ class AsyncActor(Actor):
 @pytest.mark.timeout(30)
 async def test_async_concurrency():
     """Test that async endpoints will be processed concurrently."""
-    pm = await this_host().spawn_procs()
-    am = await pm.spawn("async", AsyncActor)
+    pm = this_host().spawn_procs()
+    am = pm.spawn("async", AsyncActor)
     fut = am.sleep.call()
     # This call should go through and exit the sleep loop, as long as we are
     # actually concurrently processing messages.
