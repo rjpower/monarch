@@ -16,10 +16,10 @@ from monarch._rust_bindings.monarch_hyperactor.actor_mesh import (
 )
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import Alloc
-from monarch._rust_bindings.monarch_hyperactor.mailbox import Mailbox
+from monarch._rust_bindings.monarch_hyperactor.context import Instance
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
 
-from monarch._rust_bindings.monarch_hyperactor.shape import Shape
+from monarch._rust_bindings.monarch_hyperactor.shape import Region
 
 @final
 class ProcMesh:
@@ -59,7 +59,7 @@ class ProcMesh:
         ...
 
     @property
-    def client(self) -> Mailbox:
+    def client(self) -> Instance:
         """
         A client that can be used to communicate with individual
         actors in the mesh, and also to create ports that can be
@@ -68,9 +68,9 @@ class ProcMesh:
         ...
 
     @property
-    def shape(self) -> Shape:
+    def region(self) -> Region:
         """
-        The shape of the mesh.
+        The region of the mesh.
         """
         ...
 
