@@ -450,7 +450,7 @@ class Manager(Actor):
     @endpoint
     async def init(self):
         mesh = proc_mesh(gpus=1)
-        self.workers = await mesh.spawn("Worker", Worker)
+        self.workers = mesh.spawn("Worker", Worker)
 
     @endpoint
     async def route(self):
@@ -464,7 +464,7 @@ class Manager(Actor):
 )
 async def test_errors_propagated(mesh):
     p_mesh = await mesh(gpus=1)
-    mesh = await p_mesh.spawn("manager", Manager)
+    mesh = p_mesh.spawn("manager", Manager)
 
     await mesh.init.call_one()
 
@@ -550,14 +550,14 @@ class Intermediate(Actor):
     @endpoint
     async def init_local_mesh(self):
         mesh = await local_proc_mesh(gpus=1)
-        self._error_actor = await mesh.spawn("error", ErrorActor)
-        self._healthy_actor = await mesh.spawn("healthy", HealthyActor)
+        self._error_actor = mesh.spawn("error", ErrorActor)
+        self._healthy_actor = mesh.spawn("healthy", HealthyActor)
 
     @endpoint
     async def init_proc_mesh(self):
         mesh = proc_mesh(gpus=1)
-        self._error_actor = await mesh.spawn("error", ErrorActor)
-        self._healthy_actor = await mesh.spawn("healthy", HealthyActor)
+        self._error_actor = mesh.spawn("error", ErrorActor)
+        self._healthy_actor = mesh.spawn("healthy", HealthyActor)
 
     @endpoint
     async def forward_success(self):
