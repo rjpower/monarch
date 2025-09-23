@@ -633,7 +633,8 @@ mod tests {
         let instance = testing::instance().await;
 
         for proc_mesh in testing::proc_meshes(&instance, extent!(replicas = 4, hosts = 2)).await {
-            testactor::assert_mesh_shape(proc_mesh.spawn(instance, "test", &()).await.unwrap());
+            testactor::assert_mesh_shape(proc_mesh.spawn(instance, "test", &()).await.unwrap())
+                .await;
         }
     }
 }
