@@ -724,7 +724,7 @@ mod tests {
     use crate as hyperactor; // for macros
     use crate::Named;
 
-    #[derive(Named, Serialize, Deserialize)]
+    #[derive(Named)]
     struct TestStruct;
 
     #[test]
@@ -848,7 +848,7 @@ mod tests {
 
     #[test]
     fn test_arms() {
-        #[derive(Named, Serialize, Deserialize)]
+        #[derive(Named)]
         enum TestArm {
             #[allow(dead_code)]
             A(u32),
