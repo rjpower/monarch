@@ -1249,8 +1249,9 @@ pub fn instrument_infallible(args: TokenStream, input: TokenStream) -> TokenStre
 /// `name` attribute.
 ///
 /// In addition to deriving [`hyperactor::data::Named`], this macro will
-/// register the type using the [`hyperactor::register_type`] macro,
-/// so that values of the type can be introspected at runtime.
+/// register the type using the [`hyperactor::register_type`] macro for
+/// concrete types. This behavior can be overriden by providing a literal
+/// booolean for the `register` attribute.
 ///
 /// This also requires the type to implement [`serde::Serialize`]
 /// and [`serde::Deserialize`].
@@ -1263,6 +1264,11 @@ pub fn derive_named(input: TokenStream) -> TokenStream {
     let mut typename = quote! {
         concat!(std::module_path!(), "::", stringify!(#struct_name))
     };
+
+    let type_params: Vec<_> = input.generics.type_params().collect();
+    let has_generics = !type_params.is_empty();
+    // By default, register concrete types.
+    let mut register = !has_generics;
 
     for attr in &input.attrs {
         if attr.path().is_ident("named") {
@@ -1279,12 +1285,26 @@ pub fn derive_named(input: TokenStream) -> TokenStream {
                         if path.is_ident("name") {
                             if let Lit::Str(name) = expr_lit.lit {
                                 typename = quote! { #name };
+                            } else {
+                                return TokenStream::from(
+                                    syn::Error::new_spanned(path, "invalid name")
+                                        .to_compile_error(),
+                                );
+                            }
+                        } else if path.is_ident("register") {
+                            if let Lit::Bool(flag) = expr_lit.lit {
+                                register = flag.value;
+                            } else {
+                                return TokenStream::from(
+                                    syn::Error::new_spanned(path, "invalid registration flag")
+                                        .to_compile_error(),
+                                );
                             }
                         } else {
                             return TokenStream::from(
                                 syn::Error::new_spanned(
                                     path,
-                                    "unsupported attribute (only `name` is supported)",
+                                    "unsupported attribute (only `name` or `register` is supported)",
                                 )
                                 .to_compile_error(),
                             );
@@ -1294,10 +1314,6 @@ pub fn derive_named(input: TokenStream) -> TokenStream {
             }
         }
     }
-
-    // Extract type parameters and add Named bounds
-    let type_params: Vec<_> = input.generics.type_params().collect();
-    let has_generics = !type_params.is_empty();
 
     // Create a version of generics with Named bounds for the impl block
     let mut generics_with_bounds = input.generics.clone();
@@ -1367,13 +1383,13 @@ pub fn derive_named(input: TokenStream) -> TokenStream {
     // TODO: explore making type hashes "structural", so that we
     // can derive generic type hashes and reconstruct their runtime
     // TypeInfos.
-    let register = if has_generics {
+    let registration = if register {
         quote! {
-            // Registered types must be concrete.
+            hyperactor::register_type!(#struct_name);
         }
     } else {
         quote! {
-            hyperactor::register_type!(#struct_name);
+            // Registration not requested
         }
     };
 
@@ -1387,7 +1403,7 @@ pub fn derive_named(input: TokenStream) -> TokenStream {
             #arm_impl
         }
 
-        #register
+        #registration
     };
 
     TokenStream::from(expanded)
