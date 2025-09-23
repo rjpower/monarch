@@ -30,6 +30,7 @@ use tokio::sync::watch;
 use crate as hyperactor;
 use crate::Named;
 use crate::RemoteMessage;
+use crate::attrs::AttrValue;
 use crate::channel::sim::SimAddr;
 use crate::simnet::SimNetError;
 
@@ -331,6 +332,25 @@ impl ChannelTransport {
     /// Return an "any" address for this transport.
     pub fn any(&self) -> ChannelAddr {
         ChannelAddr::any(self.clone())
+    }
+
+    /// Return the list of transport types representing remote channels.
+    pub fn remote() -> [ChannelTransport; 3] {
+        [
+            ChannelTransport::Tcp,
+            ChannelTransport::MetaTls(TlsMode::Hostname),
+            ChannelTransport::MetaTls(TlsMode::IpV6),
+        ]
+    }
+}
+
+impl AttrValue for ChannelTransport {
+    fn display(&self) -> String {
+        self.to_string()
+    }
+
+    fn parse(s: &str) -> Result<Self, anyhow::Error> {
+        s.parse()
     }
 }
 

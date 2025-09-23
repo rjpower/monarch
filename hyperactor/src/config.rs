@@ -27,6 +27,7 @@ use crate::attrs::AttrKeyInfo;
 use crate::attrs::Attrs;
 use crate::attrs::SerializableValue;
 use crate::attrs::declare_attrs;
+use crate::channel::ChannelTransport;
 use crate::data::Encoding;
 
 // Declare configuration keys using the new attrs system with defaults
@@ -90,6 +91,10 @@ declare_attrs! {
 
     /// Whether to enable client sequence assignment.
     pub attr ENABLE_CLIENT_SEQ_ASSIGNMENT: bool = false;
+
+    /// Transport type to use for the root client.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_ROOT_CLIENT_TRANSPORT".to_string())
+    pub attr ROOT_CLIENT_TRANSPORT: ChannelTransport = ChannelTransport::Unix;
 }
 
 /// Load configuration from environment variables
@@ -226,6 +231,11 @@ pub mod global {
     /// `get` assumes that the key has a default value.
     pub fn get<T: AttrValue + Copy>(key: Key<T>) -> T {
         *CONFIG.read().unwrap().get(key).unwrap()
+    }
+
+    /// Get a key from the global configuration by cloning the value.
+    pub fn get_cloned<T: AttrValue>(key: Key<T>) -> T {
+        CONFIG.read().unwrap().get(key).unwrap().clone()
     }
 
     /// Get the global attrs
