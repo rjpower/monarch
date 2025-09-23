@@ -1247,6 +1247,13 @@ pub fn instrument_infallible(args: TokenStream, input: TokenStream) -> TokenStre
 /// provided type URI. The name of the type is its fully-qualified Rust
 /// path. The name may be overridden by providing a string value for the
 /// `name` attribute.
+///
+/// In addition to deriving [`hyperactor::data::Named`], this macro will
+/// register the type using the [`hyperactor::register_type`] macro,
+/// so that values of the type can be introspected at runtime.
+///
+/// This also requires the type to implement [`serde::Serialize`]
+/// and [`serde::Deserialize`].
 #[proc_macro_derive(Named, attributes(named))]
 pub fn derive_named(input: TokenStream) -> TokenStream {
     // Parse the input struct or enum
@@ -1354,6 +1361,22 @@ pub fn derive_named(input: TokenStream) -> TokenStream {
         _ => quote! {},
     };
 
+    // Try to register the type so we can get runtime TypeInfo.
+    // We can only do this for concrete types.
+    //
+    // TODO: explore making type hashes "structural", so that we
+    // can derive generic type hashes and reconstruct their runtime
+    // TypeInfos.
+    let register = if has_generics {
+        quote! {
+            // Registered types must be concrete.
+        }
+    } else {
+        quote! {
+            hyperactor::register_type!(#struct_name);
+        }
+    };
+
     let (_, ty_generics, where_clause) = input.generics.split_for_impl();
     // Ideally we would compute the has directly in the macro itself, however, we don't
     // have access to the fully expanded pathname here as we use the intrinsic std::module_path!() macro.
@@ -1363,6 +1386,8 @@ pub fn derive_named(input: TokenStream) -> TokenStream {
             fn typehash() -> u64 { #typehash_impl }
             #arm_impl
         }
+
+        #register
     };
 
     TokenStream::from(expanded)
@@ -1513,6 +1538,7 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let mut handles = Vec::new();
     let mut bindings = Vec::new();
+    let mut type_registrations = Vec::new();
 
     for ty in &tys {
         handles.push(quote! {
@@ -1520,6 +1546,9 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
         });
         bindings.push(quote! {
             ports.bind::<#ty>();
+        });
+        type_registrations.push(quote! {
+            hyperactor::register_type!(#ty);
         });
     }
 
@@ -1529,6 +1558,8 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
         impl hyperactor::actor::RemoteActor for #data_type_name {}
 
         #(#handles)*
+
+        #(#type_registrations)*
 
         // Always export the `Signal` type.
         impl hyperactor::actor::RemoteHandles<hyperactor::actor::Signal> for #data_type_name {}
@@ -1593,7 +1624,7 @@ pub fn alias(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #[doc = "The generated alias struct."]
-        #[derive(Debug, Named)]
+        #[derive(Debug, hyperactor::Named, serde::Serialize, serde::Deserialize)]
         pub struct #alias;
         impl hyperactor::actor::RemoteActor for #alias {}
 
