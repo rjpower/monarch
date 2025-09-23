@@ -10,6 +10,11 @@
 /// simply invoking [`hyperactor_mesh::bootstrap_or_die`].
 #[tokio::main]
 async fn main() {
-    hyperactor::initialize_with_current_runtime();
+    // Logs are written to /tmp/$USER/monarch_log*.
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
+
     hyperactor_mesh::bootstrap_or_die().await;
 }

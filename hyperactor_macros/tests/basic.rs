@@ -27,7 +27,7 @@ use hyperactor::instrument_infallible;
 use serde::Deserialize;
 use serde::Serialize;
 
-#[derive(Handler, Debug, Named, Serialize, Deserialize)]
+#[derive(Handler, Debug, Named)]
 enum ShoppingList {
     // Oneway messages dispatch messages asynchronously, with no reply.
     Add(String),
@@ -141,7 +141,7 @@ static_assertions::assert_type_eq_all!(
 );
 
 // Test struct support for Handler derive
-#[derive(Handler, Debug, Named, Serialize, Deserialize)]
+#[derive(Handler, Debug, Named)]
 struct SimpleStructMessage {
     field1: String,
     field2: u32,
