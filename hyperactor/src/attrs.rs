@@ -317,19 +317,6 @@ impl AttrValue for std::time::SystemTime {
     }
 }
 
-/// This is for the CLIENT_SEQ header. TODO: make this generic
-impl AttrValue for (String, usize) {
-    fn display(&self) -> String {
-        format!("{}:{}", self.0, self.1)
-    }
-
-    fn parse(value: &str) -> Result<Self, anyhow::Error> {
-        let parts: Vec<_> = value.rsplit(':').collect();
-        anyhow::ensure!(parts.len() == 2, "parse {:?}: missing ':' separator", value);
-        Ok((parts[0].to_string(), parts[1].parse()?))
-    }
-}
-
 // Internal trait for type-erased serialization
 #[doc(hidden)]
 pub trait SerializableValue: Send + Sync {
