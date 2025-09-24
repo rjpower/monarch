@@ -85,7 +85,7 @@ use std::sync::RwLock;
 
 declare_attrs! {
     /// Transport type to use for the root client.
-    @meta(CONFIG_ENV_VAR = "HYPERACTOR_ROOT_CLIENT_TRANSPORT".to_string())
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_ROOT_CLIENT_TRANSPORT".to_string())
     attr ROOT_CLIENT_TRANSPORT: ChannelTransport = ChannelTransport::Unix;
 }
 
