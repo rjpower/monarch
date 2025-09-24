@@ -334,13 +334,15 @@ impl ChannelTransport {
         ChannelAddr::any(self.clone())
     }
 
-    /// Return the list of transport types representing remote channels.
-    pub fn remote() -> [ChannelTransport; 3] {
-        [
-            ChannelTransport::Tcp,
-            ChannelTransport::MetaTls(TlsMode::Hostname),
-            ChannelTransport::MetaTls(TlsMode::IpV6),
-        ]
+    /// Returns true if this transport type represents a remote channel.
+    pub fn is_remote(&self) -> bool {
+        match self {
+            ChannelTransport::Tcp => true,
+            ChannelTransport::MetaTls(_) => true,
+            ChannelTransport::Local => false,
+            ChannelTransport::Sim(_) => false,
+            ChannelTransport::Unix => false,
+        }
     }
 }
 

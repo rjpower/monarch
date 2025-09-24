@@ -91,10 +91,6 @@ declare_attrs! {
 
     /// Whether to enable client sequence assignment.
     pub attr ENABLE_CLIENT_SEQ_ASSIGNMENT: bool = false;
-
-    /// Transport type to use for the root client.
-    @meta(CONFIG_ENV_VAR = "HYPERACTOR_ROOT_CLIENT_TRANSPORT".to_string())
-    pub attr ROOT_CLIENT_TRANSPORT: ChannelTransport = ChannelTransport::Unix;
 }
 
 /// Load configuration from environment variables
