@@ -127,12 +127,12 @@ impl HostMesh {
     /// ```                                  
     pub async fn allocate(
         cx: &impl context::Actor,
-        alloc: impl Alloc + Send + Sync + 'static,
+        alloc: Box<dyn Alloc + Send + Sync>,
         name: &str,
     ) -> v1::Result<Self> {
         let transport = alloc.transport();
         let extent = alloc.extent().clone();
-        let proc_mesh = ProcMesh::allocate(cx, Box::new(alloc), name).await?;
+        let proc_mesh = ProcMesh::allocate(cx, alloc, name).await?;
         let name = Name::new(name);
 
         // TODO: figure out how to deal with MAST allocs. It requires an extra dimension,
@@ -230,7 +230,7 @@ impl HostMeshRef {
         let name = Name::new(name);
         let mut procs = Vec::new();
         for (rank, host) in self.ranks.iter().enumerate() {
-            let ok = host
+            let _ok = host
                 .mesh_agent()
                 .create_or_update(cx, name.clone(), ())
                 .await
@@ -331,7 +331,6 @@ mod tests {
     use std::collections::HashSet;
     use std::collections::VecDeque;
 
-    use hyperactor::PortRef;
     use hyperactor::context::Mailbox as _;
     use itertools::Itertools;
     use ndslice::ViewExt;
@@ -343,7 +342,6 @@ mod tests {
     use crate::alloc::Allocator;
     use crate::alloc::ProcessAllocator;
     use crate::v1::ActorMesh;
-    use crate::v1::ActorMeshRef;
     use crate::v1::testactor;
     use crate::v1::testing;
 
@@ -398,7 +396,9 @@ mod tests {
             .await
             .unwrap();
 
-        let host_mesh = HostMesh::allocate(instance, alloc, "test").await.unwrap();
+        let host_mesh = HostMesh::allocate(instance, Box::new(alloc), "test")
+            .await
+            .unwrap();
         let proc_mesh1 = host_mesh.spawn(instance, "test_1").await.unwrap();
         let actor_mesh1: ActorMesh<testactor::TestActor> =
             proc_mesh1.spawn(instance, "test", &()).await.unwrap();

@@ -1,0 +1,64 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# pyre-strict
+
+from typing import Any, final
+
+from monarch._rust_bindings.monarch_hyperactor.alloc import Alloc
+from monarch._rust_bindings.monarch_hyperactor.context import Instance
+from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
+
+from monarch._rust_bindings.monarch_hyperactor.shape import Region
+from monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh import ProcMesh
+
+@final
+class HostMesh:
+    @classmethod
+    def allocate_nonblocking(
+        self, instance: Instance, alloc: Alloc, name: str
+    ) -> PythonTask["HostMesh"]:
+        """
+        Allocate a host mesh according to the provided alloc.
+
+        Arguments:
+        - `instance`: The actor instance used to allocate the mesh.
+        - `alloc`: The alloc to allocate according to.
+        - `name`: Name of the mesh.
+        """
+        ...
+
+    def spawn_nonblocking(
+        self,
+        instance: Instance,
+        name: str,
+    ) -> PythonTask[ProcMesh]:
+        """
+        Spawn a new actor on this mesh.
+
+        Arguments:
+        - `instance`: The instance to use to spawn the mesh.
+        - `name`: Name of the proc mesh
+        """
+        ...
+
+    def sliced(self, region: Region) -> "HostMesh":
+        """
+        Slice this mesh into a new mesh with the given region.
+
+        Arguments:
+        - `region`: The region to slice the mesh into.
+        """
+        ...
+
+    @property
+    def region(self) -> Region:
+        """
+        The region of the mesh.
+        """
+        ...
+
+    def __reduce__(self) -> Any: ...
