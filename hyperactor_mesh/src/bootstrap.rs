@@ -867,7 +867,7 @@ impl BootstrapCommand {
         })
     }
 
-    /// Bootstrap command used for testing, invokking the Buck-built
+    /// Bootstrap command used for testing, invoking the Buck-built
     /// `monarch/hyperactor_mesh/bootstrap` binary.
     ///
     /// Intended for integration tests where we need to spawn real
