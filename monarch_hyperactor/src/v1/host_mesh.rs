@@ -6,6 +6,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use hyperactor_mesh::bootstrap::BootstrapProcManagerParams;
 use hyperactor_mesh::shared_cell::SharedCell;
 use hyperactor_mesh::v1::host_mesh::HostMesh;
 use hyperactor_mesh::v1::host_mesh::HostMeshRef;
@@ -25,6 +29,45 @@ use crate::instance_dispatch;
 use crate::pytokio::PyPythonTask;
 use crate::shape::PyRegion;
 use crate::v1::proc_mesh::PyProcMesh;
+
+#[pyclass(
+    name = "BootstrapProcManagerParams",
+    module = "monarch._rust_bindings.monarch_hyperactor.v1.host_mesh"
+)]
+#[derive(Clone)]
+pub struct PyBootstrapProcManagerParams {
+    #[pyo3(get, set)]
+    pub program: String,
+    #[pyo3(get, set)]
+    pub args: Vec<String>,
+    #[pyo3(get, set)]
+    pub env: HashMap<String, String>,
+}
+
+#[pymethods]
+impl PyBootstrapProcManagerParams {
+    #[new]
+    fn new(program: String, args: Vec<String>, env: HashMap<String, String>) -> Self {
+        Self { program, args, env }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "BootstrapProcManagerParams(program='{}', args={:?}, env={:?})",
+            self.program, self.args, self.env
+        )
+    }
+}
+
+impl PyBootstrapProcManagerParams {
+    pub fn to_rust(&self) -> BootstrapProcManagerParams {
+        BootstrapProcManagerParams {
+            program: PathBuf::from(&self.program),
+            args: self.args.clone(),
+            env: self.env.clone(),
+        }
+    }
+}
 
 #[pyclass(
     name = "HostMesh",
@@ -60,6 +103,7 @@ impl PyHostMesh {
         instance: &PyInstance,
         alloc: &mut PyAlloc,
         name: String,
+        bootstrap_params: Option<PyBootstrapProcManagerParams>,
     ) -> PyResult<PyPythonTask> {
         let alloc = match alloc.take() {
             Some(alloc) => alloc,
@@ -72,7 +116,13 @@ impl PyHostMesh {
         let instance = instance.clone();
         PyPythonTask::new(async move {
             let mesh = instance_dispatch!(instance, async move |cx_instance| {
-                HostMesh::allocate(cx_instance, alloc, &name).await
+                HostMesh::allocate(
+                    cx_instance,
+                    alloc,
+                    &name,
+                    bootstrap_params.map(|p| p.to_rust()),
+                )
+                .await
             })
             .map_err(|err| PyException::new_err(err.to_string()))?;
             Ok(Self::new_owned(mesh))
@@ -147,5 +197,6 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     )?;
     hyperactor_mod.add_function(f)?;
     hyperactor_mod.add_class::<PyHostMesh>()?;
+    hyperactor_mod.add_class::<PyBootstrapProcManagerParams>()?;
     Ok(())
 }

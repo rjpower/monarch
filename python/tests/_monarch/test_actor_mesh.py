@@ -34,7 +34,10 @@ if TYPE_CHECKING:
 from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiver
 from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
-from monarch._rust_bindings.monarch_hyperactor.v1.host_mesh import HostMesh
+from monarch._rust_bindings.monarch_hyperactor.v1.host_mesh import (
+    BootstrapProcManagerParams,
+    HostMesh,
+)
 from monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh import (
     ProcMesh as ProcMeshV1,
 )
@@ -245,6 +248,7 @@ async def test_cast_ref(use_v1: bool) -> None:
     run()
 
 
+# TODO - re-enable after resolving T232206970
 @pytest.mark.oss_skip
 @pytest.mark.timeout(120)
 async def test_host_mesh() -> None:
@@ -256,7 +260,14 @@ async def test_host_mesh() -> None:
         alloc = allocator.allocate(spec)
 
         host_mesh = await HostMesh.allocate_nonblocking(
-            context().actor_instance._as_rust(), await alloc._hy_alloc, "host_mesh"
+            context().actor_instance._as_rust(),
+            await alloc._hy_alloc,
+            "host_mesh",
+            BootstrapProcManagerParams(
+                cmd,
+                args if args else [],
+                bootstrap_env,
+            ),
         ).spawn()
 
         assert host_mesh.region.labels() == ["replicas", "hosts", "gpus"]
