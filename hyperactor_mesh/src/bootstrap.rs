@@ -45,6 +45,7 @@ use tokio::sync::watch;
 use crate::logging::create_log_writers;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::v1;
+use crate::v1::host_mesh::mesh_agent::HostAgentHost;
 use crate::v1::host_mesh::mesh_agent::HostMeshAgent;
 
 pub const BOOTSTRAP_ADDR_ENV: &str = "HYPERACTOR_MESH_BOOTSTRAP_ADDR";
@@ -238,7 +239,7 @@ impl Bootstrap {
                 let host_mesh_agent = ok!(host
                     .system_proc()
                     .clone()
-                    .spawn::<HostMeshAgent>("agent", host)
+                    .spawn::<HostMeshAgent>("agent", HostAgentHost::Process(host))
                     .await);
 
                 tracing::info!(

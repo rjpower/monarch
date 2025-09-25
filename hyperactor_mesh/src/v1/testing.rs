@@ -21,6 +21,7 @@ use ndslice::Extent;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
+use crate::alloc::Alloc;
 use crate::alloc::AllocSpec;
 use crate::alloc::Allocator;
 use crate::alloc::LocalAllocator;
@@ -82,6 +83,27 @@ pub async fn proc_meshes(cx: &impl context::Actor, extent: Extent) -> Vec<ProcMe
     meshes
 }
 
+/// Return different alloc implementations with the provided extent.
+pub async fn allocs(extent: Extent) -> Vec<Box<dyn Alloc + Send + Sync>> {
+    let spec = AllocSpec {
+        extent: extent.clone(),
+        constraints: Default::default(),
+        proc_name: None,
+    };
+
+    vec![
+        Box::new(LocalAllocator.allocate(spec.clone()).await.unwrap()),
+        Box::new(
+            ProcessAllocator::new(Command::new(
+                buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
+            ))
+            .allocate(spec.clone())
+            .await
+            .unwrap(),
+        ),
+    ]
+}
+
 /// Create a local proc mesh with the provided extent, returning the
 /// mesh itself, the controller actor, and the router.
 pub async fn local_proc_mesh(extent: Extent) -> (ProcMesh, Instance<()>, DialMailboxRouter) {
@@ -120,7 +142,7 @@ pub async fn host_mesh(extent: Extent) -> HostMesh {
         .await
         .unwrap();
 
-    HostMesh::allocate(instance().await, alloc, "test")
+    HostMesh::allocate(instance().await, Box::new(alloc), "test")
         .await
         .unwrap()
 }

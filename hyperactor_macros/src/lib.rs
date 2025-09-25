@@ -1594,7 +1594,6 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     if spawn {
         expanded.extend(quote! {
-
             hyperactor::remote!(#data_type_name);
         });
     }
