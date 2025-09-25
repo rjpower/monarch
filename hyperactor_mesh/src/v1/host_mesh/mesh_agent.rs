@@ -198,7 +198,7 @@ impl Actor for HostMeshAgentProcMeshTrampoline {
             let (host, _) = Host::serve(manager, transport.any()).await?;
             HostAgentMode::Local(host)
         } else {
-            let manager = if let Some(params) = bootstrap_params {
+            let manager = if let Some(ref params) = bootstrap_params {
                 BootstrapProcManager::from_params(bootstrap_params.unwrap())
             } else {
                 BootstrapProcManager::new_current_exe()?
