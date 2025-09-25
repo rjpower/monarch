@@ -392,7 +392,9 @@ mod tests {
         let instance = testing::instance().await;
 
         for alloc in testing::allocs(extent!(replicas = 4)).await {
-            let host_mesh = HostMesh::allocate(instance, alloc, "test").await.unwrap();
+            let host_mesh = HostMesh::allocate(instance, alloc, "test", None)
+                .await
+                .unwrap();
             let proc_mesh1 = host_mesh.spawn(instance, "test_1").await.unwrap();
             let actor_mesh1: ActorMesh<testactor::TestActor> =
                 proc_mesh1.spawn(instance, "test", &()).await.unwrap();
