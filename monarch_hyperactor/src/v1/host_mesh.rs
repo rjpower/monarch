@@ -39,7 +39,7 @@ pub struct PyBootstrapCommand {
     #[pyo3(get, set)]
     pub program: String,
     #[pyo3(get, set)]
-    pub argv0: Option<String>,
+    pub arg0: Option<String>,
     #[pyo3(get, set)]
     pub args: Vec<String>,
     #[pyo3(get, set)]
@@ -51,13 +51,13 @@ impl PyBootstrapCommand {
     #[new]
     fn new(
         program: String,
-        argv0: Option<String>,
+        arg0: Option<String>,
         args: Vec<String>,
         env: HashMap<String, String>,
     ) -> Self {
         Self {
             program,
-            argv0,
+            arg0,
             args,
             env,
         }
@@ -75,7 +75,7 @@ impl PyBootstrapCommand {
     pub fn to_rust(&self) -> BootstrapCommand {
         BootstrapCommand {
             program: PathBuf::from(&self.program),
-            argv0: self.argv0.clone(),
+            arg0: self.arg0.clone(),
             args: self.args.clone(),
             env: self.env.clone(),
         }

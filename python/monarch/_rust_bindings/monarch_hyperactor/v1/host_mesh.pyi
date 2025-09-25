@@ -73,7 +73,7 @@ class BootstrapCommand:
     def __init__(
         self,
         program: str,
-        argv0: str | None,
+        arg0: str | None,
         args: list[str],
         env: dict[str, str],
     ) -> None:
@@ -82,6 +82,7 @@ class BootstrapCommand:
 
         Arguments:
         - `program`: The program to execute.
+        - `arg0`: Optionally, the program's arg0. If not provided, the program's name will be used.
         - `args`: List of command line arguments.
         - `env`: Environment variables as key-value pairs.
         """
