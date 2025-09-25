@@ -19,6 +19,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use base64::prelude::*;
+use humantime::format_duration;
 use hyperactor::ActorRef;
 use hyperactor::Named;
 use hyperactor::ProcId;
@@ -322,10 +323,50 @@ impl ProcStatus {
     }
 }
 
+impl std::fmt::Display for ProcStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProcStatus::Starting => write!(f, "Starting"),
+            ProcStatus::Running { pid, started_at } => {
+                let uptime = started_at
+                    .elapsed()
+                    .map(|d| format!(" up {}", format_duration(d)))
+                    .unwrap_or_default();
+                write!(f, "Running[{pid}]{uptime}")
+            }
+            ProcStatus::Ready {
+                pid,
+                started_at,
+                addr,
+                ..
+            } => {
+                let uptime = started_at
+                    .elapsed()
+                    .map(|d| format!(" up {}", format_duration(d)))
+                    .unwrap_or_default();
+                write!(f, "Ready[{pid}] at {addr}{uptime}")
+            }
+            ProcStatus::Stopping => write!(f, "Stopping"),
+            ProcStatus::Stopped { exit_code } => write!(f, "Stopped(exit={exit_code})"),
+            ProcStatus::Killed {
+                signal,
+                core_dumped,
+            } => {
+                if *core_dumped {
+                    write!(f, "Killed(sig={signal}, core)")
+                } else {
+                    write!(f, "Killed(sig={signal})")
+                }
+            }
+            ProcStatus::Failed { reason } => write!(f, "Failed({reason})"),
+        }
+    }
+}
+
 /// Error returned by [`BootstrapProcHandle::ready`].
 #[derive(Debug, Clone)]
 pub enum ReadyError {
-    /// The proc reached a terminal state before `Running`.
+    /// The proc reached a terminal state before `Ready`.
     Terminal(ProcStatus),
     /// The internal watch channel closed unexpectedly.
     ChannelClosed,
@@ -521,7 +562,7 @@ impl BootstrapProcHandle {
         F: FnOnce(&mut ProcStatus) -> bool,
     {
         let mut guard = self.status.lock().expect("status mutex poisoned");
-        let before = guard.clone();
+        let _before = guard.clone();
         let changed = f(&mut guard);
         if changed {
             // Publish while still holding the lock to preserve order.
@@ -712,19 +753,20 @@ impl BootstrapProcHandle {
         }
     }
 
-    /// Wait until the proc reaches the [`ProcStatus::Running`] state.
+    /// Wait until the proc reaches the [`ProcStatus::Ready`] state.
     ///
     /// If the proc hits a terminal state ([`ProcStatus::Stopped`],
     /// [`ProcStatus::Killed`], or [`ProcStatus::Failed`]) before ever
-    /// running, this returns `Err(ReadyError::Terminal(status))`. If
-    /// the internal watch channel closes unexpectedly, this returns
+    /// becoming `Ready`, this returns
+    /// `Err(ReadyError::Terminal(status))`. If the internal watch
+    /// channel closes unexpectedly, this returns
     /// `Err(ReadyError::ChannelClosed)`. Otherwise it returns
-    /// `Ok(())` when `Running` is first observed.
+    /// `Ok(())` when `Ready` is first observed.
     ///
     /// Non-consuming: `BootstrapProcHandle` is a supervisor, not the
     /// owner; multiple tasks may await `ready()` concurrently.
     /// `Stopping` is not treated as terminal here; we continue
-    /// waiting until `Running` or a terminal state is seen.
+    /// waiting until `Ready` or a terminal state is seen.
     ///
     /// Companion to [`BootstrapProcHandle::wait`]: `wait()` resolves
     /// on exit; `ready()` resolves on startup.
@@ -770,6 +812,13 @@ impl hyperactor::host::ProcHandle for BootstrapProcHandle {
     }
 }
 
+#[derive(Debug, Named, Serialize, Deserialize, Clone)]
+pub struct BootstrapProcManagerParams {
+    pub program: std::path::PathBuf,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+}
+
 /// A process manager for launching and supervising **bootstrap
 /// processes** (via the [`bootstrap`] entry point).
 ///
@@ -807,6 +856,7 @@ pub struct BootstrapProcManager {
     /// exclusively in the [`Drop`] impl to send `SIGKILL` without
     /// needing async context.
     pid_table: Arc<std::sync::Mutex<HashMap<ProcId, u32>>>,
+    env: HashMap<String, String>,
 }
 
 impl Drop for BootstrapProcManager {
@@ -864,6 +914,7 @@ impl BootstrapProcManager {
             args: Vec::new(),
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            env: HashMap::new(),
         }
     }
 
@@ -886,7 +937,19 @@ impl BootstrapProcManager {
             args: args.into(),
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            env: HashMap::new(),
         })
+    }
+
+    pub(crate) fn from_params(params: BootstrapProcManagerParams) -> Self {
+        Self {
+            program: params.program,
+            arg0: None,
+            args: params.args,
+            children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            env: params.env,
+        }
     }
 
     /// Test-only constructor that uses the Buck-built
@@ -970,7 +1033,6 @@ impl BootstrapProcManager {
 
 #[async_trait]
 impl ProcManager for BootstrapProcManager {
-    type Agent = ProcMeshAgent;
     type Handle = BootstrapProcHandle;
 
     /// Return the [`ChannelTransport`] used by this proc manager.
@@ -1027,6 +1089,9 @@ impl ProcManager for BootstrapProcManager {
         }
         for arg in &self.args {
             cmd.arg(arg);
+        }
+        for (k, v) in &self.env {
+            cmd.env(k, v);
         }
         cmd.env(
             "HYPERACTOR_MESH_BOOTSTRAP_MODE",
@@ -1387,14 +1452,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_v1_child_logging() {
-        use std::time::Duration;
-
-        use hyperactor::ActorRef;
-        use hyperactor::channel::ChannelAddr;
-        use hyperactor::channel::ChannelTransport;
-        use hyperactor::channel::{self};
+        use hyperactor::channel;
         use hyperactor::data::Serialized;
-        use hyperactor::id;
         use hyperactor::mailbox::BoxedMailboxSender;
         use hyperactor::mailbox::DialMailboxRouter;
         use hyperactor::mailbox::MailboxServer;
@@ -1757,8 +1816,6 @@ mod tests {
 
     #[tokio::test]
     async fn status_unknown_proc_is_none() {
-        use std::path::PathBuf;
-
         let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
         let unknown = ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "nope".into());
         assert!(manager.status(&unknown).await.is_none());
@@ -1980,5 +2037,75 @@ mod tests {
         // **Regression check**: pid() must still return the cached
         // pid in Ready.
         assert_eq!(handle.pid(), Some(pid), "pid() should be cached in Ready");
+    }
+
+    #[test]
+    fn display_running_includes_pid_and_uptime() {
+        let started_at = RealClock.system_time_now() - Duration::from_secs(42);
+        let st = ProcStatus::Running {
+            pid: 1234,
+            started_at,
+        };
+
+        let s = format!("{}", st);
+        assert!(s.contains("1234"));
+        assert!(s.contains("Running"));
+        assert!(s.contains("42s"));
+    }
+
+    #[test]
+    fn display_ready_includes_pid_and_addr() {
+        let started_at = RealClock.system_time_now() - Duration::from_secs(5);
+        let addr = ChannelAddr::any(ChannelTransport::Unix);
+        let agent =
+            ActorRef::attest(ProcId::Direct(addr.clone(), "proc".into()).actor_id("agent", 0));
+
+        let st = ProcStatus::Ready {
+            pid: 4321,
+            started_at,
+            addr: addr.clone(),
+            agent,
+        };
+
+        let s = format!("{}", st);
+        assert!(s.contains("4321")); // pid
+        assert!(s.contains(&addr.to_string())); // addr
+        assert!(s.contains("Ready"));
+    }
+
+    #[test]
+    fn display_stopped_includes_exit_code() {
+        let st = ProcStatus::Stopped { exit_code: 7 };
+        let s = format!("{}", st);
+        assert!(s.contains("Stopped"));
+        assert!(s.contains("7"));
+    }
+
+    #[test]
+    fn display_other_variants_does_not_panic() {
+        let samples = vec![
+            ProcStatus::Starting,
+            ProcStatus::Stopping,
+            ProcStatus::Ready {
+                pid: 42,
+                started_at: RealClock.system_time_now(),
+                addr: ChannelAddr::any(ChannelTransport::Unix),
+                agent: ActorRef::attest(
+                    ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "x".into())
+                        .actor_id("agent", 0),
+                ),
+            },
+            ProcStatus::Killed {
+                signal: 9,
+                core_dumped: false,
+            },
+            ProcStatus::Failed {
+                reason: "boom".into(),
+            },
+        ];
+
+        for st in samples {
+            let _ = format!("{}", st); // Just make sure it doesn't panic.
+        }
     }
 }

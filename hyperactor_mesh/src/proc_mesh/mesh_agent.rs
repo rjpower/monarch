@@ -20,6 +20,7 @@ use enum_as_inner::EnumAsInner;
 use hyperactor::Actor;
 use hyperactor::ActorHandle;
 use hyperactor::ActorId;
+use hyperactor::Bind;
 use hyperactor::Context;
 use hyperactor::Data;
 use hyperactor::HandleClient;
@@ -31,6 +32,7 @@ use hyperactor::PortHandle;
 use hyperactor::PortRef;
 use hyperactor::ProcId;
 use hyperactor::RefClient;
+use hyperactor::Unbind;
 use hyperactor::actor::ActorStatus;
 use hyperactor::actor::remote::Remote;
 use hyperactor::channel;
@@ -167,7 +169,7 @@ impl State {
     handlers=[
         MeshAgentMessage,
         resource::CreateOrUpdate<ActorSpec>,
-        resource::GetState<ActorState>
+        resource::GetState<ActorState> { cast = true },
     ]
 )]
 pub struct ProcMeshAgent {
@@ -282,9 +284,9 @@ impl MeshAgentMessageHandler for ProcMeshAgent {
         // supervision codepaths.
         let router = if std::env::var("HYPERACTOR_MESH_ROUTER_NO_GLOBAL_FALLBACK").is_err() {
             let default = super::router::global().fallback(client.into_boxed());
-            DialMailboxRouter::new_with_default(default.into_boxed())
+            DialMailboxRouter::new_with_default_direct_addressed_remote_only(default.into_boxed())
         } else {
-            DialMailboxRouter::new_with_default(client.into_boxed())
+            DialMailboxRouter::new_with_default_direct_addressed_remote_only(client.into_boxed())
         };
 
         for (proc_id, addr) in address_book {
@@ -425,7 +427,7 @@ pub struct ActorSpec {
 }
 
 /// Actor state.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Named, Bind, Unbind)]
 pub struct ActorState {
     /// The actor's ID.
     pub actor_id: ActorId,
