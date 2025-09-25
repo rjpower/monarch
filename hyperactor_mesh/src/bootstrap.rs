@@ -14,7 +14,6 @@ use std::future;
 use std::io;
 use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -47,7 +46,6 @@ use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
-use tracing::field::debug;
 
 use crate::logging::create_log_writers;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
