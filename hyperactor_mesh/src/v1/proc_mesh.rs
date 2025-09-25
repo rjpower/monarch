@@ -218,10 +218,10 @@ impl ProcMesh {
     pub(crate) async fn create_owned_unchecked(
         cx: &impl context::Actor,
         name: Name,
+        extent: Extent,
         hosts: HostMeshRef,
         ranks: Vec<ProcRef>,
     ) -> v1::Result<Self> {
-        let extent = hosts.extent();
         Self::create(
             cx,
             name,
@@ -631,16 +631,10 @@ impl view::RankedSliceable for ProcMeshRef {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
-    use hyperactor::clock::Clock;
-    use hyperactor::clock::RealClock;
-    use hyperactor::mailbox;
     use ndslice::ViewExt;
     use ndslice::extent;
     use timed_test::async_timed_test;
 
-    use crate::v1::ActorMesh;
     use crate::v1::testactor;
     use crate::v1::testing;
 
