@@ -1155,8 +1155,7 @@ impl MailboxSender for MailboxClient {
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
-        // tracing::trace!(name = "post", "posting message to {}", envelope.dest);
-        tracing::event!(target:"messages", tracing::Level::DEBUG, "crc"=envelope.data.crc(), "size"=envelope.data.len(), "sender"= %envelope.sender, "dest" = %envelope.dest.0, "port"= envelope.dest.1, "message_type" = envelope.data.typename().unwrap_or("unknown"), "send_message");
+        tracing::event!(target:"messages", tracing::Level::DEBUG,  "size"=envelope.data.len(), "sender"= %envelope.sender, "dest" = %envelope.dest.0, "port"= envelope.dest.1, "message_type" = envelope.data.typename().unwrap_or("unknown"), "send_message");
         if let Err(mpsc::error::SendError((envelope, return_handle))) =
             self.buffer.send((envelope, return_handle))
         {
@@ -2484,6 +2483,10 @@ pub struct DialMailboxRouter {
     // The default sender, to which messages for unknown recipients
     // are sent. (This is like a default route in a routing table.)
     default: BoxedMailboxSender,
+
+    // When true, only dial direct-addressed procs if their transport
+    // type is remote. Otherwise, fall back to the default sender.
+    direct_addressed_remote_only: bool,
 }
 
 impl DialMailboxRouter {
@@ -2494,12 +2497,27 @@ impl DialMailboxRouter {
 
     /// Create a new [`DialMailboxRouter`] with an empty routing table,
     /// and a default sender. Any message with an unknown destination is
-    /// dispatched on this default sender.
+    /// dispatched on this default sender, unless the destination is
+    /// direct-addressed, in which case it is dialed directly.
     pub fn new_with_default(default: BoxedMailboxSender) -> Self {
         Self {
             address_book: Arc::new(RwLock::new(BTreeMap::new())),
             sender_cache: Arc::new(DashMap::new()),
             default,
+            direct_addressed_remote_only: false,
+        }
+    }
+
+    /// Create a new [`DialMailboxRouter`] with an empty routing table,
+    /// and a default sender. Any message with an unknown destination is
+    /// dispatched on this default sender, unless the destination is
+    /// direct-addressed *and* has a remote channel transport type.
+    pub fn new_with_default_direct_addressed_remote_only(default: BoxedMailboxSender) -> Self {
+        Self {
+            address_book: Arc::new(RwLock::new(BTreeMap::new())),
+            sender_cache: Arc::new(DashMap::new()),
+            default,
+            direct_addressed_remote_only: true,
         }
     }
 
@@ -2559,7 +2577,11 @@ impl DialMailboxRouter {
             Some(addr.clone())
         } else if actor_id.proc_id().is_direct() {
             let (addr, _name) = actor_id.proc_id().clone().into_direct().unwrap();
-            Some(addr)
+            if self.direct_addressed_remote_only {
+                addr.transport().is_remote().then_some(addr)
+            } else {
+                Some(addr)
+            }
         } else {
             None
         }

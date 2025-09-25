@@ -27,6 +27,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::alloc::Alloc;
+use crate::bootstrap::BootstrapProcManagerParams;
 use crate::resource::CreateOrUpdateClient;
 use crate::v1;
 use crate::v1::Name;
@@ -128,8 +129,9 @@ impl HostMesh {
     /// ```                                  
     pub async fn allocate(
         cx: &impl context::Actor,
-        alloc: Box<dyn Alloc + Send + Sync + 'static>,
+        alloc: Box<dyn Alloc + Send + Sync>,
         name: &str,
+        bootstrap_params: Option<BootstrapProcManagerParams>,
     ) -> v1::Result<Self> {
         let transport = alloc.transport();
         let extent = alloc.extent().clone();
@@ -146,7 +148,7 @@ impl HostMesh {
             .spawn::<HostMeshAgentProcMeshTrampoline>(
                 cx,
                 "host_mesh_trampoline",
-                &(transport, mesh_agents.bind(), is_local),
+                &(transport, mesh_agents.bind(), bootstrap_params, is_local),
             )
             .await?;
 
@@ -241,7 +243,7 @@ impl HostMeshRef {
         let name = Name::new(name);
         let mut procs = Vec::new();
         for (rank, host) in self.ranks.iter().enumerate() {
-            let ok = host
+            let _ok = host
                 .mesh_agent()
                 .create_or_update(cx, name.clone(), ())
                 .await
@@ -342,7 +344,6 @@ mod tests {
     use std::collections::HashSet;
     use std::collections::VecDeque;
 
-    use hyperactor::PortRef;
     use hyperactor::context::Mailbox as _;
     use itertools::Itertools;
     use ndslice::ViewExt;
@@ -351,11 +352,8 @@ mod tests {
 
     use super::*;
     use crate::Bootstrap;
-    use crate::alloc::AllocSpec;
     use crate::alloc::Allocator;
-    use crate::alloc::ProcessAllocator;
     use crate::v1::ActorMesh;
-    use crate::v1::ActorMeshRef;
     use crate::v1::testactor;
     use crate::v1::testing;
 
