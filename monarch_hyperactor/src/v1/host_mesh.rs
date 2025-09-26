@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use hyperactor_mesh::bootstrap::BootstrapCommand;
+use hyperactor_mesh::bootstrap::BootstrapProcManagerParams;
 use hyperactor_mesh::shared_cell::SharedCell;
 use hyperactor_mesh::v1::host_mesh::HostMesh;
 use hyperactor_mesh::v1::host_mesh::HostMeshRef;
@@ -31,15 +31,13 @@ use crate::shape::PyRegion;
 use crate::v1::proc_mesh::PyProcMesh;
 
 #[pyclass(
-    name = "BootstrapCommand",
+    name = "BootstrapProcManagerParams",
     module = "monarch._rust_bindings.monarch_hyperactor.v1.host_mesh"
 )]
 #[derive(Clone)]
-pub struct PyBootstrapCommand {
+pub struct PyBootstrapProcManagerParams {
     #[pyo3(get, set)]
     pub program: String,
-    #[pyo3(get, set)]
-    pub arg0: Option<String>,
     #[pyo3(get, set)]
     pub args: Vec<String>,
     #[pyo3(get, set)]
@@ -47,35 +45,24 @@ pub struct PyBootstrapCommand {
 }
 
 #[pymethods]
-impl PyBootstrapCommand {
+impl PyBootstrapProcManagerParams {
     #[new]
-    fn new(
-        program: String,
-        arg0: Option<String>,
-        args: Vec<String>,
-        env: HashMap<String, String>,
-    ) -> Self {
-        Self {
-            program,
-            arg0,
-            args,
-            env,
-        }
+    fn new(program: String, args: Vec<String>, env: HashMap<String, String>) -> Self {
+        Self { program, args, env }
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "BootstrapCommand(program='{}', args={:?}, env={:?})",
+            "BootstrapProcManagerParams(program='{}', args={:?}, env={:?})",
             self.program, self.args, self.env
         )
     }
 }
 
-impl PyBootstrapCommand {
-    pub fn to_rust(&self) -> BootstrapCommand {
-        BootstrapCommand {
+impl PyBootstrapProcManagerParams {
+    pub fn to_rust(&self) -> BootstrapProcManagerParams {
+        BootstrapProcManagerParams {
             program: PathBuf::from(&self.program),
-            arg0: self.arg0.clone(),
             args: self.args.clone(),
             env: self.env.clone(),
         }
@@ -116,7 +103,7 @@ impl PyHostMesh {
         instance: &PyInstance,
         alloc: &mut PyAlloc,
         name: String,
-        bootstrap_params: Option<PyBootstrapCommand>,
+        bootstrap_params: Option<PyBootstrapProcManagerParams>,
     ) -> PyResult<PyPythonTask> {
         let alloc = match alloc.take() {
             Some(alloc) => alloc,
@@ -210,6 +197,6 @@ pub fn register_python_bindings(hyperactor_mod: &Bound<'_, PyModule>) -> PyResul
     )?;
     hyperactor_mod.add_function(f)?;
     hyperactor_mod.add_class::<PyHostMesh>()?;
-    hyperactor_mod.add_class::<PyBootstrapCommand>()?;
+    hyperactor_mod.add_class::<PyBootstrapProcManagerParams>()?;
     Ok(())
 }
