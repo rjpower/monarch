@@ -172,8 +172,6 @@ class MASTJob(JobTrait):
     def _kill(self):
         if self._name is not None:
             kill(f"mast_conda:///{self._name}")
-        else:
-            print("NOT NAME?")
 
 
 _CHECK_INTERVAL = timedelta(seconds=5)
