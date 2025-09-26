@@ -27,7 +27,7 @@ use crate::attrs::AttrKeyInfo;
 use crate::attrs::Attrs;
 use crate::attrs::SerializableValue;
 use crate::attrs::declare_attrs;
-use crate::channel::ChannelTransport;
+
 use crate::data::Encoding;
 
 // Declare configuration keys using the new attrs system with defaults
@@ -558,7 +558,7 @@ mod tests {
                 global::get(MESSAGE_DELIVERY_TIMEOUT),
                 Duration::from_secs(60)
             );
-            // This was overriden:
+            // This was overridden:
             assert_eq!(
                 std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").unwrap(),
                 "1m"
