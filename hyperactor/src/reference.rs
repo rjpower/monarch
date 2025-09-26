@@ -50,8 +50,9 @@ use crate::RemoteMessage;
 use crate::accum::ReducerSpec;
 use crate::actor::RemoteActor;
 use crate::attrs::Attrs;
-use crate::cap;
 use crate::channel::ChannelAddr;
+use crate::context;
+use crate::context::MailboxExt;
 use crate::data::Serialized;
 use crate::data::TypeInfo;
 use crate::mailbox::MailboxSenderError;
@@ -718,13 +719,13 @@ impl<A: RemoteActor> ActorRef<A> {
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     pub fn send<M: RemoteMessage>(
         &self,
-        cap: &impl cap::CanSend,
+        cx: &impl context::Mailbox,
         message: M,
     ) -> Result<(), MailboxSenderError>
     where
         A: RemoteHandles<M>,
     {
-        self.port().send(cap, message)
+        self.port().send(cx, message)
     }
 
     /// Send an [`M`]-typed message to the referenced actor, with additional context provided by
@@ -732,14 +733,14 @@ impl<A: RemoteActor> ActorRef<A> {
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     pub fn send_with_headers<M: RemoteMessage>(
         &self,
-        cap: &impl cap::CanSend,
+        cx: &impl context::Mailbox,
         headers: Attrs,
         message: M,
     ) -> Result<(), MailboxSenderError>
     where
         A: RemoteHandles<M>,
     {
-        self.port().send_with_headers(cap, headers, message)
+        self.port().send_with_headers(cx, headers, message)
     }
 
     /// The caller guarantees that the provided actor ID is also a valid,
@@ -766,11 +767,11 @@ impl<A: RemoteActor> ActorRef<A> {
     /// Attempt to downcast this reference into a (local) actor handle.
     /// This will only succeed when the referenced actor is in the same
     /// proc as the caller.
-    pub fn downcast_handle(&self, cap: &impl cap::CanResolveActorRef) -> Option<ActorHandle<A>>
+    pub fn downcast_handle(&self, cx: &impl context::Actor) -> Option<ActorHandle<A>>
     where
         A: Actor,
     {
-        cap.resolve_actor_ref(self)
+        cx.instance().proc().resolve_actor_ref(self)
     }
 }
 
@@ -879,10 +880,10 @@ impl PortId {
     /// Send a serialized message to this port, provided a sending capability,
     /// such as [`crate::actor::Instance`]. It is the sender's responsibility
     /// to ensure that the provided message is well-typed.
-    pub fn send(&self, caps: &impl cap::CanSend, serialized: &Serialized) {
+    pub fn send(&self, cx: &impl context::Mailbox, serialized: &Serialized) {
         let mut headers = Attrs::new();
         crate::mailbox::headers::set_send_timestamp(&mut headers);
-        caps.post(self.clone(), headers, serialized.clone());
+        cx.post(self.clone(), headers, serialized.clone());
     }
 
     /// Send a serialized message to this port, provided a sending capability,
@@ -890,22 +891,22 @@ impl PortId {
     /// It is the sender's responsibility to ensure that the provided message is well-typed.
     pub fn send_with_headers(
         &self,
-        caps: &impl cap::CanSend,
+        cx: &impl context::Mailbox,
         serialized: &Serialized,
         mut headers: Attrs,
     ) {
         crate::mailbox::headers::set_send_timestamp(&mut headers);
-        caps.post(self.clone(), headers, serialized.clone());
+        cx.post(self.clone(), headers, serialized.clone());
     }
 
     /// Split this port, returning a new port that relays messages to the port
     /// through a local proxy, which may coalesce messages.
     pub fn split(
         &self,
-        caps: &impl cap::CanSplitPort,
+        cx: &impl context::Mailbox,
         reducer_spec: Option<ReducerSpec>,
     ) -> anyhow::Result<PortId> {
-        caps.split(self.clone(), reducer_spec)
+        cx.split(self.clone(), reducer_spec)
     }
 }
 
@@ -1001,8 +1002,8 @@ impl<M: RemoteMessage> PortRef<M> {
     /// Send a message to this port, provided a sending capability, such as
     /// [`crate::actor::Instance`].
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
-    pub fn send(&self, caps: &impl cap::CanSend, message: M) -> Result<(), MailboxSenderError> {
-        self.send_with_headers(caps, Attrs::new(), message)
+    pub fn send(&self, cx: &impl context::Mailbox, message: M) -> Result<(), MailboxSenderError> {
+        self.send_with_headers(cx, Attrs::new(), message)
     }
 
     /// Send a message to this port, provided a sending capability, such as
@@ -1011,7 +1012,7 @@ impl<M: RemoteMessage> PortRef<M> {
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     pub fn send_with_headers(
         &self,
-        caps: &impl cap::CanSend,
+        cx: &impl context::Mailbox,
         mut headers: Attrs,
         message: M,
     ) -> Result<(), MailboxSenderError> {
@@ -1022,19 +1023,19 @@ impl<M: RemoteMessage> PortRef<M> {
                 MailboxSenderErrorKind::Serialize(err.into()),
             )
         })?;
-        self.send_serialized(caps, serialized, headers);
+        self.send_serialized(cx, serialized, headers);
         Ok(())
     }
 
     /// Send a serialized message to this port, provided a sending capability, such as
     /// [`crate::actor::Instance`].
-    pub fn send_serialized(&self, caps: &impl cap::CanSend, message: Serialized, headers: Attrs) {
-        caps.post(self.port_id.clone(), headers, message);
+    pub fn send_serialized(&self, cx: &impl context::Mailbox, message: Serialized, headers: Attrs) {
+        cx.post(self.port_id.clone(), headers, message);
     }
 
     /// Convert this port into a sink that can be used to send messages using the given capability.
-    pub fn into_sink<C: cap::CanSend>(self, caps: C) -> PortSink<C, M> {
-        PortSink::new(caps, self)
+    pub fn into_sink<C: context::Mailbox>(self, cx: C) -> PortSink<C, M> {
+        PortSink::new(cx, self)
     }
 }
 
@@ -1116,8 +1117,8 @@ impl<M: RemoteMessage> OncePortRef<M> {
     /// Send a message to this port, provided a sending capability, such as
     /// [`crate::actor::Instance`].
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
-    pub fn send(self, caps: &impl cap::CanSend, message: M) -> Result<(), MailboxSenderError> {
-        self.send_with_headers(caps, Attrs::new(), message)
+    pub fn send(self, cx: &impl context::Mailbox, message: M) -> Result<(), MailboxSenderError> {
+        self.send_with_headers(cx, Attrs::new(), message)
     }
 
     /// Send a message to this port, provided a sending capability, such as
@@ -1125,7 +1126,7 @@ impl<M: RemoteMessage> OncePortRef<M> {
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `MailboxSenderError`.
     pub fn send_with_headers(
         self,
-        caps: &impl cap::CanSend,
+        cx: &impl context::Mailbox,
         mut headers: Attrs,
         message: M,
     ) -> Result<(), MailboxSenderError> {
@@ -1136,7 +1137,7 @@ impl<M: RemoteMessage> OncePortRef<M> {
                 MailboxSenderErrorKind::Serialize(err.into()),
             )
         })?;
-        caps.post(self.port_id.clone(), headers, serialized);
+        cx.post(self.port_id.clone(), headers, serialized);
         Ok(())
     }
 }
