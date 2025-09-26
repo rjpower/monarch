@@ -341,7 +341,6 @@ mod tests {
     use hyperactor::clock::RealClock;
     use hyperactor::context::Mailbox as _;
     use hyperactor::mailbox;
-    use hyperactor::supervision::ActorSupervisionEvent;
     use ndslice::Extent;
     use ndslice::ViewExt;
     use ndslice::extent;
