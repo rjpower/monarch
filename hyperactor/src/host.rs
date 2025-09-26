@@ -323,18 +323,18 @@ pub type ManagerAgent<M: ProcManager> = <M::Handle as ProcHandle>::Agent;
 
 /// A ProcManager that spawns into local (in-process) procs. Used for
 /// testing.
-pub struct LocalProcManager<S> {
+pub struct LocalProcManager<A: Actor> {
     procs: Arc<Mutex<HashMap<ProcId, Proc>>>,
-    spawn: S,
+    params: A::Params,
 }
 
-impl<S> LocalProcManager<S> {
+impl<A: Actor> LocalProcManager<A> {
     /// Create a new in-process proc manager with the given agent
     /// params.
-    pub fn new(spawn: S) -> Self {
+    pub fn new(params: A::Params) -> Self {
         Self {
             procs: Arc::new(Mutex::new(HashMap::new())),
-            spawn,
+            params,
         }
     }
 }
@@ -386,11 +386,10 @@ impl<A: Actor + RemoteActor> ProcHandle for LocalHandle<A> {
 }
 
 #[async_trait]
-impl<A, S, F> ProcManager for LocalProcManager<S>
+impl<A> ProcManager for LocalProcManager<A>
 where
     A: Actor + RemoteActor + Binds<A>,
-    F: Future<Output = anyhow::Result<ActorHandle<A>>> + Send,
-    S: Fn(Proc) -> F + Sync,
+    A::Params: Sync + Clone,
 {
     type Handle = LocalHandle<A>;
 
@@ -414,7 +413,8 @@ where
             .await
             .insert(proc_id.clone(), proc.clone());
         let _handle = proc.clone().serve(rx);
-        let agent_handle = (self.spawn)(proc)
+        let agent_handle = proc
+            .spawn("agent", self.params.clone())
             .await
             .map_err(|e| HostError::AgentSpawnFailure(proc_id.clone(), e))?;
 
@@ -681,8 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic() {
-        let proc_manager =
-            LocalProcManager::new(|proc: Proc| async move { proc.spawn::<()>("agent", ()).await });
+        let proc_manager = LocalProcManager::<()>::new(());
         let procs = Arc::clone(&proc_manager.procs);
         let (mut host, _handle) =
             Host::serve(proc_manager, ChannelAddr::any(ChannelTransport::Local))

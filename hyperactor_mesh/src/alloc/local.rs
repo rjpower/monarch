@@ -278,10 +278,6 @@ impl Alloc for LocalAlloc {
         self.todo_tx.send(Action::Stopped).unwrap();
         Ok(())
     }
-
-    fn is_local(&self) -> bool {
-        true
-    }
 }
 
 impl Drop for LocalAlloc {

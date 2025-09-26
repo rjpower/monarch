@@ -9,15 +9,11 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::env::VarError;
-use std::fs::OpenOptions;
 use std::future;
 use std::io;
-use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -50,7 +46,6 @@ use tokio::sync::watch;
 use crate::logging::create_log_writers;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::v1;
-use crate::v1::host_mesh::mesh_agent::HostAgentMode;
 use crate::v1::host_mesh::mesh_agent::HostMeshAgent;
 
 pub const BOOTSTRAP_ADDR_ENV: &str = "HYPERACTOR_MESH_BOOTSTRAP_ADDR";
@@ -221,31 +216,6 @@ impl Bootstrap {
             "bootstrapping mesh process: {}",
             serde_json::to_string(&self).unwrap()
         );
-
-        if Debug::is_active() {
-            let mut buf = Vec::new();
-            writeln!(&mut buf, "bootstrapping {}:", std::process::id()).unwrap();
-            writeln!(
-                &mut buf,
-                "\tconfig: {}",
-                serde_json::to_string(&self).unwrap()
-            )
-            .unwrap();
-            match std::env::current_exe() {
-                Ok(path) => writeln!(&mut buf, "\tcurrent_exe: {}", path.display()).unwrap(),
-                Err(e) => writeln!(&mut buf, "\tcurrent_exe: error<{}>", e).unwrap(),
-            }
-            writeln!(&mut buf, "\targs:").unwrap();
-            for arg in std::env::args() {
-                writeln!(&mut buf, "\t\t{}", arg).unwrap();
-            }
-            writeln!(&mut buf, "\tenv:").unwrap();
-            for (key, val) in std::env::vars() {
-                writeln!(&mut buf, "\t\t{}={}", key, val).unwrap();
-            }
-            let _ = Debug.write(&buf);
-        }
-
         match self {
             Bootstrap::Proc {
                 proc_id,
@@ -263,14 +233,13 @@ impl Bootstrap {
                 }
             }
             Bootstrap::Host { addr } => {
-                let command = ok!(BootstrapCommand::current());
-                let manager = BootstrapProcManager::new(command);
+                let manager = ok!(BootstrapProcManager::new_current_exe());
                 let (host, _handle) = ok!(Host::serve(manager, addr).await);
                 let addr = host.addr().clone();
                 let host_mesh_agent = ok!(host
                     .system_proc()
                     .clone()
-                    .spawn::<HostMeshAgent>("agent", HostAgentMode::Process(host))
+                    .spawn::<HostMeshAgent>("agent", host)
                     .await);
 
                 tracing::info!(
@@ -843,45 +812,11 @@ impl hyperactor::host::ProcHandle for BootstrapProcHandle {
     }
 }
 
-/// A specification of the command used to bootstrap procs.
-#[derive(Debug, Named, Serialize, Deserialize, Clone, Default)]
-pub struct BootstrapCommand {
+#[derive(Debug, Named, Serialize, Deserialize, Clone)]
+pub struct BootstrapProcManagerParams {
     pub program: std::path::PathBuf,
-    pub arg0: Option<String>,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
-}
-
-impl BootstrapCommand {
-    /// Creates a bootstrap command specification to replicate the
-    /// invocation of the currently running process.
-    pub fn current() -> io::Result<Self> {
-        let mut args: VecDeque<String> = std::env::args().collect();
-        let arg0 = args.pop_front();
-
-        Ok(Self {
-            program: std::env::current_exe()?,
-            arg0,
-            args: args.into(),
-            env: std::env::vars().collect(),
-        })
-    }
-
-    /// Bootstrap command used for testing, invoking the Buck-built
-    /// `monarch/hyperactor_mesh/bootstrap` binary.
-    ///
-    /// Intended for integration tests where we need to spawn real
-    /// bootstrap processes under proc manager control. Not available
-    /// outside of test builds.
-    #[cfg(test)]
-    pub(crate) fn test() -> Self {
-        Self {
-            program: buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
-            arg0: None,
-            args: vec![],
-            env: HashMap::new(),
-        }
-    }
 }
 
 /// A process manager for launching and supervising **bootstrap
@@ -906,8 +841,13 @@ impl BootstrapCommand {
 /// orphaned if the manager itself is dropped.
 #[derive(Debug)]
 pub struct BootstrapProcManager {
-    /// The command specification used to bootstrap new processes.
-    command: BootstrapCommand,
+    /// Path to the bootstrap binary that this manager will launch for
+    /// each proc.
+    program: std::path::PathBuf,
+    /// argv[0], if specified
+    arg0: Option<String>,
+    /// argv[1..]
+    args: Vec<String>,
     /// Async registry of running children, keyed by [`ProcId`]. Holds
     /// [`BootstrapProcHandle`]s so callers can query or monitor
     /// status.
@@ -916,6 +856,7 @@ pub struct BootstrapProcManager {
     /// exclusively in the [`Drop`] impl to send `SIGKILL` without
     /// needing async context.
     pid_table: Arc<std::sync::Mutex<HashMap<ProcId, u32>>>,
+    env: HashMap<String, String>,
 }
 
 impl Drop for BootstrapProcManager {
@@ -960,17 +901,66 @@ impl Drop for BootstrapProcManager {
 
 impl BootstrapProcManager {
     /// Construct a new [`BootstrapProcManager`] that will launch
-    /// procs using the given bootstrap command specification.
+    /// procs using the given program binary.
     ///
     /// This is the general entry point when you want to manage procs
     /// backed by a specific binary path (e.g. a bootstrap
     /// trampoline).
-    pub(crate) fn new(command: BootstrapCommand) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn new(program: std::path::PathBuf) -> Self {
         Self {
-            command,
+            program,
+            arg0: None,
+            args: Vec::new(),
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            env: HashMap::new(),
         }
+    }
+
+    /// Convenience constructor that resolves the current executable
+    /// (`std::env::current_exe`) and uses that as the bootstrap
+    /// binary. The program arguments are also captured and used to
+    /// configure child processes.
+    ///
+    /// Useful when the proc manager should re-exec itself as the
+    /// child program. Returns an `io::Result` since querying the
+    /// current executable path can fail.
+    pub(crate) fn new_current_exe() -> io::Result<Self> {
+        // Ok(Self::new(std::env::current_exe()?))
+        let mut args: VecDeque<String> = std::env::args().collect();
+        let arg0 = args.pop_front();
+
+        Ok(Self {
+            program: std::env::current_exe()?,
+            arg0,
+            args: args.into(),
+            children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            env: HashMap::new(),
+        })
+    }
+
+    pub(crate) fn from_params(params: BootstrapProcManagerParams) -> Self {
+        Self {
+            program: params.program,
+            arg0: None,
+            args: params.args,
+            children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            env: params.env,
+        }
+    }
+
+    /// Test-only constructor that uses the Buck-built
+    /// `monarch/hyperactor_mesh/bootstrap` binary.
+    ///
+    /// Intended for integration tests where we need to spawn real
+    /// bootstrap processes under proc manager control. Not available
+    /// outside of test builds.
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Self {
+        Self::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap())
     }
 
     /// Return the current [`ProcStatus`] for the given [`ProcId`], if
@@ -1093,14 +1083,14 @@ impl ProcManager for BootstrapProcManager {
             backend_addr,
             callback_addr,
         };
-        let mut cmd = Command::new(&self.command.program);
-        if let Some(arg0) = &self.command.arg0 {
+        let mut cmd = Command::new(&self.program);
+        if let Some(arg0) = &self.arg0 {
             cmd.arg0(arg0);
         }
-        for arg in &self.command.args {
+        for arg in &self.args {
             cmd.arg(arg);
         }
-        for (k, v) in &self.command.env {
+        for (k, v) in &self.env {
             cmd.env(k, v);
         }
         cmd.env(
@@ -1329,83 +1319,8 @@ async fn bootstrap_v0_proc_mesh() -> anyhow::Error {
 /// if bootstrapping fails.
 pub async fn bootstrap_or_die() -> ! {
     let err = bootstrap().await;
-    let _ = writeln!(Debug, "failed to bootstrap mesh process: {}", err);
     tracing::error!("failed to bootstrap mesh process: {}", err);
     std::process::exit(1)
-}
-
-#[derive(enum_as_inner::EnumAsInner)]
-enum DebugSink {
-    File(std::fs::File),
-    Sink,
-}
-
-impl DebugSink {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self {
-            DebugSink::File(f) => f.write(buf),
-            DebugSink::Sink => Ok(buf.len()),
-        }
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            DebugSink::File(f) => f.flush(),
-            DebugSink::Sink => Ok(()),
-        }
-    }
-}
-
-fn debug_sink() -> &'static Mutex<DebugSink> {
-    static DEBUG_SINK: OnceLock<Mutex<DebugSink>> = OnceLock::new();
-    DEBUG_SINK.get_or_init(|| {
-        let debug_path = {
-            let mut p = std::env::temp_dir();
-            if let Ok(user) = std::env::var("USER") {
-                p.push(user);
-            }
-            std::fs::create_dir_all(&p).ok();
-            p.push("monarch-bootstrap-debug.log");
-            p
-        };
-        let sink = if debug_path.exists() {
-            match OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(debug_path.clone())
-            {
-                Ok(f) => DebugSink::File(f),
-                Err(e) => {
-                    eprintln!(
-                        "failed to open {} for bootstrap debug logging",
-                        debug_path.display()
-                    );
-                    DebugSink::Sink
-                }
-            }
-        } else {
-            DebugSink::Sink
-        };
-        Mutex::new(sink)
-    })
-}
-
-/// A bootstrap specific debug writer. If the file /tmp/monarch-bootstrap-debug.log
-/// exists, then the writer's destination is that file; otherwise it discards all writes.
-struct Debug;
-
-impl Debug {
-    fn is_active() -> bool {
-        debug_sink().lock().unwrap().is_file()
-    }
-}
-
-impl Write for Debug {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        debug_sink().lock().unwrap().write(buf)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        debug_sink().lock().unwrap().flush()
-    }
 }
 
 #[cfg(test)]
@@ -1457,11 +1372,7 @@ mod tests {
         use tokio::time::Duration;
 
         // Manager; program path is irrelevant for this test.
-        let command = BootstrapCommand {
-            program: PathBuf::from("/bin/true"),
-            ..Default::default()
-        };
-        let manager = BootstrapProcManager::new(command);
+        let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
 
         // Spawn a long-running child process (sleep 30) with
         // kill_on_drop(true).
@@ -1761,11 +1672,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit_monitor_updates_status_on_clean_exit() {
-        let command = BootstrapCommand {
-            program: PathBuf::from("/bin/true"),
-            ..Default::default()
-        };
-        let manager = BootstrapProcManager::new(command);
+        let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
 
         // Spawn a fast-exiting child.
         let mut cmd = Command::new("/bin/true");
@@ -1795,11 +1702,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit_monitor_updates_status_on_kill() {
-        let command = BootstrapCommand {
-            program: PathBuf::from("/bin/sleep"),
-            ..Default::default()
-        };
-        let manager = BootstrapProcManager::new(command);
+        let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
 
         // Spawn a process that will live long enough to kill.
         let mut cmd = Command::new("/bin/sleep");
@@ -1913,20 +1816,14 @@ mod tests {
 
     #[tokio::test]
     async fn status_unknown_proc_is_none() {
-        let manager = BootstrapProcManager::new(BootstrapCommand {
-            program: PathBuf::from("/bin/true"),
-            ..Default::default()
-        });
+        let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
         let unknown = ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "nope".into());
         assert!(manager.status(&unknown).await.is_none());
     }
 
     #[tokio::test]
     async fn exit_monitor_child_already_taken_leaves_status_unchanged() {
-        let manager = BootstrapProcManager::new(BootstrapCommand {
-            program: PathBuf::from("/bin/sleep"),
-            ..Default::default()
-        });
+        let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
 
         // Long-ish child so it's alive while we "steal" it.
         let mut cmd = Command::new("/bin/sleep");
@@ -1962,10 +1859,7 @@ mod tests {
 
     #[tokio::test]
     async fn pid_none_after_exit_monitor_takes_child() {
-        let manager = BootstrapProcManager::new(BootstrapCommand {
-            program: PathBuf::from("/bin/sleep"),
-            ..Default::default()
-        });
+        let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
 
         let mut cmd = Command::new("/bin/sleep");
         cmd.arg("5").stdout(Stdio::null()).stderr(Stdio::null());
