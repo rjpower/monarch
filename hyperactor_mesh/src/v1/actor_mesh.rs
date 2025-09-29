@@ -525,6 +525,9 @@ mod tests {
 
     #[async_timed_test(timeout_secs = 30)]
     async fn test_cast() {
+        let config = hyperactor::config::global::lock();
+        let _guard = config.override_key(crate::bootstrap::MESH_BOOTSTRAP_ENABLE_PDEATHSIG, false);
+
         let instance = testing::instance().await;
         let host_mesh = testing::host_mesh(extent!(host = 4)).await;
         let proc_mesh = host_mesh.spawn(instance, "test").await.unwrap();
@@ -554,5 +557,7 @@ mod tests {
             );
             assert_eq!(&sender_actor_id, instance.self_id());
         }
+
+        let _ = host_mesh.shutdown(&instance).await;
     }
 }
