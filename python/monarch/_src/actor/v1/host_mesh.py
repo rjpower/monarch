@@ -31,6 +31,16 @@ from monarch._src.actor.shape import MeshTrait, NDSlice, Shape
 from monarch._src.actor.v1.proc_mesh import _get_controller_controller, ProcMesh
 
 
+def _bootstrap_cmd() -> BootstrapCommand:
+    cmd, args, bootstrap_env = _get_bootstrap_args()
+    return BootstrapCommand(
+        cmd,
+        None,
+        args if args else [],
+        bootstrap_env,
+    )
+
+
 def this_host() -> "HostMesh":
     """
     The current machine.
@@ -38,7 +48,7 @@ def this_host() -> "HostMesh":
     This is just shorthand for looking it up via the context
     """
     proc = this_proc()
-    if isinstance(proc, ProcMeshV0):
+    if proc.host_mesh.is_fake_in_process:
         return create_local_host_mesh("root_host")
     host_mesh = proc.host_mesh
     assert isinstance(host_mesh, HostMesh), "expected v1 HostMesh, got v0 HostMesh"
@@ -75,6 +85,7 @@ def create_local_host_mesh(name: str, extent: Extent | None = None) -> "HostMesh
         name,
         extent if extent is not None else Extent(labels=["hosts"], sizes=[1]),
         ProcessAllocator(*_get_bootstrap_args()),
+        bootstrap_cmd=_bootstrap_cmd(),
     )
 
 
@@ -85,11 +96,16 @@ class HostMesh(MeshTrait):
     """
 
     def __init__(
-        self, hy_host_mesh: Shared[HyHostMesh], region: Region, stream_logs: bool
+        self,
+        hy_host_mesh: Shared[HyHostMesh],
+        region: Region,
+        stream_logs: bool,
+        is_fake_in_process: bool,
     ) -> None:
         self._hy_host_mesh = hy_host_mesh
         self._region = region
         self._stream_logs = stream_logs
+        self._is_fake_in_process = is_fake_in_process
 
     @classmethod
     def allocate_nonblocking(
@@ -98,26 +114,24 @@ class HostMesh(MeshTrait):
         extent: Extent,
         allocator: AllocateMixin,
         alloc_constraints: Optional[AllocConstraints] = None,
+        bootstrap_cmd: Optional[BootstrapCommand] = None,
     ) -> "HostMesh":
         spec = AllocSpec(alloc_constraints or AllocConstraints(), **extent)
         alloc: AllocHandle = allocator.allocate(spec)
 
         async def task() -> HyHostMesh:
-            cmd, args, bootstrap_env = _get_bootstrap_args()
             return await HyHostMesh.allocate_nonblocking(
                 context().actor_instance._as_rust(),
                 await alloc._hy_alloc,
                 name,
-                BootstrapCommand(
-                    cmd,
-                    None,
-                    args if args else [],
-                    bootstrap_env,
-                ),
+                bootstrap_cmd,
             )
 
         return cls(
-            PythonTask.from_coroutine(task()).spawn(), extent.region, alloc.stream_logs
+            PythonTask.from_coroutine(task()).spawn(),
+            extent.region,
+            alloc.stream_logs,
+            isinstance(allocator, LocalAllocator),
         )
 
     def spawn_procs(
@@ -180,7 +194,10 @@ class HostMesh(MeshTrait):
             return hy_host_mesh.sliced(shape.region)
 
         return HostMesh(
-            PythonTask.from_coroutine(task()).spawn(), shape.region, self.stream_logs
+            PythonTask.from_coroutine(task()).spawn(),
+            shape.region,
+            self.stream_logs,
+            self.is_fake_in_process,
         )
 
     @property
@@ -193,19 +210,33 @@ class HostMesh(MeshTrait):
 
     @classmethod
     def _from_initialized_hy_host_mesh(
-        cls, hy_host_mesh: HyHostMesh, region: Region, stream_logs: bool
+        cls,
+        hy_host_mesh: HyHostMesh,
+        region: Region,
+        stream_logs: bool,
+        is_fake_in_process: bool,
     ) -> "HostMesh":
         async def task() -> HyHostMesh:
             return hy_host_mesh
 
-        return HostMesh(PythonTask.from_coroutine(task()).spawn(), region, stream_logs)
+        return HostMesh(
+            PythonTask.from_coroutine(task()).spawn(),
+            region,
+            stream_logs,
+            is_fake_in_process,
+        )
 
     def __reduce_ex__(self, protocol: ...) -> Tuple[Any, Tuple[Any, ...]]:
         return HostMesh._from_initialized_hy_host_mesh, (
             self._hy_host_mesh.block_on(),
             self._region,
             self.stream_logs,
+            self.is_fake_in_process,
         )
+
+    @property
+    def is_fake_in_process(self) -> bool:
+        return self._is_fake_in_process
 
 
 def fake_in_process_host(name: str) -> "HostMesh":
@@ -219,5 +250,8 @@ def fake_in_process_host(name: str) -> "HostMesh":
         HostMesh: A host mesh configured with local allocation for in-process use.
     """
     return HostMesh.allocate_nonblocking(
-        name, Extent(labels=["hosts"], sizes=[1]), LocalAllocator()
+        name,
+        Extent(labels=["hosts"], sizes=[1]),
+        LocalAllocator(),
+        bootstrap_cmd=_bootstrap_cmd(),
     )
