@@ -371,10 +371,9 @@ class _ControllerController(Actor):
         self, name: str, Class: Type[TActor], *args: Any, **kwargs: Any
     ) -> TActor:
         if name not in self._controllers:
-            from monarch._src.actor.v1.host_mesh import this_host
+            from monarch._src.actor.v1.host_mesh import this_proc
 
-            proc_mesh = this_host().spawn_nonblocking(name)
-            self._controllers[name] = proc_mesh.spawn(name, Class, *args, **kwargs)
+            self._controllers[name] = this_proc().spawn(name, Class, *args, **kwargs)
         return cast(TActor, self._controllers[name])
 
 
@@ -396,7 +395,7 @@ def _get_controller_controller() -> "Tuple[ProcMesh, _ControllerController]":
 
             _cc_proc_mesh = fake_in_process_host(
                 "controller_controller_host"
-            ).spawn_nonblocking("controller_controller_proc")
+            ).spawn_procs("controller_controller_proc")
             _controller_controller = _cc_proc_mesh.spawn(
                 "controller_controller", _ControllerController
             )

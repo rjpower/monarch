@@ -6,7 +6,7 @@
 
 # pyre-strict
 
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
@@ -120,16 +120,18 @@ class HostMesh(MeshTrait):
             PythonTask.from_coroutine(task()).spawn(), extent.region, alloc.stream_logs
         )
 
-    def spawn_nonblocking(
+    def spawn_procs(
         self,
         name: str,
-        per_host: Extent | None = None,
+        per_host: Dict[str, int] | None = None,
         setup: Callable[[], None] | None = None,
     ) -> "ProcMesh":
         if not per_host:
-            per_host = Extent([], [])
+            per_host = {}
 
-        return self._spawn_nonblocking(name, per_host, setup, False)
+        return self._spawn_nonblocking(
+            name, Extent(list(per_host.keys()), list(per_host.values())), setup, False
+        )
 
     def _spawn_nonblocking(
         self,
