@@ -37,7 +37,10 @@ def this_host() -> "HostMesh":
 
     This is just shorthand for looking it up via the context
     """
-    host_mesh = this_proc().host_mesh
+    proc = this_proc()
+    if proc is _get_controller_controller()[0]:
+        return create_local_host_mesh("root_host")
+    host_mesh = proc.host_mesh
     assert isinstance(host_mesh, HostMesh), "expected v1 HostMesh, got v0 HostMesh"
     return host_mesh
 

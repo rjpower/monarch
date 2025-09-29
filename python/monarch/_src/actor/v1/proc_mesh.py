@@ -257,7 +257,6 @@ class ProcMesh(MeshTrait):
         service = ActorMesh._create(
             Class,
             actor_mesh,
-            instance._mailbox,
             self._region.as_shape(),
             self,
             self._controller_controller,
