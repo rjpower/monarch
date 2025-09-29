@@ -211,27 +211,21 @@ _context: contextvars.ContextVar[Context] = contextvars.ContextVar(
 )
 
 
-def context(v1=False) -> Context:
+def context() -> Context:
     c = _context.get(None)
     if c is None:
         c = Context._root_client_context()
         _context.set(c)
 
-        if not v1:
-            from monarch._src.actor.host_mesh import create_local_host_mesh
-            from monarch._src.actor.proc_mesh import _get_controller_controller
+        # FIXME: Switch to the v1 APIs when it becomes the default.
+        from monarch._src.actor.host_mesh import create_local_host_mesh
+        from monarch._src.actor.proc_mesh import _get_controller_controller
 
-            c.actor_instance.proc_mesh, c.actor_instance._controller_controller = (
-                _get_controller_controller()
-            )
+        c.actor_instance.proc_mesh, c.actor_instance._controller_controller = (
+            _get_controller_controller()
+        )
 
-            c.actor_instance.proc_mesh._host_mesh = create_local_host_mesh()  # type: ignore
-        else:
-            from monarch._src.actor.v1.proc_mesh import _get_controller_controller
-
-            c.actor_instance.proc_mesh, c.actor_instance._controller_controller = (
-                _get_controller_controller()
-            )
+        c.actor_instance.proc_mesh._host_mesh = create_local_host_mesh()  # type: ignore
     return c
 
 

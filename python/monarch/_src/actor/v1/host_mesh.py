@@ -26,9 +26,9 @@ from monarch._src.actor.allocator import (
     LocalAllocator,
     ProcessAllocator,
 )
-from monarch._src.actor.proc_mesh import _get_bootstrap_args
+from monarch._src.actor.proc_mesh import _get_bootstrap_args, ProcMesh as ProcMeshV0
 from monarch._src.actor.shape import MeshTrait, NDSlice, Shape
-from monarch._src.actor.v1.proc_mesh import ProcMesh
+from monarch._src.actor.v1.proc_mesh import _get_controller_controller, ProcMesh
 
 
 def this_host() -> "HostMesh":
@@ -48,7 +48,9 @@ def this_proc() -> "ProcMesh":
     running on
     """
     proc = context().actor_instance.proc
-    assert isinstance(proc, ProcMesh), "expected v1 ProcMesh, got v0 ProcMesh"
+    if isinstance(proc, ProcMeshV0):
+        # This case can happen in the client process.
+        return _get_controller_controller()[0]
     return proc
 
 

@@ -6,26 +6,14 @@
 
 # pyre-unsafe
 
-import asyncio
-import itertools
-import logging
-import threading
-from typing import cast, List, Tuple
-from unittest.mock import MagicMock
+from typing import cast
 
 import pytest
-from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
-from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Region, Shape, Slice
+from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Shape, Slice
 from monarch._src.actor.actor_mesh import Actor, ActorMesh, context, ValueMesh
 from monarch._src.actor.endpoint import endpoint
-from monarch._src.actor.pickle import flatten, unflatten
 from monarch._src.actor.v1.host_mesh import create_local_host_mesh, this_host
-from monarch._src.actor.v1.proc_mesh import (
-    _ControllerController,
-    _get_controller_controller,
-    get_active_proc_meshes,
-    ProcMesh,
-)
+from monarch._src.actor.v1.proc_mesh import ProcMesh
 
 _proc_rank = -1
 

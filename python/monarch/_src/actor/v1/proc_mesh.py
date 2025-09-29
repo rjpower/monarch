@@ -179,15 +179,17 @@ class ProcMesh(MeshTrait):
         pm = ProcMesh(hy_proc_mesh, host_mesh, region)
 
         if _attach_controller_controller:
-            instance = context(v1=True).actor_instance
-            assert (
-                instance._controller_controller is None
-                or cast(
-                    ActorMesh[_ControllerController], instance._controller_controller
-                )._class
-                is _ControllerController
-            ), "expected v1 _ControllerController, got v0 _ControllerController"
-            pm._controller_controller = instance._controller_controller  # type: ignore
+            instance = context().actor_instance
+            cc = instance._controller_controller
+            if (
+                cc is not None
+                and cast(ActorMesh[_ControllerController], cc)._class
+                is not _ControllerController
+            ):
+                # This can happen in the client process
+                pm._controller_controller = _get_controller_controller()[1]
+            else:
+                pm._controller_controller = instance._controller_controller  # type: ignore
             instance._add_child(pm)
 
         async def task(
@@ -248,7 +250,7 @@ class ProcMesh(MeshTrait):
                 f"{Class} must subclass monarch.service.Actor to spawn it."
             )
 
-        instance = context(v1=True).actor_instance
+        instance = context().actor_instance
         actor_mesh = HyProcMesh.spawn_async(
             pm, instance._as_rust(), name, _Actor, emulated=False
         )
@@ -401,3 +403,26 @@ def _get_controller_controller() -> "Tuple[ProcMesh, _ControllerController]":
             )
     assert _cc_proc_mesh is not None
     return _cc_proc_mesh, _controller_controller
+
+
+def get_or_spawn_controller(
+    name: str, Class: Type[TActor], *args: Any, **kwargs: Any
+) -> Future[TActor]:
+    """
+    Creates a singleton actor (controller) indexed by name, or if it already exists, returns the
+    existing actor.
+
+    Args:
+        name (str): The unique name of the actor, used as a key for retrieval.
+        Class (Type): The class of the actor to spawn. Must be a subclass of Actor.
+        *args (Any): Positional arguments to pass to the actor constructor.
+        **kwargs (Any): Keyword arguments to pass to the actor constructor.
+
+    Returns:
+        A Future that resolves to a reference to the actor.
+    """
+    cc = context().actor_instance._controller_controller
+    if not isinstance(cc, _ControllerController):
+        # This can happen in the client process
+        cc = _get_controller_controller()[1]
+    return cc.get_or_spawn.call_one(name, Class, *args, **kwargs)
