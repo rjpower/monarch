@@ -14,6 +14,7 @@ use std::mem::take;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::RwLockWriteGuard;
 
 use async_trait::async_trait;
 use enum_as_inner::EnumAsInner;
@@ -183,7 +184,7 @@ pub struct ProcMeshAgent {
     record_supervision_events: bool,
     /// If record_supervision_events is true, then this will contain the list
     /// of all events that were received.
-    supervision_events: Vec<ActorSupervisionEvent>,
+    supervision_events: HashMap<ActorId, Vec<ActorSupervisionEvent>>,
 }
 
 impl ProcMeshAgent {
@@ -204,7 +205,7 @@ impl ProcMeshAgent {
             state: State::UnconfiguredV0 { sender },
             created: HashMap::new(),
             record_supervision_events: false,
-            supervision_events: Vec::new(),
+            supervision_events: HashMap::new(),
         };
         let handle = proc.spawn::<Self>("mesh", agent).await?;
         Ok((proc, handle))
@@ -236,7 +237,7 @@ impl ProcMeshAgent {
             state: State::V1,
             created: HashMap::new(),
             record_supervision_events: true,
-            supervision_events: Vec::new(),
+            supervision_events: HashMap::new(),
         };
         proc.spawn::<Self>("agent", agent).await
     }
@@ -375,12 +376,28 @@ impl MeshAgentMessageHandler for ProcMeshAgent {
         cx: &Context<Self>,
         status_port: PortRef<(usize, bool)>,
     ) -> Result<(), anyhow::Error> {
-        let rank = self
-            .state
-            .rank()
-            .ok_or_else(|| anyhow::anyhow!("tried to get status of unconfigured proc"))?;
-        status_port.send(cx, (rank, true))?;
-        Ok(())
+        match &self.state {
+            State::ConfiguredV0 { rank, .. } => {
+                // v0 path: configured with a concrete rank
+                status_port.send(cx, (*rank, true))?;
+                Ok(())
+            }
+            State::UnconfiguredV0 { .. } => {
+                // v0 path but not configured yet
+                Err(anyhow::anyhow!(
+                    "status unavailable: v0 agent not configured (waiting for Configure)"
+                ))
+            }
+            State::V1 => {
+                // v1/owned path does not support status (no rank semantics)
+                Err(anyhow::anyhow!(
+                    "status unsupported in v1/owned path (no rank)"
+                ))
+            }
+            State::Invalid => Err(anyhow::anyhow!(
+                "status unavailable: agent in invalid state"
+            )),
+        }
     }
 }
 
@@ -393,7 +410,10 @@ impl Handler<ActorSupervisionEvent> for ProcMeshAgent {
     ) -> anyhow::Result<()> {
         if self.record_supervision_events {
             tracing::info!("Received supervision event: {:?}, recording", event);
-            self.supervision_events.push(event.clone());
+            self.supervision_events
+                .entry(event.actor_id.clone())
+                .or_insert_with(Vec::new)
+                .push(event.clone());
         }
         if let Some(supervisor) = self.state.supervisor() {
             supervisor.send(cx, event)?;
@@ -482,15 +502,29 @@ impl Handler<resource::GetState<ActorState>> for ProcMeshAgent {
             .rank()
             .ok_or_else(|| anyhow::anyhow!("tried to get status of unconfigured proc"))?;
         let state = match self.created.get(&get_state.name) {
-            Some(Ok(actor_id)) => resource::State {
-                name: get_state.name.clone(),
-                status: resource::Status::Running,
-                state: Some(ActorState {
-                    actor_id: actor_id.clone(),
-                    create_rank: rank,
-                    supervision_events: self.supervision_events.clone(),
-                }),
-            },
+            Some(Ok(actor_id)) => {
+                let supervision_events = self
+                    .supervision_events
+                    .get(actor_id)
+                    .map_or_else(Vec::new, |a| a.clone());
+                let status = if supervision_events.is_empty() {
+                    resource::Status::Running
+                } else {
+                    resource::Status::Failed(format!(
+                        "because of supervision events: {:?}",
+                        supervision_events
+                    ))
+                };
+                resource::State {
+                    name: get_state.name.clone(),
+                    status,
+                    state: Some(ActorState {
+                        actor_id: actor_id.clone(),
+                        create_rank: rank,
+                        supervision_events,
+                    }),
+                }
+            }
             Some(Err(e)) => resource::State {
                 name: get_state.name.clone(),
                 status: resource::Status::Failed(e.to_string()),
@@ -520,6 +554,16 @@ impl std::fmt::Debug for ReconfigurableMailboxSender {
         // Not super helpful, but we definitely don't wan to acquire any locks
         // in a Debug formatter.
         f.debug_struct("ReconfigurableMailboxSender").finish()
+    }
+}
+
+pub(crate) struct ReconfigurableMailboxSenderInner<'a> {
+    guard: RwLockWriteGuard<'a, ReconfigurableMailboxSenderState>,
+}
+
+impl<'a> ReconfigurableMailboxSenderInner<'a> {
+    pub(crate) fn as_configured(&self) -> Option<&BoxedMailboxSender> {
+        self.guard.as_configured()
     }
 }
 
@@ -559,6 +603,17 @@ impl ReconfigurableMailboxSender {
         }
         *state = ReconfigurableMailboxSenderState::Configured(sender);
         true
+    }
+
+    pub(crate) fn as_inner<'a>(
+        &'a self,
+    ) -> Result<ReconfigurableMailboxSenderInner<'a>, anyhow::Error> {
+        let state = self.state.write().unwrap();
+        if state.is_configured() {
+            Ok(ReconfigurableMailboxSenderInner { guard: state })
+        } else {
+            Err(anyhow::anyhow!("cannot get inner sender: not configured"))
+        }
     }
 }
 

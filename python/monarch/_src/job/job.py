@@ -15,6 +15,7 @@ from typing import Dict, Literal, NamedTuple, Optional, Sequence
 # note: the jobs api is intended as a library so it should
 # only be importing _public_ monarch API functions.
 from monarch._src.actor.host_mesh import HostMesh, this_host
+from typing_extensions import Self
 
 
 class JobState:
@@ -306,6 +307,10 @@ class _BatchTrait:
         if os.environ.get("MONARCH_BATCH_JOB", None) == "1":
             return True
         return False
+
+    @property
+    def _running(self) -> Self:
+        return self
 
 
 class _BatchLocalJob(_BatchTrait, LocalJob):

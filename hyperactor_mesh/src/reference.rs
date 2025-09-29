@@ -19,7 +19,7 @@ use hyperactor::Named;
 use hyperactor::RemoteHandles;
 use hyperactor::RemoteMessage;
 use hyperactor::actor::RemoteActor;
-use hyperactor::cap;
+use hyperactor::context;
 use hyperactor::message::Castable;
 use hyperactor::message::IndexedErasedUnbound;
 use ndslice::Range;
@@ -100,6 +100,7 @@ impl FromStr for ActorMeshId {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.starts_with("v0:") {
+            #[allow(clippy::manual_strip)]
             let parts: Vec<_> = s[3..].split(',').collect();
             if parts.len() != 2 {
                 return Err(anyhow::anyhow!("invalid v0 actor mesh id: {}", s));
@@ -164,7 +165,7 @@ impl<A: RemoteActor> ActorMeshRef<A> {
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
     pub fn cast<M>(
         &self,
-        caps: &(impl cap::CanSend + cap::CanOpenPort),
+        cx: &impl context::Actor,
         selection: Selection,
         message: M,
     ) -> Result<(), CastError>
@@ -174,7 +175,7 @@ impl<A: RemoteActor> ActorMeshRef<A> {
     {
         match &self.sliced {
             Some(sliced_shape) => cast_to_sliced_mesh::<A, M>(
-                caps,
+                cx,
                 self.mesh_id.clone(),
                 &self.comm_actor_ref,
                 &selection,
@@ -183,7 +184,7 @@ impl<A: RemoteActor> ActorMeshRef<A> {
                 &self.root,
             ),
             None => actor_mesh_cast::<A, M>(
-                caps,
+                cx,
                 self.mesh_id.clone(),
                 &self.comm_actor_ref,
                 selection,

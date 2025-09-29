@@ -9,11 +9,15 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::env::VarError;
+use std::fs::OpenOptions;
 use std::future;
 use std::io;
+use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -30,12 +34,15 @@ use hyperactor::channel::Rx;
 use hyperactor::channel::Tx;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
+use hyperactor::config::CONFIG_ENV_VAR;
+use hyperactor::declare_attrs;
 use hyperactor::host;
 use hyperactor::host::Host;
 use hyperactor::host::HostError;
 use hyperactor::host::ProcManager;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::proc::Proc;
+use libc::c_int;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::process::Child;
@@ -46,7 +53,19 @@ use tokio::sync::watch;
 use crate::logging::create_log_writers;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::v1;
+use crate::v1::host_mesh::mesh_agent::HostAgentMode;
 use crate::v1::host_mesh::mesh_agent::HostMeshAgent;
+
+declare_attrs! {
+    /// If enabled (default), bootstrap child processes install
+    /// `PR_SET_PDEATHSIG(SIGKILL)` so the kernel reaps them if the
+    /// parent dies unexpectedly. This is a **production safety net**
+    /// against leaked children; tests usually disable it via
+    /// `std::env::set_var("HYPERACTOR_MESH_BOOTSTRAP_ENABLE_PDEATHSIG",
+    /// "false")`.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_BOOTSTRAP_ENABLE_PDEATHSIG".to_string())
+    pub attr MESH_BOOTSTRAP_ENABLE_PDEATHSIG: bool = true;
+}
 
 pub const BOOTSTRAP_ADDR_ENV: &str = "HYPERACTOR_MESH_BOOTSTRAP_ADDR";
 pub const BOOTSTRAP_INDEX_ENV: &str = "HYPERACTOR_MESH_INDEX";
@@ -216,12 +235,47 @@ impl Bootstrap {
             "bootstrapping mesh process: {}",
             serde_json::to_string(&self).unwrap()
         );
+
+        if Debug::is_active() {
+            let mut buf = Vec::new();
+            writeln!(&mut buf, "bootstrapping {}:", std::process::id()).unwrap();
+            writeln!(
+                &mut buf,
+                "\tconfig: {}",
+                serde_json::to_string(&self).unwrap()
+            )
+            .unwrap();
+            match std::env::current_exe() {
+                Ok(path) => writeln!(&mut buf, "\tcurrent_exe: {}", path.display()).unwrap(),
+                Err(e) => writeln!(&mut buf, "\tcurrent_exe: error<{}>", e).unwrap(),
+            }
+            writeln!(&mut buf, "\targs:").unwrap();
+            for arg in std::env::args() {
+                writeln!(&mut buf, "\t\t{}", arg).unwrap();
+            }
+            writeln!(&mut buf, "\tenv:").unwrap();
+            for (key, val) in std::env::vars() {
+                writeln!(&mut buf, "\t\t{}={}", key, val).unwrap();
+            }
+            let _ = Debug.write(&buf);
+        }
+
         match self {
             Bootstrap::Proc {
                 proc_id,
                 backend_addr,
                 callback_addr,
             } => {
+                if hyperactor::config::global::get(MESH_BOOTSTRAP_ENABLE_PDEATHSIG) {
+                    // Safety net: normal shutdown is via
+                    // `host_mesh.shutdown(&instance)`; PR_SET_PDEATHSIG
+                    // is a last-resort guard against leaks if that
+                    // protocol is bypassed.
+                    let _ = install_pdeathsig_kill();
+                } else {
+                    eprintln!("(bootstrap) PDEATHSIG disabled via config");
+                }
+
                 let result =
                     host::spawn_proc(proc_id, backend_addr, callback_addr, |proc| async move {
                         ProcMeshAgent::boot_v1(proc).await
@@ -233,13 +287,14 @@ impl Bootstrap {
                 }
             }
             Bootstrap::Host { addr } => {
-                let manager = ok!(BootstrapProcManager::new_current_exe());
+                let command = ok!(BootstrapCommand::current());
+                let manager = BootstrapProcManager::new(command);
                 let (host, _handle) = ok!(Host::serve(manager, addr).await);
                 let addr = host.addr().clone();
                 let host_mesh_agent = ok!(host
                     .system_proc()
                     .clone()
-                    .spawn::<HostMeshAgent>("agent", host)
+                    .spawn::<HostMeshAgent>("agent", HostAgentMode::Process(host))
                     .await);
 
                 tracing::info!(
@@ -260,6 +315,26 @@ impl Bootstrap {
         tracing::error!("failed to bootstrap mesh process: {}", err);
         std::process::exit(1)
     }
+}
+
+/// Install "kill me if parent dies" and close the race window.
+pub fn install_pdeathsig_kill() -> io::Result<()> {
+    // SAFETY: Calling into libc; does not dereference memory, just
+    // asks the kernel to deliver SIGKILL on parent death.
+    let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as c_int) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Race-close: if the parent died between our exec and prctl(),
+    // we won't get a signal, so detect that and exit now.
+    //
+    // If getppid() == 1, we've already been reparented (parent gone).
+    // SAFETY: `getppid()` is a simple libc syscall returning the
+    // parent PID; it has no side effects and does not touch memory.
+    if unsafe { libc::getppid() } == 1 {
+        std::process::exit(0);
+    }
+    Ok(())
 }
 
 /// Represents the lifecycle state of a **proc as hosted in an OS
@@ -297,7 +372,7 @@ pub enum ProcStatus {
     /// A stop has been requested (SIGTERM, graceful shutdown, etc.),
     /// but the OS process has not yet fully exited. (Proc-level:
     /// shutdown in progress; Process-level: still running.)
-    Stopping,
+    Stopping { pid: u32, started_at: SystemTime },
     /// The process exited with a normal exit code. (Process-level:
     /// exit observed.)
     Stopped { exit_code: i32 },
@@ -346,7 +421,13 @@ impl std::fmt::Display for ProcStatus {
                     .unwrap_or_default();
                 write!(f, "Ready[{pid}] at {addr}{uptime}")
             }
-            ProcStatus::Stopping => write!(f, "Stopping"),
+            ProcStatus::Stopping { pid, started_at } => {
+                let uptime = started_at
+                    .elapsed()
+                    .map(|d| format!(" up {}", format_duration(d)))
+                    .unwrap_or_default();
+                write!(f, "Stopping[{pid}]{uptime}")
+            }
             ProcStatus::Stopped { exit_code } => write!(f, "Stopped(exit={exit_code})"),
             ProcStatus::Killed {
                 signal,
@@ -443,6 +524,11 @@ pub struct BootstrapProcHandle {
     rx: tokio::sync::watch::Receiver<ProcStatus>,
 }
 
+// Locking invariant:
+// - Do not acquire other locks from inside `transition(...)` (it
+//   holds the status mutex).
+// - If you need the child PID during a transition, snapshot it
+//   *before* calling `transition`.
 impl BootstrapProcHandle {
     /// Construct a new [`BootstrapProcHandle`] for a freshly spawned
     /// OS process hosting a proc.
@@ -640,18 +726,33 @@ impl BootstrapProcHandle {
     /// graceful shutdown via SIGTERM), but the underlying process has
     /// not yet fully exited.
     pub(crate) fn mark_stopping(&self) -> bool {
+        // Avoid taking out additional locks in .transition().
+        let child_pid = self.child_pid_snapshot();
+        let now = hyperactor::clock::RealClock.system_time_now();
+
         self.transition(|st| match *st {
-            ProcStatus::Starting | ProcStatus::Running { .. } | ProcStatus::Ready { .. } => {
-                *st = ProcStatus::Stopping;
+            ProcStatus::Running { pid, started_at } => {
+                *st = ProcStatus::Stopping { pid, started_at };
                 true
             }
-            _ => {
-                tracing::debug!(
-                    "illegal transition: {:?} -> Stopping; leaving status unchanged",
-                    *st
-                );
-                false
+            ProcStatus::Ready {
+                pid, started_at, ..
+            } => {
+                *st = ProcStatus::Stopping { pid, started_at };
+                true
             }
+            ProcStatus::Starting => {
+                if let Some(pid) = child_pid {
+                    *st = ProcStatus::Stopping {
+                        pid,
+                        started_at: now,
+                    };
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
         })
     }
 
@@ -662,7 +763,7 @@ impl BootstrapProcHandle {
             ProcStatus::Starting
             | ProcStatus::Running { .. }
             | ProcStatus::Ready { .. }
-            | ProcStatus::Stopping => {
+            | ProcStatus::Stopping { .. } => {
                 *st = ProcStatus::Stopped { exit_code };
                 true
             }
@@ -683,7 +784,7 @@ impl BootstrapProcHandle {
             ProcStatus::Starting
             | ProcStatus::Running { .. }
             | ProcStatus::Ready { .. }
-            | ProcStatus::Stopping => {
+            | ProcStatus::Stopping { .. } => {
                 *st = ProcStatus::Killed {
                     signal,
                     core_dumped,
@@ -704,7 +805,10 @@ impl BootstrapProcHandle {
     /// reason (bootstrap error, spawn failure, etc.).
     pub(crate) fn mark_failed<S: Into<String>>(&self, reason: S) -> bool {
         self.transition(|st| match *st {
-            ProcStatus::Starting | ProcStatus::Running { .. } | ProcStatus::Ready { .. } => {
+            ProcStatus::Starting
+            | ProcStatus::Running { .. }
+            | ProcStatus::Ready { .. }
+            | ProcStatus::Stopping { .. } => {
                 *st = ProcStatus::Failed {
                     reason: reason.into(),
                 };
@@ -739,7 +843,7 @@ impl BootstrapProcHandle {
     /// Mirrors `tokio::process::Child::wait()`, but yields the
     /// higher-level [`ProcStatus`] instead of an `ExitStatus`.
     #[must_use]
-    pub async fn wait(&self) -> ProcStatus {
+    pub async fn wait_inner(&self) -> ProcStatus {
         let mut rx = self.watch();
         loop {
             let st = rx.borrow().clone();
@@ -768,9 +872,10 @@ impl BootstrapProcHandle {
     /// `Stopping` is not treated as terminal here; we continue
     /// waiting until `Ready` or a terminal state is seen.
     ///
-    /// Companion to [`BootstrapProcHandle::wait`]: `wait()` resolves
-    /// on exit; `ready()` resolves on startup.
-    pub async fn ready(&self) -> Result<(), ReadyError> {
+    /// Companion to [`BootstrapProcHandle::wait_inner`]:
+    /// `wait_inner()` resolves on exit; `ready_inner()` resolves on
+    /// startup.
+    pub async fn ready_inner(&self) -> Result<(), ReadyError> {
         let mut rx = self.watch();
         loop {
             let st = rx.borrow().clone();
@@ -785,10 +890,63 @@ impl BootstrapProcHandle {
             }
         }
     }
+
+    /// Best-effort, non-blocking snapshot of the child's PID. Locks
+    /// only the `child` mutex and never touches `status`.
+    fn child_pid_snapshot(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .expect("child mutex poisoned")
+            .as_ref()
+            .and_then(|c| c.id())
+    }
+
+    /// Try to fetch a PID we can signal. Prefer cached PID from
+    /// status; fall back to Child::id() if still present. None once
+    /// terminal or if monitor already consumed the Child and we never
+    /// cached a pid.
+    fn signalable_pid(&self) -> Option<i32> {
+        match &*self.status.lock().expect("status mutex poisoned") {
+            ProcStatus::Running { pid, .. }
+            | ProcStatus::Ready { pid, .. }
+            | ProcStatus::Stopping { pid, .. } => Some(*pid as i32),
+            _ => self
+                .child
+                .lock()
+                .expect("child mutex poisoned")
+                .as_ref()
+                .and_then(|c| c.id())
+                .map(|p| p as i32),
+        }
+    }
+
+    /// Send a signal to the pid. Returns Ok(()) if delivered. If
+    /// ESRCH (no such process), we treat that as "already gone" and
+    /// return Ok(()) so callers can proceed to observe the terminal
+    /// state through the monitor.
+    fn send_signal(pid: i32, sig: i32) -> Result<(), anyhow::Error> {
+        // SAFETY: Sending a POSIX signal; does not dereference
+        // memory.
+        let rc = unsafe { libc::kill(pid, sig) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            let e = std::io::Error::last_os_error();
+            if let Some(libc::ESRCH) = e.raw_os_error() {
+                // Process already gone; proceed to wait/observe
+                // terminal state.
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("kill({pid}, {sig}) failed: {e}"))
+            }
+        }
+    }
 }
 
+#[async_trait]
 impl hyperactor::host::ProcHandle for BootstrapProcHandle {
     type Agent = ProcMeshAgent;
+    type TerminalStatus = ProcStatus;
 
     #[inline]
     fn proc_id(&self) -> &ProcId {
@@ -810,13 +968,206 @@ impl hyperactor::host::ProcHandle for BootstrapProcHandle {
             _ => None,
         }
     }
+
+    /// Wait until this proc first reaches the [`ProcStatus::Ready`]
+    /// state.
+    ///
+    /// Returns `Ok(())` once `Ready` is observed.
+    ///
+    /// If the proc transitions directly to a terminal state before
+    /// becoming `Ready`, returns `Err(ReadyError::Terminal(status))`.
+    ///
+    /// If the internal status watch closes unexpectedly before
+    /// `Ready` is observed, returns `Err(ReadyError::ChannelClosed)`.
+    async fn ready(&self) -> Result<(), hyperactor::host::ReadyError<Self::TerminalStatus>> {
+        match self.ready_inner().await {
+            Ok(()) => Ok(()),
+            Err(ReadyError::Terminal(status)) => {
+                Err(hyperactor::host::ReadyError::Terminal(status))
+            }
+            Err(ReadyError::ChannelClosed) => Err(hyperactor::host::ReadyError::ChannelClosed),
+        }
+    }
+
+    /// Wait until this proc reaches a terminal [`ProcStatus`].
+    ///
+    /// Returns `Ok(status)` when a terminal state is observed
+    /// (`Stopped`, `Killed`, or `Failed`).
+    ///
+    /// If the internal status watch closes before any terminal state
+    /// is seen, returns `Err(WaitError::ChannelClosed)`.
+    async fn wait(&self) -> Result<Self::TerminalStatus, hyperactor::host::WaitError> {
+        let status = self.wait_inner().await;
+        if status.is_exit() {
+            Ok(status)
+        } else {
+            Err(hyperactor::host::WaitError::ChannelClosed)
+        }
+    }
+
+    async fn terminate(
+        &self,
+        timeout: Duration,
+    ) -> Result<ProcStatus, hyperactor::host::TerminateError<Self::TerminalStatus>> {
+        // NOTE: This only drives OS-level process teardown:
+        //   - sends SIGTERM, waits up to `timeout`
+        //   - escalates to SIGKILL if still alive
+        //
+        // It does *not* request a graceful proc-level stop via
+        // ProcMeshAgent or other actor messaging. That integration
+        // will come later once proc-level control is wired up.
+
+        const HARD_WAIT_AFTER_KILL: Duration = Duration::from_secs(5);
+
+        // If already terminal, return that.
+        let st0 = self.status();
+        if st0.is_exit() {
+            tracing::debug!(?st0, "terminate(): already terminal");
+            return Err(hyperactor::host::TerminateError::AlreadyTerminated(st0));
+        }
+
+        // Find a PID to signal.
+        let pid = self.signalable_pid().ok_or_else(|| {
+            let st = self.status();
+            tracing::warn!(?st, "terminate(): no signalable pid");
+            hyperactor::host::TerminateError::Io(anyhow::anyhow!(
+                "no signalable pid (state: {:?})",
+                st
+            ))
+        })?;
+
+        // Best-effort mark "Stopping" (ok if state races).
+        let _ = self.mark_stopping();
+
+        // Send SIGTERM (ESRCH is treated as "already gone").
+        tracing::info!(pid, ?timeout, "terminate(): sending SIGTERM");
+        if let Err(e) = Self::send_signal(pid, libc::SIGTERM) {
+            tracing::warn!(pid, error=%e, "terminate(): SIGTERM delivery failed");
+            return Err(hyperactor::host::TerminateError::Io(e));
+        }
+        tracing::debug!(pid, "terminate(): SIGTERM sent");
+
+        // Wait up to the timeout for a terminal state.
+        match RealClock.timeout(timeout, self.wait_inner()).await {
+            Ok(st) if st.is_exit() => {
+                tracing::info!(pid, ?st, "terminate(): exited after SIGTERM");
+                Ok(st)
+            }
+            Ok(non_exit) => {
+                // wait_inner() should only resolve terminal; treat as
+                // channel issue.
+                tracing::warn!(pid, ?non_exit, "terminate(): wait returned non-terminal");
+                Err(hyperactor::host::TerminateError::ChannelClosed)
+            }
+            Err(_elapsed) => {
+                // Escalate to SIGKILL
+                tracing::warn!(pid, "terminate(): timeout; escalating to SIGKILL");
+                if let Some(pid2) = self.signalable_pid() {
+                    if let Err(e) = Self::send_signal(pid2, libc::SIGKILL) {
+                        tracing::warn!(pid=pid2, error=%e, "terminate(): SIGKILL delivery failed");
+                        return Err(hyperactor::host::TerminateError::Io(e));
+                    }
+                    tracing::info!(pid = pid2, "terminate(): SIGKILL sent");
+                } else {
+                    tracing::warn!("terminate(): lost pid before SIGKILL escalation");
+                }
+                // Hard bound after KILL so we can't hang forever.
+                match RealClock
+                    .timeout(HARD_WAIT_AFTER_KILL, self.wait_inner())
+                    .await
+                {
+                    Ok(st) if st.is_exit() => {
+                        tracing::info!(?st, "terminate(): exited after SIGKILL");
+                        Ok(st)
+                    }
+                    other => {
+                        tracing::warn!(
+                            ?other,
+                            "terminate(): post-KILL wait did not yield terminal"
+                        );
+                        Err(hyperactor::host::TerminateError::ChannelClosed)
+                    }
+                }
+            }
+        }
+    }
+
+    async fn kill(
+        &self,
+    ) -> Result<ProcStatus, hyperactor::host::TerminateError<Self::TerminalStatus>> {
+        // NOTE: This is a pure OS-level kill (SIGKILL) of the child
+        // process. It bypasses any proc-level shutdown semantics.
+        //
+        // Future work: layer in proc-level stop semantics through
+        // actor messages once those are implemented.
+
+        // If already terminal, return that.
+        let st0 = self.status();
+        if st0.is_exit() {
+            return Err(hyperactor::host::TerminateError::AlreadyTerminated(st0));
+        }
+
+        // Try to get a PID and send SIGKILL.
+        let pid = self.signalable_pid().ok_or_else(|| {
+            hyperactor::host::TerminateError::Io(anyhow::anyhow!(
+                "no signalable pid (state: {:?})",
+                self.status()
+            ))
+        })?;
+
+        if let Err(e) = Self::send_signal(pid, libc::SIGKILL) {
+            return Err(hyperactor::host::TerminateError::Io(e));
+        }
+
+        // Wait for exit monitor to record terminal status.
+        let st = self.wait_inner().await;
+        if st.is_exit() {
+            Ok(st)
+        } else {
+            Err(hyperactor::host::TerminateError::ChannelClosed)
+        }
+    }
 }
 
-#[derive(Debug, Named, Serialize, Deserialize, Clone)]
-pub struct BootstrapProcManagerParams {
+/// A specification of the command used to bootstrap procs.
+#[derive(Debug, Named, Serialize, Deserialize, Clone, Default)]
+pub struct BootstrapCommand {
     pub program: std::path::PathBuf,
+    pub arg0: Option<String>,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+}
+
+impl BootstrapCommand {
+    /// Creates a bootstrap command specification to replicate the
+    /// invocation of the currently running process.
+    pub fn current() -> io::Result<Self> {
+        let mut args: VecDeque<String> = std::env::args().collect();
+        let arg0 = args.pop_front();
+
+        Ok(Self {
+            program: std::env::current_exe()?,
+            arg0,
+            args: args.into(),
+            env: std::env::vars().collect(),
+        })
+    }
+
+    /// Bootstrap command used for testing, invoking the Buck-built
+    /// `monarch/hyperactor_mesh/bootstrap` binary.
+    ///
+    /// Intended for integration tests where we need to spawn real
+    /// bootstrap processes under proc manager control. Not available
+    /// outside of test builds.
+    #[cfg(test)]
+    pub(crate) fn test() -> Self {
+        Self {
+            program: buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
+            arg0: None,
+            args: vec![],
+            env: HashMap::new(),
+        }
+    }
 }
 
 /// A process manager for launching and supervising **bootstrap
@@ -841,13 +1192,8 @@ pub struct BootstrapProcManagerParams {
 /// orphaned if the manager itself is dropped.
 #[derive(Debug)]
 pub struct BootstrapProcManager {
-    /// Path to the bootstrap binary that this manager will launch for
-    /// each proc.
-    program: std::path::PathBuf,
-    /// argv[0], if specified
-    arg0: Option<String>,
-    /// argv[1..]
-    args: Vec<String>,
+    /// The command specification used to bootstrap new processes.
+    command: BootstrapCommand,
     /// Async registry of running children, keyed by [`ProcId`]. Holds
     /// [`BootstrapProcHandle`]s so callers can query or monitor
     /// status.
@@ -856,7 +1202,6 @@ pub struct BootstrapProcManager {
     /// exclusively in the [`Drop`] impl to send `SIGKILL` without
     /// needing async context.
     pid_table: Arc<std::sync::Mutex<HashMap<ProcId, u32>>>,
-    env: HashMap<String, String>,
 }
 
 impl Drop for BootstrapProcManager {
@@ -901,66 +1246,17 @@ impl Drop for BootstrapProcManager {
 
 impl BootstrapProcManager {
     /// Construct a new [`BootstrapProcManager`] that will launch
-    /// procs using the given program binary.
+    /// procs using the given bootstrap command specification.
     ///
     /// This is the general entry point when you want to manage procs
     /// backed by a specific binary path (e.g. a bootstrap
     /// trampoline).
-    #[allow(dead_code)]
-    pub(crate) fn new(program: std::path::PathBuf) -> Self {
+    pub(crate) fn new(command: BootstrapCommand) -> Self {
         Self {
-            program,
-            arg0: None,
-            args: Vec::new(),
+            command,
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            env: HashMap::new(),
         }
-    }
-
-    /// Convenience constructor that resolves the current executable
-    /// (`std::env::current_exe`) and uses that as the bootstrap
-    /// binary. The program arguments are also captured and used to
-    /// configure child processes.
-    ///
-    /// Useful when the proc manager should re-exec itself as the
-    /// child program. Returns an `io::Result` since querying the
-    /// current executable path can fail.
-    pub(crate) fn new_current_exe() -> io::Result<Self> {
-        // Ok(Self::new(std::env::current_exe()?))
-        let mut args: VecDeque<String> = std::env::args().collect();
-        let arg0 = args.pop_front();
-
-        Ok(Self {
-            program: std::env::current_exe()?,
-            arg0,
-            args: args.into(),
-            children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            env: HashMap::new(),
-        })
-    }
-
-    pub(crate) fn from_params(params: BootstrapProcManagerParams) -> Self {
-        Self {
-            program: params.program,
-            arg0: None,
-            args: params.args,
-            children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            env: params.env,
-        }
-    }
-
-    /// Test-only constructor that uses the Buck-built
-    /// `monarch/hyperactor_mesh/bootstrap` binary.
-    ///
-    /// Intended for integration tests where we need to spawn real
-    /// bootstrap processes under proc manager control. Not available
-    /// outside of test builds.
-    #[cfg(test)]
-    pub(crate) fn new_for_test() -> Self {
-        Self::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap())
     }
 
     /// Return the current [`ProcStatus`] for the given [`ProcId`], if
@@ -1021,7 +1317,7 @@ impl BootstrapProcManager {
                     }
                 }
                 Err(e) => {
-                    let _ = handle.mark_failed(format!("wait() failed: {e}"));
+                    let _ = handle.mark_failed(format!("wait_inner() failed: {e}"));
                     if let Ok(mut table) = pid_table.lock() {
                         table.remove(&proc_id);
                     }
@@ -1083,14 +1379,14 @@ impl ProcManager for BootstrapProcManager {
             backend_addr,
             callback_addr,
         };
-        let mut cmd = Command::new(&self.program);
-        if let Some(arg0) = &self.arg0 {
+        let mut cmd = Command::new(&self.command.program);
+        if let Some(arg0) = &self.command.arg0 {
             cmd.arg0(arg0);
         }
-        for arg in &self.args {
+        for arg in &self.command.args {
             cmd.arg(arg);
         }
-        for (k, v) in &self.env {
+        for (k, v) in &self.command.env {
             cmd.env(k, v);
         }
         cmd.env(
@@ -1319,8 +1615,83 @@ async fn bootstrap_v0_proc_mesh() -> anyhow::Error {
 /// if bootstrapping fails.
 pub async fn bootstrap_or_die() -> ! {
     let err = bootstrap().await;
+    let _ = writeln!(Debug, "failed to bootstrap mesh process: {}", err);
     tracing::error!("failed to bootstrap mesh process: {}", err);
     std::process::exit(1)
+}
+
+#[derive(enum_as_inner::EnumAsInner)]
+enum DebugSink {
+    File(std::fs::File),
+    Sink,
+}
+
+impl DebugSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            DebugSink::File(f) => f.write(buf),
+            DebugSink::Sink => Ok(buf.len()),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            DebugSink::File(f) => f.flush(),
+            DebugSink::Sink => Ok(()),
+        }
+    }
+}
+
+fn debug_sink() -> &'static Mutex<DebugSink> {
+    static DEBUG_SINK: OnceLock<Mutex<DebugSink>> = OnceLock::new();
+    DEBUG_SINK.get_or_init(|| {
+        let debug_path = {
+            let mut p = std::env::temp_dir();
+            if let Ok(user) = std::env::var("USER") {
+                p.push(user);
+            }
+            std::fs::create_dir_all(&p).ok();
+            p.push("monarch-bootstrap-debug.log");
+            p
+        };
+        let sink = if debug_path.exists() {
+            match OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(debug_path.clone())
+            {
+                Ok(f) => DebugSink::File(f),
+                Err(_e) => {
+                    eprintln!(
+                        "failed to open {} for bootstrap debug logging",
+                        debug_path.display()
+                    );
+                    DebugSink::Sink
+                }
+            }
+        } else {
+            DebugSink::Sink
+        };
+        Mutex::new(sink)
+    })
+}
+
+/// A bootstrap specific debug writer. If the file /tmp/monarch-bootstrap-debug.log
+/// exists, then the writer's destination is that file; otherwise it discards all writes.
+struct Debug;
+
+impl Debug {
+    fn is_active() -> bool {
+        debug_sink().lock().unwrap().is_file()
+    }
+}
+
+impl Write for Debug {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        debug_sink().lock().unwrap().write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        debug_sink().lock().unwrap().flush()
+    }
 }
 
 #[cfg(test)]
@@ -1335,10 +1706,20 @@ mod tests {
     use hyperactor::channel::ChannelAddr;
     use hyperactor::channel::ChannelTransport;
     use hyperactor::clock::RealClock;
+    use hyperactor::context::Mailbox as _;
+    use hyperactor::host::ProcHandle;
     use hyperactor::id;
+    use ndslice::ViewExt;
+    use ndslice::extent;
     use tokio::process::Command;
 
     use super::*;
+    use crate::alloc::AllocSpec;
+    use crate::alloc::Allocator;
+    use crate::alloc::ProcessAllocator;
+    use crate::v1::ActorMesh;
+    use crate::v1::host_mesh::HostMesh;
+    use crate::v1::testactor;
 
     // Helper: Avoid repeating
     // `ChannelAddr::any(ChannelTransport::Unix)`.
@@ -1372,7 +1753,11 @@ mod tests {
         use tokio::time::Duration;
 
         // Manager; program path is irrelevant for this test.
-        let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
+        let command = BootstrapCommand {
+            program: PathBuf::from("/bin/true"),
+            ..Default::default()
+        };
+        let manager = BootstrapProcManager::new(command);
 
         // Spawn a long-running child process (sleep 30) with
         // kill_on_drop(true).
@@ -1551,6 +1936,7 @@ mod tests {
             BootstrapProcHandle::new(proc_id, child)
         }
 
+        #[tokio::test]
         async fn starting_to_running_ok() {
             let h = handle_for_test();
             assert!(matches!(h.status(), ProcStatus::Starting));
@@ -1573,7 +1959,7 @@ mod tests {
             let child_started_at = RealClock.system_time_now();
             assert!(h.mark_running(child_pid, child_started_at));
             assert!(h.mark_stopping());
-            assert!(matches!(h.status(), ProcStatus::Stopping));
+            assert!(matches!(h.status(), ProcStatus::Stopping { .. }));
             assert!(h.mark_stopped(0));
             assert!(matches!(h.status(), ProcStatus::Stopped { exit_code: 0 }));
         }
@@ -1668,11 +2054,82 @@ mod tests {
             // Ready -> Killed
             assert!(h.mark_killed(9, false));
         }
+
+        #[tokio::test]
+        async fn mark_stopping_from_starting_uses_child_pid_when_available() {
+            let h = handle_for_test();
+
+            // In `Starting`, we should still be able to see the PID via
+            // Child::id().
+            let child_pid = h
+                .pid()
+                .expect("Child::id() should be available in Starting");
+
+            // mark_stopping() should transition to Stopping{pid,
+            // started_at} and stash the same pid we observed.
+            assert!(
+                h.mark_stopping(),
+                "mark_stopping() should succeed from Starting"
+            );
+            match h.status() {
+                ProcStatus::Stopping { pid, started_at } => {
+                    assert_eq!(pid, child_pid, "Stopping pid should come from Child::id()");
+                    assert!(
+                        started_at <= RealClock.system_time_now(),
+                        "started_at should be sane"
+                    );
+                }
+                other => panic!("expected Stopping{{..}}; got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn mark_stopping_noop_when_no_child_pid_available() {
+            let h = handle_for_test();
+
+            // Simulate the exit-monitor having already taken the
+            // Child so there is no Child::id() and we haven't cached
+            // a pid yet.
+            {
+                let _ = h.child.lock().expect("child mutex").take();
+            }
+
+            // With no observable pid, mark_stopping() must no-op and
+            // leave us in Starting.
+            assert!(
+                !h.mark_stopping(),
+                "mark_stopping() should no-op from Starting when no pid is observable"
+            );
+            assert!(matches!(h.status(), ProcStatus::Starting));
+        }
+
+        #[tokio::test]
+        async fn mark_failed_from_stopping_is_allowed() {
+            let h = handle_for_test();
+
+            // Drive Starting -> Stopping (pid available via
+            // Child::id()).
+            assert!(h.mark_stopping(), "precondition: to Stopping");
+
+            // Now allow Stopping -> Failed.
+            assert!(
+                h.mark_failed("boom"),
+                "mark_failed() should succeed from Stopping"
+            );
+            match h.status() {
+                ProcStatus::Failed { reason } => assert_eq!(reason, "boom"),
+                other => panic!("expected Failed(\"boom\"), got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]
     async fn test_exit_monitor_updates_status_on_clean_exit() {
-        let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
+        let command = BootstrapCommand {
+            program: PathBuf::from("/bin/true"),
+            ..Default::default()
+        };
+        let manager = BootstrapProcManager::new(command);
 
         // Spawn a fast-exiting child.
         let mut cmd = Command::new("/bin/true");
@@ -1696,13 +2153,17 @@ mod tests {
             );
         }
 
-        let st = handle.wait().await;
+        let st = handle.wait_inner().await;
         assert!(matches!(st, ProcStatus::Stopped { .. }), "status={st:?}");
     }
 
     #[tokio::test]
     async fn test_exit_monitor_updates_status_on_kill() {
-        let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
+        let command = BootstrapCommand {
+            program: PathBuf::from("/bin/sleep"),
+            ..Default::default()
+        };
+        let manager = BootstrapProcManager::new(command);
 
         // Spawn a process that will live long enough to kill.
         let mut cmd = Command::new("/bin/sleep");
@@ -1738,7 +2199,7 @@ mod tests {
             libc::kill(pid, libc::SIGKILL);
         }
 
-        let st = handle.wait().await;
+        let st = handle.wait_inner().await;
         match st {
             ProcStatus::Killed { signal, .. } => assert_eq!(signal, libc::SIGKILL),
             other => panic!("expected Killed(SIGKILL), got {other:?}"),
@@ -1805,7 +2266,7 @@ mod tests {
         assert!(handle.mark_stopped(7));
 
         // `ready()` should return Err with the terminal status.
-        match handle.ready().await {
+        match handle.ready_inner().await {
             Ok(()) => panic!("ready() unexpectedly succeeded"),
             Err(ReadyError::Terminal(ProcStatus::Stopped { exit_code })) => {
                 assert_eq!(exit_code, 7)
@@ -1816,14 +2277,20 @@ mod tests {
 
     #[tokio::test]
     async fn status_unknown_proc_is_none() {
-        let manager = BootstrapProcManager::new(PathBuf::from("/bin/true"));
+        let manager = BootstrapProcManager::new(BootstrapCommand {
+            program: PathBuf::from("/bin/true"),
+            ..Default::default()
+        });
         let unknown = ProcId::Direct(ChannelAddr::any(ChannelTransport::Unix), "nope".into());
         assert!(manager.status(&unknown).await.is_none());
     }
 
     #[tokio::test]
     async fn exit_monitor_child_already_taken_leaves_status_unchanged() {
-        let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
+        let manager = BootstrapProcManager::new(BootstrapCommand {
+            program: PathBuf::from("/bin/sleep"),
+            ..Default::default()
+        });
 
         // Long-ish child so it's alive while we "steal" it.
         let mut cmd = Command::new("/bin/sleep");
@@ -1859,7 +2326,10 @@ mod tests {
 
     #[tokio::test]
     async fn pid_none_after_exit_monitor_takes_child() {
-        let manager = BootstrapProcManager::new(PathBuf::from("/bin/sleep"));
+        let manager = BootstrapProcManager::new(BootstrapCommand {
+            program: PathBuf::from("/bin/sleep"),
+            ..Default::default()
+        });
 
         let mut cmd = Command::new("/bin/sleep");
         cmd.arg("5").stdout(Stdio::null()).stderr(Stdio::null());
@@ -1943,9 +2413,9 @@ mod tests {
         // Stamp Ready and assert ready().await unblocks.
         assert!(handle.mark_ready(pid, started_at, ready_addr.clone(), agent_ref));
         handle
-            .ready()
+            .ready_inner()
             .await
-            .expect("ready() should complete after Ready");
+            .expect("ready_inner() should complete after Ready");
 
         // Sanity-check the Ready fields we control
         // (pid/started_at/addr).
@@ -2085,7 +2555,10 @@ mod tests {
     fn display_other_variants_does_not_panic() {
         let samples = vec![
             ProcStatus::Starting,
-            ProcStatus::Stopping,
+            ProcStatus::Stopping {
+                pid: 42,
+                started_at: RealClock.system_time_now(),
+            },
             ProcStatus::Ready {
                 pid: 42,
                 started_at: RealClock.system_time_now(),
@@ -2107,5 +2580,325 @@ mod tests {
         for st in samples {
             let _ = format!("{}", st); // Just make sure it doesn't panic.
         }
+    }
+
+    #[tokio::test]
+    async fn proc_handle_ready_ok_through_trait() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 0.1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+
+        let proc_id = ProcId::Direct(any_addr_for_test(), "ph-ready-ok".into());
+        let handle = BootstrapProcHandle::new(proc_id.clone(), child);
+
+        // Starting -> Running
+        let pid = handle.pid().expect("pid");
+        let t0 = RealClock.system_time_now();
+        assert!(handle.mark_running(pid, t0));
+
+        // Synthesize Ready data
+        let addr = any_addr_for_test();
+        let agent: ActorRef<ProcMeshAgent> =
+            ActorRef::attest(ActorId(proc_id.clone(), "agent".into(), 0));
+        assert!(handle.mark_ready(pid, t0, addr, agent));
+
+        // Call the trait method (not ready_inner).
+        let r = <BootstrapProcHandle as hyperactor::host::ProcHandle>::ready(&handle).await;
+        assert!(r.is_ok(), "expected Ok(()), got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn proc_handle_wait_returns_terminal_status() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+
+        let proc_id = ProcId::Direct(any_addr_for_test(), "ph-wait".into());
+        let handle = BootstrapProcHandle::new(proc_id, child);
+
+        // Drive directly to a terminal state before calling wait()
+        assert!(handle.mark_stopped(0));
+
+        // Call the trait method (not wait_inner)
+        let st = <BootstrapProcHandle as hyperactor::host::ProcHandle>::wait(&handle)
+            .await
+            .expect("wait should return Ok(terminal)");
+
+        match st {
+            ProcStatus::Stopped { exit_code } => assert_eq!(exit_code, 0),
+            other => panic!("expected Stopped(0), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_wrapper_maps_terminal_to_trait_error() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 7")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let proc_id = ProcId::Direct(any_addr_for_test(), "wrap".into());
+        let handle = BootstrapProcHandle::new(proc_id, child);
+
+        assert!(handle.mark_stopped(7));
+
+        match <BootstrapProcHandle as hyperactor::host::ProcHandle>::ready(&handle).await {
+            Ok(()) => panic!("expected Err"),
+            Err(hyperactor::host::ReadyError::Terminal(ProcStatus::Stopped { exit_code })) => {
+                assert_eq!(exit_code, 7);
+            }
+            Err(e) => panic!("unexpected error: {e:?}"),
+        }
+    }
+
+    /// Create a ProcId and a host **backend_addr** channel that the
+    /// bootstrap child proc will dial to attach its mailbox to the
+    /// host.
+    ///
+    /// - `proc_id`: logical identity for the child proc (pure name;
+    ///   not an OS pid).
+    /// - `backend_addr`: a mailbox address served by the **parent
+    ///   (host) proc** here; the spawned bootstrap process dials this
+    ///   so its messages route via the host.
+    async fn make_proc_id_and_backend_addr(
+        instance: &hyperactor::Instance<()>,
+        _tag: &str,
+    ) -> (ProcId, ChannelAddr) {
+        let proc_id = id!(bootstrap_child[0]);
+
+        // Serve a Unix channel as the "backend_addr" and hook it into
+        // this test proc.
+        let (backend_addr, rx) = channel::serve(ChannelAddr::any(ChannelTransport::Unix)).unwrap();
+
+        // Route messages arriving on backend_addr into this test
+        // proc's mailbox so the bootstrap child can reach the host
+        // router.
+        instance.proc().clone().serve(rx);
+
+        (proc_id, backend_addr)
+    }
+
+    #[tokio::test]
+    async fn bootstrap_handle_terminate_graceful() {
+        // Create a root direct-addressed proc + client instance.
+        let root = hyperactor::Proc::direct(ChannelTransport::Unix.any(), "root".to_string())
+            .await
+            .unwrap();
+        let (instance, _handle) = root.instance("client").unwrap();
+
+        let mgr = BootstrapProcManager::new(BootstrapCommand::test());
+        let (proc_id, backend_addr) = make_proc_id_and_backend_addr(&instance, "t_term").await;
+        let handle = mgr
+            .spawn(proc_id.clone(), backend_addr.clone())
+            .await
+            .expect("spawn bootstrap child");
+
+        handle.ready().await.expect("ready");
+
+        let deadline = Duration::from_secs(2);
+        match RealClock
+            .timeout(deadline * 2, handle.terminate(deadline))
+            .await
+        {
+            Err(_) => panic!("terminate() future hung"),
+            Ok(Ok(st)) => {
+                match st {
+                    ProcStatus::Stopped { exit_code } => {
+                        // child called exit(0) on SIGTERM
+                        assert_eq!(exit_code, 0, "expected clean exit; got {exit_code}");
+                    }
+                    ProcStatus::Killed { signal, .. } => {
+                        // If the child didn't trap SIGTERM, we'd see
+                        // SIGTERM (15) here and indeed, this is what
+                        // we see. Since we call
+                        // `hyperactor::initialize_with_current_runtime();`
+                        // we seem unable to trap `SIGTERM` and
+                        // instead folly intercepts:
+                        // [0] *** Aborted at 1758850539 (Unix time, try 'date -d @1758850539') ***
+                        // [0] *** Signal 15 (SIGTERM) (0x3951c00173692) received by PID 1527420 (pthread TID 0x7f803de66cc0) (linux TID 1527420) (maybe from PID 1521298, UID 234780) (code: 0), stack trace: ***
+                        // [0]     @ 000000000000e713 folly::symbolizer::(anonymous namespace)::innerSignalHandler(int, siginfo_t*, void*)
+                        // [0]                        ./fbcode/folly/debugging/symbolizer/SignalHandler.cpp:485
+                        // It gets worse. When run with
+                        // '@fbcode//mode/dev-nosan' it terminates
+                        // with a SEGFAULT (metamate says this is a
+                        // well known issue at Meta). So, TL;DR I
+                        // restore default `SIGTERM` handling after
+                        // the test exe has called
+                        // `initialize_with_runtime`.
+                        assert_eq!(signal, libc::SIGTERM, "expected SIGTERM; got {signal}");
+                    }
+                    other => panic!("expected Stopped or Killed(SIGTERM); got {other:?}"),
+                }
+            }
+            Ok(Err(e)) => panic!("terminate() failed: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_handle_kill_forced() {
+        // Root proc + client instance (so the child can dial back).
+        let root = hyperactor::Proc::direct(ChannelTransport::Unix.any(), "root".to_string())
+            .await
+            .unwrap();
+        let (instance, _handle) = root.instance("client").unwrap();
+
+        let mgr = BootstrapProcManager::new(BootstrapCommand::test());
+
+        // Proc identity + host backend channel the child will dial.
+        let (proc_id, backend_addr) = make_proc_id_and_backend_addr(&instance, "t_kill").await;
+
+        // Launch the child bootstrap process.
+        let handle = mgr
+            .spawn(proc_id.clone(), backend_addr.clone())
+            .await
+            .expect("spawn bootstrap child");
+
+        // Wait until the child reports Ready (addr+agent returned via
+        // callback).
+        handle.ready().await.expect("ready");
+
+        // Force-kill the child and assert we observe a Killed
+        // terminal status.
+        let deadline = Duration::from_secs(5);
+        match RealClock.timeout(deadline, handle.kill()).await {
+            Err(_) => panic!("kill() future hung"),
+            Ok(Ok(st)) => {
+                // We expect a KILLED terminal state.
+                match st {
+                    ProcStatus::Killed { signal, .. } => {
+                        // On Linux this should be SIGKILL (9).
+                        assert_eq!(signal, libc::SIGKILL, "expected SIGKILL; got {}", signal);
+                    }
+                    other => panic!("expected Killed status after kill(); got: {other:?}"),
+                }
+            }
+            Ok(Err(e)) => panic!("kill() failed: {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_cannonical_simple() {
+        // SAFETY: unit-test scoped
+        unsafe {
+            std::env::set_var("HYPERACTOR_MESH_BOOTSTRAP_ENABLE_PDEATHSIG", "false");
+        }
+        // Create a "root" direct addressed proc.
+        let proc = Proc::direct(ChannelTransport::Unix.any(), "root".to_string())
+            .await
+            .unwrap();
+        // Create an actor instance we'll use to send and receive
+        // messages.
+        let (instance, _handle) = proc.instance("client").unwrap();
+
+        // Configure a ProcessAllocator with the bootstrap binary.
+        let mut allocator = ProcessAllocator::new(Command::new(
+            buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
+        ));
+        // Request a new allocation of procs from the ProcessAllocator.
+        let alloc = allocator
+            .allocate(AllocSpec {
+                extent: extent!(replicas = 1),
+                constraints: Default::default(),
+                proc_name: None,
+            })
+            .await
+            .unwrap();
+
+        // Build a HostMesh with explicit OS-process boundaries (per
+        // rank):
+        //
+        // (1) Allocator → bootstrap proc [OS process #1]
+        //     `ProcMesh::allocate(..)` starts one OS process per
+        //     rank; each runs our runtime and the trampoline actor.
+        //
+        // (2) Host::serve(..) sets up a Host in the same OS process
+        //     (no new process). It binds front/back channels, creates
+        //     an in-process service proc (`Proc::new(..)`), and
+        //     stores the `BootstrapProcManager` for later spawns.
+        //
+        // (3) Install HostMeshAgent (still no new OS process).
+        //     `host.system_proc().spawn::<HostMeshAgent>("agent",
+        //     host).await?` creates the HostMeshAgent actor in that
+        //     service proc.
+        //
+        // (4) Collect & assemble. The trampoline returns a
+        //     direct-addressed `ActorRef<HostMeshAgent>`; we collect
+        //     one per rank and assemble a `HostMesh`.
+        //
+        // Note: When the Host is later asked to start a proc
+        // (`host.spawn(name)`), it calls `ProcManager::spawn` on the
+        // stored `BootstrapProcManager`, which does a
+        // `Command::spawn()` to launch a new OS child process for
+        // that proc.
+        let host_mesh = HostMesh::allocate(&instance, Box::new(alloc), "test", None)
+            .await
+            .unwrap();
+
+        // Spawn a ProcMesh named "p0" on the host mesh:
+        //
+        // (1) Each HostMeshAgent (running inside its host's service
+        // proc) receives the request.
+        //
+        // (2) The Host calls into its `BootstrapProcManager::spawn`,
+        // which does `Command::spawn()` to launch a brand-new OS
+        // process for the proc.
+        //
+        // (3) Inside that new process, bootstrap runs and a
+        // `ProcMeshAgent` is started to manage it.
+        //
+        // (4) We collect the per-host procs into a `ProcMesh` and
+        // return it.
+        let proc_mesh = host_mesh.spawn(&instance, "p0").await.unwrap();
+
+        // Note: There is no support for status() in v1.
+        // assert!(proc_mesh.status(&instance).await.is_err());
+        // let proc_ref = proc_mesh.values().next().expect("one proc");
+        // assert!(proc_ref.status(&instance).await.unwrap(), "proc should be alive");
+
+        // Spawn an `ActorMesh<TestActor>` named "a0" on the proc mesh:
+        //
+        // (1) For each proc (already running in its own OS process),
+        // the `ProcMeshAgent` receives the request.
+        //
+        // (2) It spawns a `TestActor` inside that existing proc (no
+        // new OS process).
+        //
+        // (3) The per-proc actors are collected into an
+        // `ActorMesh<TestActor>` and returned.
+        let actor_mesh: ActorMesh<testactor::TestActor> =
+            proc_mesh.spawn(&instance, "a0", &()).await.unwrap();
+
+        // Open a fresh port on the client instance and send a
+        // GetActorId message to the actor mesh. Each TestActor will
+        // reply with its actor ID to the bound port. Receive one
+        // reply and assert it matches the ID of the (single) actor in
+        // the mesh.
+        let (port, mut rx) = instance.mailbox().open_port();
+        actor_mesh
+            .cast(&instance, testactor::GetActorId(port.bind()))
+            .unwrap();
+        let got_id = rx.recv().await.unwrap();
+        assert_eq!(
+            got_id,
+            actor_mesh.values().next().unwrap().actor_id().clone()
+        );
+
+        // **Important**: If we don't shutdown the hosts, the
+        // BootstrapProcManager's won't send SIGKILLs to their spawned
+        // children and there will be orphans left behind.
+        host_mesh.shutdown(&instance).await.expect("host shutdown");
     }
 }
