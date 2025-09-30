@@ -102,7 +102,7 @@ def spawn_procs_on_host(
     host: HostMesh | HostMeshV1, per_host: Dict[str, int]
 ) -> ProcMesh | ProcMeshV1:
     if isinstance(host, HostMeshV1):
-        return host.spawn_procs("proc", per_host)
+        return host.spawn_procs(name="proc", per_host=per_host)
     else:
         return host.spawn_procs(per_host)
 
