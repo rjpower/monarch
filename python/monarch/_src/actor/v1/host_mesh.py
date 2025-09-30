@@ -136,12 +136,15 @@ class HostMesh(MeshTrait):
 
     def spawn_procs(
         self,
-        name: str,
         per_host: Dict[str, int] | None = None,
         setup: Callable[[], None] | None = None,
+        name: str | None = None,
     ) -> "ProcMesh":
         if not per_host:
             per_host = {}
+
+        if not name:
+            name = ""
 
         return self._spawn_nonblocking(
             name, Extent(list(per_host.keys()), list(per_host.values())), setup, False
