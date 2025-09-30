@@ -395,7 +395,7 @@ def _get_controller_controller() -> "Tuple[ProcMesh, _ControllerController]":
 
             _cc_proc_mesh = fake_in_process_host(
                 "controller_controller_host"
-            ).spawn_procs("controller_controller_proc")
+            ).spawn_procs(name="controller_controller_proc")
             _controller_controller = _cc_proc_mesh.spawn(
                 "controller_controller", _ControllerController
             )

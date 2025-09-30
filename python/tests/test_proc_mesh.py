@@ -47,7 +47,7 @@ class TestActor(Actor):
                     labels=["hosts"], slice=Slice(offset=rank, sizes=[1], strides=[1])
                 )
             )
-            .spawn_procs(f"test_proc_{rank}", {"gpus": 4})
+            .spawn_procs(name=f"test_proc_{rank}", per_host={"gpus": 4})
             .spawn(f"test_{rank}", TestActor, rank)
         )
 
@@ -63,7 +63,7 @@ class TestActor(Actor):
 @pytest.mark.timeout(60)
 async def test_proc_mesh_initialization() -> None:
     host = create_local_host_mesh("test_host")
-    proc_mesh = host.spawn_procs("test_proc")
+    proc_mesh = host.spawn_procs(name="test_proc")
     # Test that initialization completes successfully
     assert await proc_mesh.initialized
 
@@ -71,7 +71,7 @@ async def test_proc_mesh_initialization() -> None:
 @pytest.mark.timeout(60)
 def test_proc_mesh_spawn_single_actor() -> None:
     host = create_local_host_mesh("test_host")
-    proc_mesh = host.spawn_procs("test_proc")
+    proc_mesh = host.spawn_procs(name="test_proc")
     actor = proc_mesh.spawn("test_actor", TestActor, 42)
     assert actor.get_value.call_one().get() == 42
     actor.set_value.call_one(43).get()
@@ -81,7 +81,7 @@ def test_proc_mesh_spawn_single_actor() -> None:
 @pytest.mark.timeout(60)
 def test_proc_mesh_multi_actor() -> None:
     host = create_local_host_mesh("multi_host", Extent(["replicas", "hosts"], [2, 2]))
-    proc_mesh = host.spawn_procs("test_proc", per_host={"gpus": 3})
+    proc_mesh = host.spawn_procs(name="test_proc", per_host={"gpus": 3})
     actor = proc_mesh.spawn("test_actor", TestActor, 42)
 
     proc_ranks = actor.get_proc_rank.call().get()
@@ -95,7 +95,7 @@ def test_proc_mesh_multi_actor() -> None:
 @pytest.mark.timeout(60)
 def test_proc_mesh_sliced() -> None:
     host = create_local_host_mesh("multi_host", Extent(["replicas", "hosts"], [2, 2]))
-    proc_mesh = host.spawn_procs("test_proc", per_host={"gpus": 3})
+    proc_mesh = host.spawn_procs(name="test_proc", per_host={"gpus": 3})
     # Initialize _proc_rank on each actor process
     actor = proc_mesh.spawn("test_actor", TestActor, 42)
     actor.get_proc_rank.call().get()
@@ -120,7 +120,7 @@ def test_proc_mesh_sliced() -> None:
 @pytest.mark.timeout(120)
 def test_nested_meshes() -> None:
     host = create_local_host_mesh("host", Extent(["hosts"], [2]))
-    proc = host.spawn_procs("proc")
+    proc = host.spawn_procs(name="proc")
     actor = proc.spawn("actor", TestActor)
     nested = actor.spawn_on_this_host.call().get()
     nested_0 = nested.item(hosts=0)

@@ -73,7 +73,7 @@ def test_spawn_proc_mesh() -> None:
         "host",
         Extent(["replicas", "hosts"], [2, 4]),
     )
-    proc_mesh = host.spawn_procs("proc")
+    proc_mesh = host.spawn_procs(name="proc")
     assert proc_mesh.host_mesh is host
     assert proc_mesh._ndslice == host._ndslice
     assert tuple(proc_mesh._labels) == host._labels
@@ -86,7 +86,7 @@ def test_spawn_proc_mesh() -> None:
         Shape(labels=["hosts"], slice=Slice(offset=5, sizes=[2], strides=[2]))
     )
     sliced_proc = sliced_host.spawn_procs(
-        "proc_sliced", per_host={"gpus": 3, "just_for_fun": 4}
+        name="proc_sliced", per_host={"gpus": 3, "just_for_fun": 4}
     )
     hy_sliced_proc = sliced_proc._proc_mesh.block_on()
     assert sliced_proc.host_mesh is sliced_host
