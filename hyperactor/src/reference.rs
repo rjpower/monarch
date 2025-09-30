@@ -1010,23 +1010,28 @@ impl<M: RemoteMessage> PortRef<M> {
     pub fn send_with_headers(
         &self,
         cx: &impl context::Mailbox,
-        mut headers: Attrs,
+        headers: Attrs,
         message: M,
     ) -> Result<(), MailboxSenderError> {
-        crate::mailbox::headers::set_send_timestamp(&mut headers);
         let serialized = Serialized::serialize(&message).map_err(|err| {
             MailboxSenderError::new_bound(
                 self.port_id.clone(),
                 MailboxSenderErrorKind::Serialize(err.into()),
             )
         })?;
-        self.send_serialized(cx, serialized, headers);
+        self.send_serialized(cx, headers, serialized);
         Ok(())
     }
 
     /// Send a serialized message to this port, provided a sending capability, such as
     /// [`crate::actor::Instance`].
-    pub fn send_serialized(&self, cx: &impl context::Mailbox, message: Serialized, headers: Attrs) {
+    pub fn send_serialized(
+        &self,
+        cx: &impl context::Mailbox,
+        mut headers: Attrs,
+        message: Serialized,
+    ) {
+        crate::mailbox::headers::set_send_timestamp(&mut headers);
         cx.post(self.port_id.clone(), headers, message);
     }
 
