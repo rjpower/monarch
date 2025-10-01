@@ -71,6 +71,9 @@ use parse::ParseError;
 use parse::Token;
 use parse::parse;
 
+use crate::proc::SEQ_INFO;
+use crate::proc::SeqInfo;
+
 /// A universal reference to hierarchical identifiers in Hyperactor.
 ///
 /// References implement a concrete syntax which can be parsed via
@@ -879,10 +882,10 @@ impl PortId {
     /// Send a serialized message to this port, provided a sending capability,
     /// such as [`crate::actor::Instance`]. It is the sender's responsibility
     /// to ensure that the provided message is well-typed.
-    pub fn send(&self, cx: &impl context::Mailbox, serialized: &Serialized) {
+    pub fn send(&self, cx: &impl context::Mailbox, serialized: Serialized) {
         let mut headers = Attrs::new();
         crate::mailbox::headers::set_send_timestamp(&mut headers);
-        cx.post(self.clone(), headers, serialized.clone());
+        cx.post(self.clone(), headers, serialized);
     }
 
     /// Send a serialized message to this port, provided a sending capability,
@@ -891,11 +894,11 @@ impl PortId {
     pub fn send_with_headers(
         &self,
         cx: &impl context::Mailbox,
-        serialized: &Serialized,
+        serialized: Serialized,
         mut headers: Attrs,
     ) {
         crate::mailbox::headers::set_send_timestamp(&mut headers);
-        cx.post(self.clone(), headers, serialized.clone());
+        cx.post(self.clone(), headers, serialized);
     }
 
     /// Split this port, returning a new port that relays messages to the port
@@ -1391,6 +1394,16 @@ mod tests {
                 )
                 .into(),
             ),
+            (
+                // References with v1::Name::Suffixed for actor names are parseable
+                "test[234].testactor_12345[6]",
+                ActorId(
+                    ProcId::Ranked(WorldId("test".into()), 234),
+                    "testactor_12345".into(),
+                    6,
+                )
+                .into(),
+            ),
         ];
 
         for (s, expected) in cases {
@@ -1400,7 +1413,12 @@ mod tests {
 
     #[test]
     fn test_reference_parse_error() {
-        let cases: Vec<&str> = vec!["(blah)", "world(1, 2, 3)"];
+        let cases: Vec<&str> = vec![
+            "(blah)",
+            "world(1, 2, 3)",
+            // hyphen is not allowed in actor name
+            "test[234].testactor-12345[6]",
+        ];
 
         for s in cases {
             let result: Result<Reference, ReferenceParsingError> = s.parse();
