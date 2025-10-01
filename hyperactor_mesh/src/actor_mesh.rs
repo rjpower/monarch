@@ -1090,7 +1090,7 @@ mod tests {
                     .port_id(GetRank::port())
                     .send_with_headers(
                         mesh.client(),
-                        &Serialized::serialize(&GetRank(true, reply_port)).unwrap(),
+                        Serialized::serialize(&GetRank(true, reply_port)).unwrap(),
                         headers
                     );
                 assert_eq!(2, reply_port_receiver.recv().await.unwrap());
@@ -1513,9 +1513,7 @@ mod tests {
         use hyperactor::channel::serve;
         use hyperactor::clock::Clock;
         use hyperactor::clock::RealClock;
-        use hyperactor_mesh_macros::sel;
         use ndslice::Selection;
-        use ndslice::extent;
 
         use crate::Mesh;
         use crate::ProcMesh;
