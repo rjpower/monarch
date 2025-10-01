@@ -539,6 +539,7 @@ mod tests {
     use hyperactor::accum;
     use hyperactor::accum::Accumulator;
     use hyperactor::accum::ReducerSpec;
+    use hyperactor::channel::ChannelTransport;
     use hyperactor::clock::Clock;
     use hyperactor::clock::RealClock;
     use hyperactor::config;
@@ -762,6 +763,7 @@ mod tests {
                 extent: extent.clone(),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Local,
             })
             .await
             .unwrap();

@@ -642,6 +642,8 @@ pub(crate) mod test_util {
             // The actor creates a mesh.
             use std::sync::Arc;
 
+            use hyperactor::channel::ChannelTransport;
+
             use crate::alloc::AllocSpec;
             use crate::alloc::Allocator;
             use crate::alloc::LocalAllocator;
@@ -652,6 +654,7 @@ pub(crate) mod test_util {
                     extent: extent! { replica = 1 },
                     constraints: Default::default(),
                     proc_name: None,
+                    transport: ChannelTransport::Local,
                 })
                 .await
                 .unwrap();
@@ -737,6 +740,7 @@ mod tests {
             use $crate::proc_mesh::SharedSpawnable;
             use std::collections::VecDeque;
             use hyperactor::data::Serialized;
+            use $crate::proc_mesh::default_transport;
 
             use super::*;
             use super::test_util::*;
@@ -754,6 +758,7 @@ mod tests {
                         extent: extent! { replica = 1 },
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: default_transport()
                     })
                     .await
                     .unwrap();
@@ -777,6 +782,7 @@ mod tests {
                         extent: extent!(replica = 4),
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: default_transport()
                     })
                     .await
                     .unwrap();
@@ -803,6 +809,7 @@ mod tests {
                         extent: extent!(replica = 2),
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: default_transport(),
                     })
                     .await
                     .unwrap();
@@ -839,6 +846,7 @@ mod tests {
                         extent: extent!(x = X, y = Y, z = Z),
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: default_transport(),
                     })
                     .await
                     .unwrap();
@@ -883,6 +891,7 @@ mod tests {
                         extent: extent!(replica = 2, host = 2, gpu = 8),
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: default_transport(),
                     })
                     .await
                     .unwrap();
@@ -925,6 +934,7 @@ mod tests {
                         extent: extent!(replica = 2, host = 2, gpu = 8),
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: default_transport(),
                     })
                     .await
                     .unwrap();
@@ -956,6 +966,7 @@ mod tests {
                             extent: extent!(replica = 1),
                             constraints: Default::default(),
                             proc_name: None,
+                            transport: default_transport(),
                         })
                         .await
                         .unwrap();
@@ -1004,6 +1015,7 @@ mod tests {
                         extent,
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: default_transport(),
                     })
                     .await
                     .unwrap();
@@ -1034,6 +1046,7 @@ mod tests {
                         extent: extent!(replica = 1 ),
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: default_transport(),
                     })
                     .await
                     .unwrap();
@@ -1064,6 +1077,7 @@ mod tests {
                         extent: extent.clone(),
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: default_transport(),
                     })
                     .await
                     .unwrap();
@@ -1100,6 +1114,8 @@ mod tests {
     }
 
     mod local {
+        use hyperactor::channel::ChannelTransport;
+
         use crate::alloc::local::LocalAllocator;
 
         actor_mesh_test_suite!(LocalAllocator);
@@ -1126,6 +1142,7 @@ mod tests {
                     extent: extent!(replica = 2),
                     constraints: Default::default(),
                     proc_name: None,
+                    transport: ChannelTransport::Local,
                 })
                 .await
                 .unwrap();
@@ -1194,6 +1211,7 @@ mod tests {
                     extent: extent!(replica = 1),
                     constraints: Default::default(),
                     proc_name: None,
+                    transport: ChannelTransport::Local,
                 })
                 .await
                 .unwrap();
@@ -1261,6 +1279,7 @@ mod tests {
                     extent: extent!(replica = 2),
                     constraints: Default::default(),
                     proc_name: None,
+                    transport: ChannelTransport::Local,
                 })
                 .await
                 .unwrap();
@@ -1312,6 +1331,7 @@ mod tests {
 
         use bytes::Bytes;
         use hyperactor::PortId;
+        use hyperactor::channel::ChannelTransport;
         use hyperactor::clock::Clock;
         use hyperactor::clock::RealClock;
         use hyperactor::mailbox::MessageEnvelope;
@@ -1371,6 +1391,7 @@ mod tests {
                     extent: extent!(replica = 1),
                     constraints: Default::default(),
                     proc_name: None,
+                    transport: ChannelTransport::Unix,
                 })
                 .await
                 .unwrap();
@@ -1454,6 +1475,7 @@ mod tests {
                     extent: extent! { replica = 1 },
                     constraints: Default::default(),
                     proc_name: None,
+                    transport: ChannelTransport::Unix,
                 })
                 .await
                 .unwrap();
@@ -1616,6 +1638,7 @@ mod tests {
                         extent,
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: ChannelTransport::Local
                     }))
                     .unwrap();
                 let proc_mesh = runtime.block_on(ProcMesh::allocate(alloc)).unwrap();
@@ -1647,6 +1670,7 @@ mod tests {
                         extent: extent.clone(),
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: ChannelTransport::Local
                     }))
                     .unwrap();
                 let proc_mesh = runtime.block_on(ProcMesh::allocate(alloc)).unwrap();
@@ -1719,6 +1743,7 @@ mod tests {
                         extent,
                         constraints: Default::default(),
                         proc_name: None,
+                        transport: ChannelTransport::Local
                     }))
                     .unwrap();
                 let proc_mesh = runtime.block_on(ProcMesh::allocate(alloc)).unwrap();
