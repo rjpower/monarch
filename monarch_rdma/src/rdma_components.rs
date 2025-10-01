@@ -40,6 +40,9 @@
 //! 6. Poll for completions
 //! 7. Resources are cleaned up when dropped
 
+/// Maximum size for a single RDMA operation in bytes (1 GiB)
+const MAX_RDMA_MSG_SIZE: usize = 1024 * 1024 * 1024;
+
 use std::ffi::CStr;
 use std::fs;
 use std::io::Error;
@@ -124,14 +127,23 @@ impl RdmaBuffer {
             remote.owner.actor_id(),
             remote,
         );
+        let remote_owner = remote.owner.clone(); // Clone before the move!
         let mut qp = self
             .owner
-            .request_queue_pair_deprecated(client, remote.owner.clone())
+            .request_queue_pair_deprecated(client, remote_owner.clone())
             .await?;
 
         qp.put(self.clone(), remote)?;
-        self.wait_for_completion(&mut qp, PollTarget::Send, timeout)
-            .await
+        let result = self
+            .wait_for_completion(&mut qp, PollTarget::Send, timeout)
+            .await;
+
+        // Release the queue pair back to the actor
+        self.owner
+            .release_queue_pair_deprecated(client, remote_owner, qp)
+            .await?;
+
+        result
     }
 
     /// Write from the provided memory into the RdmaBuffer.
@@ -159,13 +171,23 @@ impl RdmaBuffer {
             remote.owner.actor_id(),
             remote,
         );
+        let remote_owner = remote.owner.clone(); // Clone before the move!
         let mut qp = self
             .owner
-            .request_queue_pair_deprecated(client, remote.owner.clone())
+            .request_queue_pair_deprecated(client, remote_owner.clone())
             .await?;
         qp.get(self.clone(), remote)?;
-        self.wait_for_completion(&mut qp, PollTarget::Send, timeout)
-            .await
+        let result = self
+            .wait_for_completion(&mut qp, PollTarget::Send, timeout)
+            .await;
+
+        // Release the queue pair back to the actor
+        self.owner
+            .release_queue_pair_deprecated(client, remote_owner, qp)
+            .await?;
+
+        result?;
+        Ok(true)
     }
     /// Waits for the completion of an RDMA operation.
     ///
@@ -198,8 +220,14 @@ impl RdmaBuffer {
                     RealClock.sleep(Duration::from_millis(1)).await;
                 }
                 Err(e) => {
-                    tracing::error!("polling completion failed: {}", e);
-                    return Err(anyhow::anyhow!(e));
+                    return Err(anyhow::anyhow!(
+                        "RDMA polling completion failed: {} [lkey={}, rkey={}, addr=0x{:x}, size={}]",
+                        e,
+                        self.lkey,
+                        self.rkey,
+                        self.addr,
+                        self.size
+                    ));
                 }
             }
         }
@@ -208,6 +236,25 @@ impl RdmaBuffer {
             "[buffer({:?})] rdma operation did not complete in time",
             self
         ))
+    }
+
+    /// Drop the buffer and release remote handles.
+    ///
+    /// This method calls the owning RdmaManagerActor to release the buffer and clean up
+    /// associated memory regions. This is typically called when the buffer is no longer
+    /// needed and resources should be freed.
+    ///
+    /// # Arguments
+    /// * `client` - Mailbox used for communication
+    ///
+    /// # Returns
+    /// `Ok(())` if the operation completed successfully.
+    pub async fn drop_buffer(&self, client: &impl context::Actor) -> Result<(), anyhow::Error> {
+        tracing::debug!("[buffer] dropping buffer {:?}", self);
+        self.owner
+            .release_buffer_deprecated(client, self.clone())
+            .await?;
+        Ok(())
     }
 }
 
@@ -382,7 +429,6 @@ pub enum PollTarget {
 /// 4. Connect to remote endpoint with `connect()`
 /// 5. Perform RDMA operations with `put()` or `get()`
 /// 6. Poll for completions with `poll_send_completion()` or `poll_recv_completion()`
-
 #[derive(Debug, Serialize, Deserialize, Named, Clone)]
 pub struct RdmaQueuePair {
     pub send_cq: usize,    // *mut rdmaxcel_sys::ibv_cq,
@@ -393,12 +439,12 @@ pub struct RdmaQueuePair {
     pub dv_recv_cq: usize, // *mut rdmaxcel_sys::mlx5dv_cq,
     context: usize,        // *mut rdmaxcel_sys::ibv_context,
     config: IbverbsConfig,
-    pub send_wqe_idx: u32,
-    pub send_db_idx: u32,
-    pub send_cq_idx: u32,
-    pub recv_wqe_idx: u32,
-    pub recv_db_idx: u32,
-    pub recv_cq_idx: u32,
+    pub send_wqe_idx: u64,
+    pub send_db_idx: u64,
+    pub send_cq_idx: u64,
+    pub recv_wqe_idx: u64,
+    pub recv_db_idx: u64,
+    pub recv_cq_idx: u64,
 }
 
 impl RdmaQueuePair {
@@ -478,7 +524,6 @@ impl RdmaQueuePair {
                     ));
                 }
             }
-
             Ok(RdmaQueuePair {
                 send_cq: send_cq as usize,
                 recv_cq: recv_cq as usize,
@@ -746,20 +791,37 @@ impl RdmaQueuePair {
     }
 
     pub fn put(&mut self, lhandle: RdmaBuffer, rhandle: RdmaBuffer) -> Result<(), anyhow::Error> {
-        let idx = self.send_wqe_idx;
-        self.send_wqe_idx += 1;
-        self.post_op(
-            lhandle.addr,
-            lhandle.lkey,
-            lhandle.size,
-            idx,
-            true,
-            RdmaOperation::Write,
-            rhandle.addr,
-            rhandle.rkey,
-        )
-        .unwrap();
-        self.send_db_idx += 1;
+        let total_size = lhandle.size;
+        if rhandle.size < total_size {
+            return Err(anyhow::anyhow!(
+                "Remote buffer size ({}) is smaller than local buffer size ({})",
+                rhandle.size,
+                total_size
+            ));
+        }
+
+        let mut remaining = total_size;
+        let mut offset = 0;
+        while remaining > 0 {
+            let chunk_size = std::cmp::min(remaining, MAX_RDMA_MSG_SIZE);
+            let idx = self.send_wqe_idx;
+            self.send_wqe_idx += 1;
+            self.post_op(
+                lhandle.addr + offset,
+                lhandle.lkey,
+                chunk_size,
+                idx,
+                true,
+                RdmaOperation::Write,
+                rhandle.addr + offset,
+                rhandle.rkey,
+            )?;
+            self.send_db_idx += 1;
+
+            remaining -= chunk_size;
+            offset += chunk_size;
+        }
+
         Ok(())
     }
 
@@ -777,11 +839,11 @@ impl RdmaQueuePair {
             let base_ptr = (*dv_qp).sq.buf as *mut u8;
             let wqe_cnt = (*dv_qp).sq.wqe_cnt;
             let stride = (*dv_qp).sq.stride;
-            if wqe_cnt < (self.send_wqe_idx - self.send_db_idx) {
+            if (wqe_cnt as u64) < (self.send_wqe_idx - self.send_db_idx) {
                 return Err(anyhow::anyhow!("Overflow of WQE, possible data loss"));
             }
             while self.send_db_idx < self.send_wqe_idx {
-                let offset = (self.send_db_idx % wqe_cnt) * stride;
+                let offset = (self.send_db_idx % wqe_cnt as u64) * stride as u64;
                 let src_ptr = (base_ptr as *mut u8).wrapping_add(offset as usize);
                 rdmaxcel_sys::db_ring((*dv_qp).bf.reg, src_ptr as *mut std::ffi::c_void);
                 self.send_db_idx += 1;
@@ -890,20 +952,38 @@ impl RdmaQueuePair {
     }
 
     pub fn get(&mut self, lhandle: RdmaBuffer, rhandle: RdmaBuffer) -> Result<(), anyhow::Error> {
-        let idx = self.send_wqe_idx;
-        self.send_wqe_idx += 1;
-        self.post_op(
-            lhandle.addr,
-            lhandle.lkey,
-            lhandle.size,
-            idx,
-            true,
-            RdmaOperation::Read,
-            rhandle.addr,
-            rhandle.rkey,
-        )
-        .unwrap();
-        self.send_db_idx += 1;
+        let total_size = lhandle.size;
+        if rhandle.size < total_size {
+            return Err(anyhow::anyhow!(
+                "Remote buffer size ({}) is smaller than local buffer size ({})",
+                rhandle.size,
+                total_size
+            ));
+        }
+
+        let mut remaining = total_size;
+        let mut offset = 0;
+
+        while remaining > 0 {
+            let chunk_size = std::cmp::min(remaining, MAX_RDMA_MSG_SIZE);
+            let idx = self.send_wqe_idx;
+            self.send_wqe_idx += 1;
+            self.post_op(
+                lhandle.addr + offset,
+                lhandle.lkey,
+                chunk_size,
+                idx,
+                true,
+                RdmaOperation::Read,
+                rhandle.addr + offset,
+                rhandle.rkey,
+            )?;
+            self.send_db_idx += 1;
+
+            remaining -= chunk_size;
+            offset += chunk_size;
+        }
+
         Ok(())
     }
 
@@ -923,7 +1003,7 @@ impl RdmaQueuePair {
         laddr: usize,
         lkey: u32,
         length: usize,
-        wr_id: u32,
+        wr_id: u64,
         signaled: bool,
         op_type: RdmaOperation,
         raddr: usize,
@@ -984,7 +1064,6 @@ impl RdmaQueuePair {
 
                 wr.wr.rdma.remote_addr = raddr as u64;
                 wr.wr.rdma.rkey = rkey;
-
                 let mut bad_wr: *mut rdmaxcel_sys::ibv_send_wr = std::ptr::null_mut();
 
                 errno = ops.post_send.as_mut().unwrap()(qp, &mut wr as *mut _, &mut bad_wr);
@@ -1015,7 +1094,7 @@ impl RdmaQueuePair {
         laddr: usize,
         lkey: u32,
         length: usize,
-        wr_id: u32,
+        wr_id: u64,
         signaled: bool,
         op_type: RdmaOperation,
         raddr: usize,
@@ -1081,7 +1160,7 @@ impl RdmaQueuePair {
     ///
     /// # Arguments
     ///
-    /// * `target` - Which completion queue(s) to poll (Send, Receive, or Both)
+    /// * `target` - Which completion queue(s) to poll (Send, Receive)
     ///
     /// # Returns
     ///
@@ -1115,17 +1194,23 @@ impl RdmaQueuePair {
                     if !wc.is_valid() {
                         if let Some((status, vendor_err)) = wc.error() {
                             return Err(anyhow::anyhow!(
-                                "Send work completion failed with status: {:?}, vendor error: {}",
+                                "Send work completion failed with status: {:?}, vendor error: {}, wr_id: {}, send_cq_idx: {}",
                                 status,
-                                vendor_err
+                                vendor_err,
+                                wc.wr_id(),
+                                self.send_cq_idx,
                             ));
                         }
                     }
 
-                    // This should be a send completion
-                    self.send_cq_idx += 1;
-
-                    return Ok(Some(IbvWc::from(wc)));
+                    // This should be a send completion - verify it's the one we're waiting for
+                    if wc.wr_id() == self.send_cq_idx {
+                        self.send_cq_idx += 1;
+                    }
+                    // finished polling, return the last completion
+                    if self.send_cq_idx == self.send_db_idx {
+                        return Ok(Some(IbvWc::from(wc)));
+                    }
                 }
             }
 
@@ -1147,17 +1232,23 @@ impl RdmaQueuePair {
                     if !wc.is_valid() {
                         if let Some((status, vendor_err)) = wc.error() {
                             return Err(anyhow::anyhow!(
-                                "Receive work completion failed with status: {:?}, vendor error: {}",
+                                "Recv work completion failed with status: {:?}, vendor error: {}, wr_id: {}, send_cq_idx: {}",
                                 status,
-                                vendor_err
+                                vendor_err,
+                                wc.wr_id(),
+                                self.recv_cq_idx,
                             ));
                         }
                     }
 
-                    // This should be a receive completion
-                    self.recv_cq_idx += 1;
-
-                    return Ok(Some(IbvWc::from(wc)));
+                    // This should be a send completion - verify it's the one we're waiting for
+                    if wc.wr_id() == self.recv_cq_idx {
+                        self.recv_cq_idx += 1;
+                    }
+                    // finished polling, return the last completion
+                    if self.recv_cq_idx == self.recv_db_idx {
+                        return Ok(Some(IbvWc::from(wc)));
+                    }
                 }
             }
 
