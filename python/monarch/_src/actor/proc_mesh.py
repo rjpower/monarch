@@ -336,7 +336,14 @@ class ProcMesh(MeshTrait):
         pm = ProcMesh(hy_proc_mesh, shape)
         if _attach_controller_controller:
             instance = context().actor_instance
-            pm._controller_controller = instance._controller_controller
+            assert (
+                instance._controller_controller is None
+                or cast(
+                    ActorMesh[_ControllerController], instance._controller_controller
+                )._class
+                is _ControllerController
+            ), "Expected v0 _ControllerController, got v1 _ControllerController"
+            pm._controller_controller = instance._controller_controller  # type: ignore
             instance._add_child(pm)
 
         async def task(
@@ -397,18 +404,16 @@ class ProcMesh(MeshTrait):
             )
 
         actor_mesh = HyProcMesh.spawn_async(pm, name, _Actor)
-        instance = context().actor_instance
         service = ActorMesh._create(
             Class,
             actor_mesh,
-            instance._mailbox,
             self._shape,
             self,
             self._controller_controller,
             *args,
             **kwargs,
         )
-        instance._add_child(service)
+        context().actor_instance._add_child(service)
         return cast(T, service)
 
     @property

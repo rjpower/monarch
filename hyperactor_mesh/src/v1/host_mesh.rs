@@ -6,8 +6,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use hyperactor::channel::ChannelTransport;
 pub mod mesh_agent;
 
+use std::collections::HashSet;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -19,6 +21,7 @@ use hyperactor::channel::ChannelAddr;
 use hyperactor::context;
 use ndslice::Extent;
 use ndslice::Region;
+use ndslice::ViewExt;
 use ndslice::extent;
 use ndslice::view;
 use ndslice::view::Ranked;
@@ -35,6 +38,7 @@ use crate::v1::ProcMesh;
 use crate::v1::ProcMeshRef;
 pub use crate::v1::host_mesh::mesh_agent::HostMeshAgent;
 use crate::v1::host_mesh::mesh_agent::HostMeshAgentProcMeshTrampoline;
+use crate::v1::host_mesh::mesh_agent::ShutdownHostClient;
 use crate::v1::proc_mesh::ProcRef;
 
 /// A reference to a single host.
@@ -56,6 +60,12 @@ impl HostRef {
     fn service_proc(&self) -> ProcId {
         ProcId::Direct(self.0.clone(), "service".to_string())
     }
+
+    async fn shutdown(&self, cx: &impl hyperactor::context::Actor) -> anyhow::Result<()> {
+        let agent = self.mesh_agent();
+        agent.shutdown_host(cx).await?;
+        Ok(())
+    }
 }
 
 impl std::fmt::Display for HostRef {
@@ -73,6 +83,17 @@ impl FromStr for HostRef {
 }
 
 /// An owned mesh of hosts.
+///
+/// # Lifecycle
+/// `HostMesh` owns host lifecycles. Callers **must** invoke
+/// [`HostMesh::shutdown`] for deterministic teardown. The `Drop` impl
+/// performs **best-effort** cleanup only (spawned via Tokio if
+/// available); it is a safety net, not a substitute for orderly
+/// shutdown.
+///
+/// In tests and production, prefer explicit shutdown to guarantee
+/// that host agents drop their `BootstrapProcManager`s and that all
+/// child procs are reaped.
 #[allow(dead_code)]
 pub struct HostMesh {
     name: Name,
@@ -81,15 +102,44 @@ pub struct HostMesh {
     current_ref: HostMeshRef,
 }
 
+/// Allocation backing for an owned [`HostMesh`].
+///
+/// This enum records how the underlying hosts were provisioned, which
+/// in turn determines how their lifecycle is managed:
+///
+/// - `ProcMesh`: Hosts were allocated intrinsically via a
+///   [`ProcMesh`]. The `HostMesh` owns the proc mesh and its service
+///   procs, and dropping the mesh ensures that all spawned child procs
+///   are terminated.
+/// - `Owned`: Hosts were constructed externally and "taken" under
+///   ownership. The `HostMesh` assumes responsibility for their
+///   lifecycle from this point forward, ensuring consistent cleanup on
+///   drop.
+///
+/// Additional variants may be added for other provisioning sources,
+/// but in all cases `HostMesh` is an owned resource that guarantees
+/// no leaked child processes.
 #[allow(dead_code)]
 enum HostMeshAllocation {
-    /// The host mesh was bootstrapped from a proc mesh.
-    /// This is to support providing host meshes through Allocs.
+    /// Hosts were allocated intrinsically via a [`ProcMesh`].
+    ///
+    /// In this mode, the `HostMesh` owns both the `ProcMesh` itself
+    /// and the service procs that implement each host. Dropping the
+    /// `HostMesh` also drops the embedded `ProcMesh`, ensuring that
+    /// all spawned child procs are terminated cleanly.
     ProcMesh {
         proc_mesh: ProcMesh,
         proc_mesh_ref: ProcMeshRef,
         hosts: Vec<HostRef>,
     },
+    /// Hosts were constructed externally and explicitly transferred
+    /// under ownership by this `HostMesh`.
+    ///
+    /// In this mode, the `HostMesh` assumes responsibility for the
+    /// provided hosts going forward. Dropping the mesh guarantees
+    /// teardown of all associated state and signals to prevent any
+    /// leaked processes.
+    Owned { hosts: Vec<HostRef> },
 }
 
 impl HostMesh {
@@ -129,6 +179,13 @@ impl HostMesh {
     ///          `Alloc`-provided
     ///                procs
     /// ```
+    ///
+    /// ## Lifecycle
+    ///
+    /// The returned `HostMesh` **owns** the underlying hosts. Call
+    /// [`shutdown`](Self::shutdown) to deterministically tear them
+    /// down. If you skip shutdown, `Drop` will attempt best-effort
+    /// cleanup only. Do not rely on `Drop` for correctness.
     pub async fn allocate(
         cx: &impl context::Actor,
         alloc: Box<dyn Alloc + Send + Sync>,
@@ -191,6 +248,52 @@ impl HostMesh {
             current_ref: HostMeshRef::new(extent.into(), hosts).unwrap(),
         })
     }
+
+    /// Take ownership of an existing host mesh reference.
+    ///
+    /// Consumes the `HostMeshRef`, captures its region/hosts, and
+    /// returns an owned `HostMesh` that assumes lifecycle
+    /// responsibility for those hosts (i.e., will shut them down on
+    /// Drop).
+    pub fn take(name: impl Into<Name>, mesh: HostMeshRef) -> Self {
+        let name = name.into();
+        let region = mesh.region().clone();
+        let hosts: Vec<HostRef> = mesh.values().collect();
+
+        let current_ref = HostMeshRef::new(region.clone(), hosts.clone())
+            .expect("region/hosts cardinality must match");
+
+        Self {
+            name,
+            extent: region.extent().clone(),
+            allocation: HostMeshAllocation::Owned { hosts },
+            current_ref,
+        }
+    }
+
+    /// Request a clean shutdown of all hosts owned by this
+    /// `HostMesh`.
+    ///
+    /// For each host, this sends `ShutdownHost` to its
+    /// `HostMeshAgent`. The agent takes and drops its `Host` (via
+    /// `Option::take()`), which in turn drops the embedded
+    /// `BootstrapProcManager`. On drop, the manager walks its PID
+    /// table and sends SIGKILL to any procs it spawned—tying proc
+    /// lifetimes to their hosts and preventing leaks.
+    pub async fn shutdown(&self, cx: &impl hyperactor::context::Actor) -> anyhow::Result<()> {
+        let mut attempted = 0;
+        let mut ok = 0;
+        for host in self.current_ref.values() {
+            attempted += 1;
+            if let Err(e) = host.shutdown(cx).await {
+                tracing::warn!(host = %host, error = %e, "host shutdown failed");
+            } else {
+                ok += 1;
+            }
+        }
+        tracing::info!(attempted, ok, "hostmesh shutdown summary");
+        Ok(())
+    }
 }
 
 impl Deref for HostMesh {
@@ -201,13 +304,132 @@ impl Deref for HostMesh {
     }
 }
 
-/// A reference to a mesh of hosts. Logically this is a data structure that
-/// contains a set of ranked hosts organized into a [`Region`]. HostMeshRefs
-/// can be sliced to produce new HostMeshRefs that contain a subset of the
-/// hosts in the original mesh.
+impl Drop for HostMesh {
+    /// Best-effort cleanup for owned host meshes on drop.
+    ///
+    /// When a `HostMesh` is dropped, it attempts to shut down all
+    /// hosts it owns:
+    /// - If a Tokio runtime is available, we spawn an ephemeral
+    ///   `Proc` + `Instance` and send `ShutdownHost` messages to each
+    ///   host. This ensures that the embedded `BootstrapProcManager`s
+    ///   are dropped, and all child procs they spawned are killed.
+    /// - If no runtime is available, we cannot perform async cleanup
+    ///   here; in that case we log a warning and rely on kernel-level
+    ///   PDEATHSIG or the individual `BootstrapProcManager`'s `Drop`
+    ///   as the final safeguard.
+    ///
+    /// This path is **last resort**: callers should prefer explicit
+    /// [`HostMesh::shutdown`] to guarantee orderly teardown. Drop
+    /// only provides opportunistic cleanup to prevent process leaks
+    /// if shutdown is skipped.
+    fn drop(&mut self) {
+        // Snapshot the owned hosts we're responsible for.
+        let hosts: Vec<HostRef> = match &self.allocation {
+            HostMeshAllocation::ProcMesh { hosts, .. } | HostMeshAllocation::Owned { hosts } => {
+                hosts.clone()
+            }
+        };
+
+        // Best-effort only when a Tokio runtime is available.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let mesh_name = self.name.clone();
+            let allocation_label = match &self.allocation {
+                HostMeshAllocation::ProcMesh { .. } => "proc_mesh",
+                HostMeshAllocation::Owned { .. } => "owned",
+            }
+            .to_string();
+
+            handle.spawn(async move {
+                let span = tracing::info_span!(
+                    "hostmesh_drop_cleanup",
+                    %mesh_name,
+                    allocation = %allocation_label,
+                    hosts = hosts.len(),
+                );
+                let _g = span.enter();
+
+                // Spin up a tiny ephemeral proc+instance to get an
+                // Actor context.
+                match hyperactor::Proc::direct(
+                    ChannelTransport::Unix.any(),
+                    "hostmesh-drop".to_string(),
+                )
+                    .await
+                {
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "failed to construct ephemeral Proc for drop-cleanup; \
+                             relying on PDEATHSIG/manager Drop"
+                        );
+                    }
+                    Ok(proc) => {
+                        match proc.instance("drop") {
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "failed to create ephemeral instance for drop-cleanup; \
+                                     relying on PDEATHSIG/manager Drop"
+                                );
+                            }
+                            Ok((instance, _guard)) => {
+                                let mut attempted = 0usize;
+                                let mut ok = 0usize;
+                                let mut err = 0usize;
+
+                                for host in hosts {
+                                    attempted += 1;
+                                    tracing::debug!(host = %host, "drop-cleanup: shutdown start");
+                                    match host.shutdown(&instance).await {
+                                        Ok(()) => {
+                                            ok += 1;
+                                            tracing::debug!(host = %host, "drop-cleanup: shutdown ok");
+                                        }
+                                        Err(e) => {
+                                            err += 1;
+                                            tracing::warn!(host = %host, error = %e, "drop-cleanup: shutdown failed");
+                                        }
+                                    }
+                                }
+
+                                tracing::info!(
+                                    attempted, ok, err,
+                                    "hostmesh drop-cleanup summary"
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        } else {
+            // No runtime here; PDEATHSIG and manager Drop remain the
+            // last-resort safety net.
+            tracing::warn!(
+                hosts = hosts.len(),
+                "HostMesh dropped without a tokio runtime; skipping best-effort shutdown"
+            );
+        }
+    }
+}
+
+/// A non-owning reference to a mesh of hosts.
 ///
-/// HostMeshRefs have a concrete syntax, implemented by its `Display` and `FromStr`
-/// implementations.
+/// Logically, this is a data structure that contains a set of ranked
+/// hosts organized into a [`Region`]. `HostMeshRef`s can be sliced to
+/// produce new references that contain a subset of the hosts in the
+/// original mesh.
+///
+/// `HostMeshRef`s have a concrete syntax, implemented by its
+/// `Display` and `FromStr` implementations.
+///
+/// This type does **not** control lifecycle. It only describes the
+/// topology of hosts. To take ownership and perform deterministic
+/// teardown, use [`HostMesh::take`], which returns an owned
+/// [`HostMesh`] that guarantees cleanup on `shutdown()` or `Drop`.
+///
+/// Cloning this type does not confer ownership. If a corresponding
+/// owned [`HostMesh`] shuts down the hosts, operations via a cloned
+/// `HostMeshRef` may fail because the hosts are no longer running.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Named, Serialize, Deserialize)]
 pub struct HostMeshRef {
     region: Region,
@@ -239,31 +461,69 @@ impl HostMeshRef {
         }
     }
 
-    /// Spawn a ProcMesh onto this host mesh.
-    // TODO: add an "additional dims" API
-    pub async fn spawn(&self, cx: &impl context::Actor, name: &str) -> v1::Result<ProcMesh> {
-        let name = Name::new(name);
-        let mut procs = Vec::new();
-        for (rank, host) in self.ranks.iter().enumerate() {
-            let _ok = host
-                .mesh_agent()
-                .create_or_update(cx, name.clone(), ())
-                .await
-                .map_err(|e| {
-                    v1::Error::HostMeshAgentConfigurationError(
-                        host.mesh_agent().actor_id().clone(),
-                        format!("failed while creating proc: {}", e),
-                    )
-                })?;
-            procs.push(ProcRef::new(
-                host.named_proc(&name),
-                rank,
-                // TODO: specify or retrieve from state instead, to avoid attestation.
-                ActorRef::attest(host.named_proc(&name).actor_id("agent", 0)),
-            ));
+    /// Spawn a ProcMesh onto this host mesh. The per_host extent specifies the shape
+    /// of the procs to spawn on each host.
+    pub async fn spawn(
+        &self,
+        cx: &impl context::Actor,
+        name: &str,
+        per_host: Extent,
+    ) -> v1::Result<ProcMesh> {
+        let per_host_labels = per_host.labels().iter().collect::<HashSet<_>>();
+        let host_labels = self.region.labels().iter().collect::<HashSet<_>>();
+        if !per_host_labels
+            .intersection(&host_labels)
+            .collect::<Vec<_>>()
+            .is_empty()
+        {
+            return Err(v1::Error::ConfigurationError(anyhow::anyhow!(
+                "per_host dims overlap with existing dims when spawning proc mesh"
+            )));
         }
 
-        ProcMesh::create_owned_unchecked(cx, name, self.clone(), procs).await
+        let labels = self
+            .region
+            .labels()
+            .to_vec()
+            .into_iter()
+            .chain(per_host.labels().to_vec().into_iter())
+            .collect();
+        let sizes = self
+            .region
+            .extent()
+            .sizes()
+            .to_vec()
+            .into_iter()
+            .chain(per_host.sizes().to_vec().into_iter())
+            .collect();
+        let extent =
+            Extent::new(labels, sizes).map_err(|err| v1::Error::ConfigurationError(err.into()))?;
+
+        let mesh_name = Name::new(name);
+        let mut procs = Vec::new();
+        for (host_rank, host) in self.ranks.iter().enumerate() {
+            for per_host_rank in 0..per_host.num_ranks() {
+                let proc_name = Name::new(format!("{}-{}", name, per_host_rank));
+                let _ok = host
+                    .mesh_agent()
+                    .create_or_update(cx, proc_name.clone(), ())
+                    .await
+                    .map_err(|e| {
+                        v1::Error::HostMeshAgentConfigurationError(
+                            host.mesh_agent().actor_id().clone(),
+                            format!("failed while creating proc: {}", e),
+                        )
+                    })?;
+                procs.push(ProcRef::new(
+                    host.named_proc(&proc_name),
+                    per_host.num_ranks() * host_rank + per_host_rank,
+                    // TODO: specify or retrieve from state instead, to avoid attestation.
+                    ActorRef::attest(host.named_proc(&proc_name).actor_id("agent", 0)),
+                ));
+            }
+        }
+
+        ProcMesh::create_owned_unchecked(cx, mesh_name, extent, self.clone(), procs).await
     }
 }
 
@@ -390,18 +650,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_allocate() {
+        let config = hyperactor::config::global::lock();
+        let _guard = config.override_key(crate::bootstrap::MESH_BOOTSTRAP_ENABLE_PDEATHSIG, false);
+
         let instance = testing::instance().await;
 
         for alloc in testing::allocs(extent!(replicas = 4)).await {
             let host_mesh = HostMesh::allocate(instance, alloc, "test", None)
                 .await
                 .unwrap();
-            let proc_mesh1 = host_mesh.spawn(instance, "test_1").await.unwrap();
+
+            let proc_mesh1 = host_mesh
+                .spawn(instance, "test_1", Extent::unity())
+                .await
+                .unwrap();
             let actor_mesh1: ActorMesh<testactor::TestActor> =
                 proc_mesh1.spawn(instance, "test", &()).await.unwrap();
-            let proc_mesh2 = host_mesh.spawn(instance, "test_2").await.unwrap();
+            let proc_mesh2 = host_mesh
+                .spawn(instance, "test_2", extent!(gpus = 3, extra = 2))
+                .await
+                .unwrap();
+            assert_eq!(
+                proc_mesh2.extent(),
+                extent!(replicas = 4, gpus = 3, extra = 2)
+            );
+            assert_eq!(proc_mesh2.values().count(), 24);
             let actor_mesh2: ActorMesh<testactor::TestActor> =
                 proc_mesh2.spawn(instance, "test", &()).await.unwrap();
+            assert_eq!(
+                actor_mesh2.extent(),
+                extent!(replicas = 4, gpus = 3, extra = 2)
+            );
+            assert_eq!(actor_mesh2.values().count(), 24);
 
             // Host meshes can be dereferenced to produce a concrete ref.
             let host_mesh_ref: HostMeshRef = host_mesh.clone();
@@ -412,23 +692,24 @@ mod tests {
             );
 
             // Validate we can cast:
+            for actor_mesh in [&actor_mesh1, &actor_mesh2] {
+                let (port, mut rx) = instance.mailbox().open_port();
+                actor_mesh
+                    .cast(instance, testactor::GetActorId(port.bind()))
+                    .unwrap();
 
-            let (port, mut rx) = instance.mailbox().open_port();
-            actor_mesh1
-                .cast(instance, testactor::GetActorId(port.bind()))
-                .unwrap();
+                let mut expected_actor_ids: HashSet<_> = actor_mesh
+                    .values()
+                    .map(|actor_ref| actor_ref.actor_id().clone())
+                    .collect();
 
-            let mut expected_actor_ids: HashSet<_> = actor_mesh1
-                .values()
-                .map(|actor_ref| actor_ref.actor_id().clone())
-                .collect();
-
-            while !expected_actor_ids.is_empty() {
-                let actor_id = rx.recv().await.unwrap();
-                assert!(
-                    expected_actor_ids.remove(&actor_id),
-                    "got {actor_id}, expect {expected_actor_ids:?}"
-                );
+                while !expected_actor_ids.is_empty() {
+                    let actor_id = rx.recv().await.unwrap();
+                    assert!(
+                        expected_actor_ids.remove(&actor_id),
+                        "got {actor_id}, expect {expected_actor_ids:?}"
+                    );
+                }
             }
 
             // Now forward a message through all directed edges across the two meshes.
@@ -459,6 +740,8 @@ mod tests {
 
             let forward = last_rx.recv().await.unwrap();
             assert_eq!(forward.visited, expect_visited);
+
+            let _ = host_mesh.shutdown(&instance).await;
         }
     }
 
@@ -474,6 +757,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_extrinsic_allocation() {
+        let config = hyperactor::config::global::lock();
+        let _guard = config.override_key(crate::bootstrap::MESH_BOOTSTRAP_ENABLE_PDEATHSIG, false);
+
         let program = buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap();
 
         let hosts = vec![free_localhost_addr(), free_localhost_addr()];
@@ -487,9 +773,10 @@ mod tests {
             children.push(cmd.spawn().unwrap());
         }
 
+        let instance = testing::instance().await;
         let host_mesh = HostMeshRef::from_hosts(hosts);
         let proc_mesh = host_mesh
-            .spawn(&testing::instance().await, "test")
+            .spawn(&testing::instance().await, "test", Extent::unity())
             .await
             .unwrap();
         let actor_mesh: ActorMesh<testactor::TestActor> = proc_mesh
@@ -498,5 +785,10 @@ mod tests {
             .unwrap();
 
         testactor::assert_mesh_shape(actor_mesh).await;
+
+        HostMesh::take(Name::new("extrinsic"), host_mesh)
+            .shutdown(&instance)
+            .await
+            .expect("hosts shutdown");
     }
 }

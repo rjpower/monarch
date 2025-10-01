@@ -27,6 +27,7 @@ use crate::alloc::PyAlloc;
 use crate::context::PyInstance;
 use crate::instance_dispatch;
 use crate::pytokio::PyPythonTask;
+use crate::shape::PyExtent;
 use crate::shape::PyRegion;
 use crate::v1::proc_mesh::PyProcMesh;
 
@@ -142,12 +143,18 @@ impl PyHostMesh {
         })
     }
 
-    fn spawn_nonblocking(&self, instance: &PyInstance, name: String) -> PyResult<PyPythonTask> {
+    fn spawn_nonblocking(
+        &self,
+        instance: &PyInstance,
+        name: String,
+        per_host: &PyExtent,
+    ) -> PyResult<PyPythonTask> {
         let host_mesh = self.mesh_ref()?.clone();
         let instance = instance.clone();
+        let per_host = per_host.clone().into();
         let mesh_impl = async move {
             let proc_mesh = instance_dispatch!(instance, async move |cx_instance| {
-                host_mesh.spawn(cx_instance, &name).await
+                host_mesh.spawn(cx_instance, &name, per_host).await
             })
             .map_err(to_py_error)?;
             Ok(PyProcMesh::new_owned(proc_mesh))
@@ -170,7 +177,9 @@ impl PyHostMesh {
         let bytes = bincode::serialize(&self.mesh_ref()?)
             .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
         let py_bytes = (PyBytes::new(py, &bytes),).into_bound_py_any(py).unwrap();
-        let from_bytes = wrap_pyfunction!(py_host_mesh_from_bytes, py)?.into_any();
+        let from_bytes =
+            PyModule::import(py, "monarch._rust_bindings.monarch_hyperactor.v1.host_mesh")?
+                .getattr("py_host_mesh_from_bytes")?;
         Ok((from_bytes, py_bytes))
     }
 }
