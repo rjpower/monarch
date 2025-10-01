@@ -86,7 +86,7 @@ use std::sync::RwLock;
 declare_attrs! {
     /// Default transport type to use across the application.
     @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_DEFAULT_TRANSPORT".to_string())
-    attr DEFAULT_TRANSPORT: ChannelTransport = ChannelTransport::Tcp;
+    attr DEFAULT_TRANSPORT: ChannelTransport = ChannelTransport::Unix;
 }
 
 /// Get the default transport type to use across the application.
