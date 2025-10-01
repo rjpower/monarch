@@ -54,7 +54,6 @@ use serde::Serialize;
 
 use crate::proc_mesh::SupervisionEventState;
 use crate::resource;
-use crate::resource::RankStatus;
 use crate::v1::Name;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Named)]

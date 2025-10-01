@@ -37,7 +37,6 @@ use crate::bootstrap::BootstrapCommand;
 use crate::bootstrap::BootstrapProcManager;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
-use crate::resource::RankStatus;
 use crate::v1::Name;
 
 type ProcManagerSpawnFuture =
@@ -74,7 +73,7 @@ impl HostAgentMode {
 /// through the resource behaviors defined in [`crate::resource`].
 #[hyperactor::export(
     handlers=[
-        resource::CreateOrUpdate<()>, 
+        resource::CreateOrUpdate<()>,
         resource::GetState<ProcState>,
         resource::GetRankStatus,
         ShutdownHost
@@ -132,7 +131,10 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
         if let Err(e) = &created {
             tracing::error!("failed to spawn proc {}: {}", create_or_update.name, e);
         }
-        self.created.insert(create_or_update.name.clone(), (create_or_update.rank.unwrap(), created));
+        self.created.insert(
+            create_or_update.name.clone(),
+            (create_or_update.rank.unwrap(), created),
+        );
 
         Ok(())
     }
@@ -147,16 +149,18 @@ impl Handler<resource::GetRankStatus> for HostMeshAgent {
     ) -> anyhow::Result<()> {
         let Some(created) = self.created.get(&get_rank_status.name) else {
             // TODO: how can we get the host's rank here? we should model its absence explicitly.
-            get_rank_status.reply.send(cx, (usize::MAX, resource::Status::NotExist).into())?;
+            get_rank_status
+                .reply
+                .send(cx, (usize::MAX, resource::Status::NotExist).into())?;
             return Ok(());
         };
-        
+
         let rank_status = match created {
             (rank, Ok(_)) => (*rank, resource::Status::Running),
             (rank, Err(e)) => (*rank, resource::Status::Failed(e.to_string())),
         };
         get_rank_status.reply.send(cx, rank_status.into())?;
-        
+
         Ok(())
     }
 }
