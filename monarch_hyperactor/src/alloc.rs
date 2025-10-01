@@ -171,6 +171,12 @@ impl PyAllocConstraints {
 )]
 pub struct PyAllocSpec {
     inner: AllocSpec,
+    // When this PyAllocSpec is converted to AllocSpec, if this
+    // field does not have a value, then the returned AllocSpec
+    // will be a clone of `inner` with the transport field set
+    // to the current default transport. If the field does have
+    // a value, the returned AllocSpec will be a clone of `inner`
+    // with the transport field set to this value.
     transport: Option<ChannelTransport>,
 }
 
