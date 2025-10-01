@@ -240,6 +240,12 @@ pub mod global {
         CONFIG.read().unwrap().get(key).unwrap().clone()
     }
 
+    /// Get a key from the global configuration by cloning the value,
+    /// if it exists. Returns None if the key is not present.
+    pub fn try_get_cloned<T: AttrValue>(key: Key<T>) -> Option<T> {
+        CONFIG.read().unwrap().get(key).cloned()
+    }
+
     /// Get the global attrs
     pub fn attrs() -> Attrs {
         CONFIG.read().unwrap().clone()
@@ -252,6 +258,12 @@ pub mod global {
     pub fn reset_to_defaults() {
         let mut config = CONFIG.write().unwrap();
         *config = Attrs::new();
+    }
+
+    /// Set a key in the global configuration.
+    pub fn set<T: AttrValue>(key: Key<T>, value: T) {
+        let mut config = CONFIG.write().unwrap();
+        config.insert_value(key, Box::new(value));
     }
 
     /// A guard that holds the global configuration lock and provides override functionality.

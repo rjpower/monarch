@@ -12,6 +12,7 @@ use hyperactor::channel::ChannelAddr;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::channel::TlsMode;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 /// Python binding for [`hyperactor::channel::ChannelTransport`]
@@ -28,6 +29,33 @@ pub enum PyChannelTransport {
     Local,
     Unix,
     // Sim(/*transport:*/ ChannelTransport), TODO kiuk@ add support
+}
+
+#[pymethods]
+impl PyChannelTransport {
+    fn get(&self) -> Self {
+        self.clone()
+    }
+}
+
+impl TryFrom<ChannelTransport> for PyChannelTransport {
+    type Error = PyErr;
+
+    fn try_from(transport: ChannelTransport) -> PyResult<Self> {
+        match transport {
+            ChannelTransport::Tcp => Ok(PyChannelTransport::Tcp),
+            ChannelTransport::MetaTls(TlsMode::Hostname) => {
+                Ok(PyChannelTransport::MetaTlsWithHostname)
+            }
+            ChannelTransport::MetaTls(TlsMode::IpV6) => Ok(PyChannelTransport::MetaTlsWithIpV6),
+            ChannelTransport::Local => Ok(PyChannelTransport::Local),
+            ChannelTransport::Unix => Ok(PyChannelTransport::Unix),
+            _ => Err(PyValueError::new_err(format!(
+                "unsupported transport: {}",
+                transport
+            ))),
+        }
+    }
 }
 
 #[pyclass(
