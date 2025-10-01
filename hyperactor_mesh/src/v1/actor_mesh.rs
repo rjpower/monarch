@@ -21,7 +21,7 @@ use hyperactor::actor::RemoteActor;
 use hyperactor::attrs::Attrs;
 use hyperactor::context;
 use hyperactor::message::Castable;
-use hyperactor::message::ErasedUnbound;
+
 use hyperactor::message::IndexedErasedUnbound;
 use hyperactor::message::Unbound;
 use hyperactor_mesh_macros::sel;
@@ -153,16 +153,16 @@ impl<A: Actor + RemoteActor> ActorMeshRef<A> {
                 // Make sure that we re-bind ranks, as these may be used for
                 // bootstrapping comm actors.
                 let mut unbound = Unbound::try_from_message(message.clone())
-                    .map_err(|e| Error::CastingError(self.name.clone(), e.into()))?;
+                    .map_err(|e| Error::CastingError(self.name.clone(), e))?;
                 unbound
                     .visit_mut::<resource::Rank>(|resource::Rank(rank)| {
                         *rank = Some(create_rank);
                         Ok(())
                     })
-                    .map_err(|e| Error::CastingError(self.name.clone(), e.into()))?;
+                    .map_err(|e| Error::CastingError(self.name.clone(), e))?;
                 let rebound_message = unbound
                     .bind()
-                    .map_err(|e| Error::CastingError(self.name.clone(), e.into()))?;
+                    .map_err(|e| Error::CastingError(self.name.clone(), e))?;
                 actor
                     .send_with_headers(cx, headers, rebound_message)
                     .map_err(|e| Error::SendingError(actor.actor_id().clone(), Box::new(e)))?;
