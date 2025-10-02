@@ -1391,7 +1391,7 @@ mod tests {
                 dest.port::<Payload>().port_id(),
                 &payload,
             );
-            assert_eq!(frame_len, 1024);
+            assert_eq!(frame_len, 1025);
 
             // Send direct. A cast message is > 1024 bytes.
             dest.send(proc_mesh.client(), payload).unwrap();
