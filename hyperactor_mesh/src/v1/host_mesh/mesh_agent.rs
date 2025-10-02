@@ -121,9 +121,7 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
         if let Err(e) = &created {
             tracing::error!("failed to spawn proc {}: {}", create_or_update.name, e);
         }
-        self.created
-            .insert(create_or_update.name.clone(), created)
-            .is_none();
+        self.created.insert(create_or_update.name.clone(), created);
         create_or_update.reply.send(cx, ok)?;
 
         Ok(())
