@@ -24,10 +24,13 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use base64::prelude::*;
+use futures::StreamExt;
+use futures::stream;
 use humantime::format_duration;
 use hyperactor::ActorRef;
 use hyperactor::Named;
 use hyperactor::ProcId;
+use hyperactor::attrs::Attrs;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::channel::ChannelTransport;
@@ -40,7 +43,9 @@ use hyperactor::declare_attrs;
 use hyperactor::host;
 use hyperactor::host::Host;
 use hyperactor::host::HostError;
+use hyperactor::host::ProcHandle;
 use hyperactor::host::ProcManager;
+use hyperactor::host::TerminateSummary;
 use hyperactor::mailbox::MailboxServer;
 use hyperactor::proc::Proc;
 use libc::c_int;
@@ -74,6 +79,18 @@ declare_attrs! {
     @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_TAIL_LOG_LINES".to_string())
     pub attr MESH_TAIL_LOG_LINES: usize = 100;
 
+    /// Maximum number of child terminations to run concurrently
+    /// during bulk shutdown. Prevents unbounded spawning of
+    /// termination tasks (which could otherwise spike CPU, I/O, or
+    /// file descriptor load).
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_TERMINATE_CONCURRENCY".to_string())
+    pub attr MESH_TERMINATE_CONCURRENCY: usize = 16;
+
+    /// Per-child grace window for termination. When a shutdown is
+    /// requested, the manager sends SIGTERM and waits this long for
+    /// the child to exit before escalating to SIGKILL.
+    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_TERMINATE_TIMEOUT".to_string())
+    pub attr MESH_TERMINATE_TIMEOUT: Duration = Duration::from_secs(10);
 }
 
 pub const BOOTSTRAP_ADDR_ENV: &str = "HYPERACTOR_MESH_BOOTSTRAP_ADDR";
@@ -175,8 +192,15 @@ async fn halt<R>() -> R {
     unreachable!()
 }
 
-/// Bootstrap configures the bootstrap behavior of a binary.
-#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Bootstrap configures how a mesh process starts up.
+///
+/// Both `Proc` and `Host` variants may include an optional
+/// configuration snapshot (`hyperactor::config::Attrs`). This
+/// snapshot is serialized into the bootstrap payload and made
+/// available to the child. Interpretation and application of that
+/// snapshot is up to the child process; if omitted, the child falls
+/// back to environment/default values.
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub enum Bootstrap {
     /// "v1" proc bootstrap
     Proc {
@@ -187,6 +211,8 @@ pub enum Bootstrap {
         backend_addr: ChannelAddr,
         /// The callback address used to indicate successful spawning.
         callback_addr: ChannelAddr,
+        /// Config snapshot for the child.
+        config: Option<Attrs>,
     },
 
     /// Host bootstrap. This sets up a new `Host`, managed by a
@@ -194,6 +220,9 @@ pub enum Bootstrap {
     Host {
         /// The address on which to serve the host.
         addr: ChannelAddr,
+
+        /// Config snapshot for the child.
+        config: Option<Attrs>,
     },
 
     #[default]
@@ -286,7 +315,16 @@ impl Bootstrap {
                 proc_id,
                 backend_addr,
                 callback_addr,
+                config,
             } => {
+                if config.is_some() {
+                    tracing::debug!(
+                        "bootstrap: Proc received config snapshot (carried, not applied)"
+                    );
+                } else {
+                    tracing::debug!("bootstrap: no config snapshot provided (Proc)");
+                }
+
                 if hyperactor::config::global::get(MESH_BOOTSTRAP_ENABLE_PDEATHSIG) {
                     // Safety net: normal shutdown is via
                     // `host_mesh.shutdown(&instance)`; PR_SET_PDEATHSIG
@@ -307,7 +345,15 @@ impl Bootstrap {
                     Err(e) => e.into(),
                 }
             }
-            Bootstrap::Host { addr } => {
+            Bootstrap::Host { addr, config } => {
+                if config.is_some() {
+                    tracing::debug!(
+                        "bootstrap: Host received config snapshot (carried, not applied)"
+                    );
+                } else {
+                    tracing::debug!("bootstrap: no config snapshot provided (Host)");
+                }
+
                 let command = ok!(BootstrapCommand::current());
                 let manager = BootstrapProcManager::new(command);
                 let (host, _handle) = ok!(Host::serve(manager, addr).await);
@@ -1084,18 +1130,39 @@ impl hyperactor::host::ProcHandle for BootstrapProcHandle {
         }
     }
 
+    /// Attempt to terminate the underlying OS process.
+    ///
+    /// This drives **process-level** teardown only:
+    /// - Sends `SIGTERM` to the process.
+    /// - Waits up to `timeout` for it to exit cleanly.
+    /// - Escalates to `SIGKILL` if still alive, then waits a short
+    ///   hard-coded grace period (`HARD_WAIT_AFTER_KILL`) to ensure
+    ///   the process is reaped.
+    ///
+    /// If the process was already in a terminal state when called,
+    /// returns [`TerminateError::AlreadyTerminated`].
+    ///
+    /// # Notes
+    /// - This does *not* attempt a graceful proc-level stop via
+    ///   `ProcMeshAgent` or other actor messaging. That integration
+    ///   will come later once proc-level control is wired up.
+    /// - Errors may also be returned if the process PID cannot be
+    ///   determined, if signal delivery fails, or if the status
+    ///   channel is closed unexpectedly.
+    ///
+    /// # Parameters
+    /// - `timeout`: Grace period to wait after `SIGTERM` before
+    ///   escalating.
+    ///
+    /// # Returns
+    /// - `Ok(ProcStatus)` if the process exited during the
+    ///   termination sequence.
+    /// - `Err(TerminateError)` if already exited, signaling failed,
+    ///   or the channel was lost.
     async fn terminate(
         &self,
         timeout: Duration,
     ) -> Result<ProcStatus, hyperactor::host::TerminateError<Self::TerminalStatus>> {
-        // NOTE: This only drives OS-level process teardown:
-        //   - sends SIGTERM, waits up to `timeout`
-        //   - escalates to SIGKILL if still alive
-        //
-        // It does *not* request a graceful proc-level stop via
-        // ProcMeshAgent or other actor messaging. That integration
-        // will come later once proc-level control is wired up.
-
         const HARD_WAIT_AFTER_KILL: Duration = Duration::from_secs(5);
 
         // If already terminal, return that.
@@ -1171,6 +1238,31 @@ impl hyperactor::host::ProcHandle for BootstrapProcHandle {
         }
     }
 
+    /// Forcibly kill the underlying OS process with `SIGKILL`.
+    ///
+    /// This bypasses any graceful shutdown semantics and immediately
+    /// delivers a non-catchable `SIGKILL` to the child. It is
+    /// intended as a last-resort termination mechanism when
+    /// `terminate()` fails or when no grace period is desired.
+    ///
+    /// # Behavior
+    /// - If the process was already in a terminal state, returns
+    ///   [`TerminateError::AlreadyTerminated`].
+    /// - Otherwise attempts to send `SIGKILL` to the current PID.
+    /// - Then waits for the exit monitor to observe a terminal state.
+    ///
+    /// # Notes
+    /// - This is strictly an **OS-level kill**. It does *not* attempt
+    ///   proc-level shutdown via `ProcMeshAgent` or actor messages.
+    ///   That integration will be layered in later.
+    /// - Errors may be returned if the PID cannot be determined, if
+    ///   signal delivery fails, or if the status channel closes
+    ///   unexpectedly.
+    ///
+    /// # Returns
+    /// - `Ok(ProcStatus)` if the process exited after `SIGKILL`.
+    /// - `Err(TerminateError)` if already exited, signaling failed,
+    ///   or the channel was lost.
     async fn kill(
         &self,
     ) -> Result<ProcStatus, hyperactor::host::TerminateError<Self::TerminalStatus>> {
@@ -1470,9 +1562,13 @@ impl ProcManager for BootstrapProcManager {
     /// Launch a new proc under this [`BootstrapProcManager`].
     ///
     /// Spawns the configured bootstrap binary (`self.program`) in a
-    /// fresh child process, passing environment variables that
-    /// describe the [`BootstrapMode::Proc`] (proc ID, backend
-    /// address, callback address).
+    /// fresh child process. The environment is populated with
+    /// variables that describe the bootstrap context — most
+    /// importantly `HYPERACTOR_MESH_BOOTSTRAP_MODE`, which carries a
+    /// base64-encoded JSON [`Bootstrap::Proc`] payload (proc id,
+    /// backend addr, callback addr, optional config snapshot).
+    /// Additional variables like `BOOTSTRAP_LOG_CHANNEL` are also set
+    /// up for logging and control.
     ///
     /// Responsibilities performed here:
     /// - Create a one-shot callback channel so the child can confirm
@@ -1489,9 +1585,6 @@ impl ProcManager for BootstrapProcManager {
     /// Returns a [`BootstrapProcHandle`] that exposes the child
     /// process's lifecycle (status, wait/ready, termination). Errors
     /// are surfaced as [`HostError`].
-    ///
-    /// Note: graceful shutdown (SIGTERM → wait → SIGKILL) is not yet
-    /// implemented; see the `terminate_all` TODO.
     async fn spawn(
         &self,
         proc_id: ProcId,
@@ -1500,10 +1593,13 @@ impl ProcManager for BootstrapProcManager {
         let (callback_addr, mut callback_rx) =
             channel::serve(ChannelAddr::any(ChannelTransport::Unix))?;
 
+        let cfg = hyperactor::config::global::attrs();
+
         let mode = Bootstrap::Proc {
             proc_id: proc_id.clone(),
             backend_addr,
             callback_addr,
+            config: Some(cfg),
         };
         let mut cmd = Command::new(&self.command.program);
         if let Some(arg0) = &self.command.arg0 {
@@ -1606,6 +1702,61 @@ impl ProcManager for BootstrapProcManager {
 
         // Callers do `handle.read().await` for mesh readiness.
         Ok(handle)
+    }
+}
+
+#[async_trait]
+impl hyperactor::host::BulkTerminate for BootstrapProcManager {
+    /// Attempt to gracefully terminate all child procs managed by
+    /// this `BootstrapProcManager`.
+    ///
+    /// Each child handle is asked to `terminate(timeout)`, which
+    /// sends SIGTERM, waits up to the deadline, and escalates to
+    /// SIGKILL if necessary. Termination is attempted concurrently,
+    /// with at most `max_in_flight` tasks running at once.
+    ///
+    /// Returns a [`TerminateSummary`] with counts of how many procs
+    /// were attempted, how many successfully terminated (including
+    /// those that were already terminal), and how many failed.
+    ///
+    /// Logs a warning for each failure.
+    async fn terminate_all(&self, timeout: Duration, max_in_flight: usize) -> TerminateSummary {
+        // Snapshot to avoid holding the lock across awaits.
+        let handles: Vec<BootstrapProcHandle> = {
+            let guard = self.children.lock().await;
+            guard.values().cloned().collect()
+        };
+
+        let attempted = handles.len();
+        let mut ok = 0usize;
+
+        let results = stream::iter(handles.into_iter().map(|h| async move {
+            match h.terminate(timeout).await {
+                Ok(_) | Err(hyperactor::host::TerminateError::AlreadyTerminated(_)) => {
+                    // Treat "already terminal" as success.
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(error=%e, "terminate_all: failed to terminate child");
+                    false
+                }
+            }
+        }))
+        .buffer_unordered(max_in_flight.max(1))
+        .collect::<Vec<bool>>()
+        .await;
+
+        for r in results {
+            if r {
+                ok += 1;
+            }
+        }
+
+        TerminateSummary {
+            attempted,
+            ok,
+            failed: attempted.saturating_sub(ok),
+        }
     }
 }
 
@@ -1875,19 +2026,105 @@ mod tests {
     }
 
     #[test]
-    fn test_bootstrap_mode_env_string() {
+    fn test_bootstrap_mode_env_string_none_config_proc() {
         let values = [
             Bootstrap::default(),
             Bootstrap::Proc {
                 proc_id: id!(foo[0]),
                 backend_addr: ChannelAddr::any(ChannelTransport::Tcp),
                 callback_addr: ChannelAddr::any(ChannelTransport::Unix),
+                config: None,
             },
         ];
 
         for value in values {
             let safe = value.to_env_safe_string().unwrap();
-            assert_eq!(value, Bootstrap::from_env_safe_string(&safe).unwrap());
+            let round = Bootstrap::from_env_safe_string(&safe).unwrap();
+
+            // Re-encode and compare: deterministic round-trip of the
+            // wire format.
+            let safe2 = round.to_env_safe_string().unwrap();
+            assert_eq!(safe, safe2, "env-safe round-trip should be stable");
+
+            // Sanity: the decoded variant is what we expect.
+            match (&value, &round) {
+                (Bootstrap::Proc { config: None, .. }, Bootstrap::Proc { config: None, .. }) => {}
+                (Bootstrap::V0ProcMesh, Bootstrap::V0ProcMesh) => {}
+                _ => panic!("decoded variant mismatch: got {:?}", round),
+            }
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_mode_env_string_none_config_host() {
+        let value = Bootstrap::Host {
+            addr: ChannelAddr::any(ChannelTransport::Unix),
+            config: None,
+        };
+
+        let safe = value.to_env_safe_string().unwrap();
+        let round = Bootstrap::from_env_safe_string(&safe).unwrap();
+
+        // Wire-format round-trip should be identical.
+        let safe2 = round.to_env_safe_string().unwrap();
+        assert_eq!(safe, safe2);
+
+        // Sanity: decoded variant is Host with None config.
+        match round {
+            Bootstrap::Host { config: None, .. } => {}
+            other => panic!("expected Host with None config, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_mode_env_string_invalid() {
+        // Not valid base64
+        assert!(Bootstrap::from_env_safe_string("!!!").is_err());
+    }
+
+    #[test]
+    fn test_bootstrap_env_roundtrip_with_config_proc_and_host() {
+        // Build a small, distinctive Attrs snapshot.
+        let mut attrs = Attrs::new();
+        attrs[MESH_TAIL_LOG_LINES] = 123;
+        attrs[MESH_BOOTSTRAP_ENABLE_PDEATHSIG] = false;
+
+        // Proc case
+        {
+            let original = Bootstrap::Proc {
+                proc_id: id!(foo[42]),
+                backend_addr: ChannelAddr::any(ChannelTransport::Unix),
+                callback_addr: ChannelAddr::any(ChannelTransport::Unix),
+                config: Some(attrs.clone()),
+            };
+            let env_str = original.to_env_safe_string().expect("encode bootstrap");
+            let decoded = Bootstrap::from_env_safe_string(&env_str).expect("decode bootstrap");
+            match &decoded {
+                Bootstrap::Proc { config, .. } => {
+                    let cfg = config.as_ref().expect("expected Some(attrs)");
+                    assert_eq!(cfg[MESH_TAIL_LOG_LINES], 123);
+                    assert!(!cfg[MESH_BOOTSTRAP_ENABLE_PDEATHSIG]);
+                }
+                other => panic!("unexpected variant after roundtrip: {:?}", other),
+            }
+        }
+
+        // Host case
+        {
+            let original = Bootstrap::Host {
+                addr: ChannelAddr::any(ChannelTransport::Unix),
+                config: Some(attrs.clone()),
+            };
+            let env_str = original.to_env_safe_string().expect("encode bootstrap");
+            let decoded = Bootstrap::from_env_safe_string(&env_str).expect("decode bootstrap");
+            match &decoded {
+                Bootstrap::Host { config, .. } => {
+                    let cfg = config.as_ref().expect("expected Some(attrs)");
+                    assert_eq!(cfg[MESH_TAIL_LOG_LINES], 123);
+                    assert!(!cfg[MESH_BOOTSTRAP_ENABLE_PDEATHSIG]);
+                }
+                other => panic!("unexpected variant after roundtrip: {:?}", other),
+            }
         }
     }
 
