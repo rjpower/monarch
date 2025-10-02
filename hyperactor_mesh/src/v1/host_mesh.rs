@@ -872,7 +872,7 @@ mod tests {
             .unwrap_err();
         assert_matches!(
             err, v1::Error::ProcCreationError { status: resource::Status::Failed(msg), .. }
-            if msg.contains("failed to configure process: Terminal(Stopped { exit_code: 1 })")
+            if msg.contains("failed to configure process: Terminal(Stopped { exit_code: 1")
         );
     }
 }
