@@ -880,6 +880,7 @@ mod tests {
             let mut cmd = Command::new(program.clone());
             let boot = Bootstrap::Host {
                 addr: host.clone(),
+                config: None,
                 // The entire purpose of this is to fail:
                 command: Some(BootstrapCommand::from("/bin/false")),
             };

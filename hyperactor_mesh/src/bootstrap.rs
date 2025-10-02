@@ -2081,6 +2081,7 @@ mod tests {
     fn test_bootstrap_mode_env_string_none_config_host() {
         let value = Bootstrap::Host {
             addr: ChannelAddr::any(ChannelTransport::Unix),
+            command: None,
             config: None,
         };
 
@@ -2135,6 +2136,7 @@ mod tests {
         {
             let original = Bootstrap::Host {
                 addr: ChannelAddr::any(ChannelTransport::Unix),
+                command: None,
                 config: Some(attrs.clone()),
             };
             let env_str = original.to_env_safe_string().expect("encode bootstrap");
