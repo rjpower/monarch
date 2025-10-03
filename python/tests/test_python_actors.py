@@ -46,7 +46,7 @@ from monarch._src.actor.host_mesh import (
     fake_in_process_host,
     HostMesh,
 )
-from monarch._src.actor.proc_mesh import ProcMesh
+from monarch._src.actor.proc_mesh import get_or_spawn_controller, ProcMesh
 from monarch._src.actor.v1.host_mesh import (
     fake_in_process_host as fake_in_process_host_v1,
     HostMesh as HostMeshV1,
@@ -1587,3 +1587,25 @@ def test_cuda_is_not_initialized_in_a_new_proc():
         pytest.skip("cannot find cuda")
     proc = this_host().spawn_procs().spawn("is_init", IsInit)
     assert not proc.is_cuda_initialized.call_one().get()
+
+
+class SpawningActorFromEndpointActor(Actor):
+    def __init__(self, root="None"):
+        self._root = root
+
+    @endpoint
+    def return_root(self):
+        return self._root
+
+    @endpoint
+    async def spawning_from_endpoint(self, name, root) -> None:
+        await get_or_spawn_controller(name, SpawningActorFromEndpointActor, root=root)
+
+
+@pytest.mark.timeout(60)
+def test_get_or_spawn_controller_inside_actor_endpoint():
+    actor_1 = get_or_spawn_controller("actor_1", SpawningActorFromEndpointActor).get()
+    actor_1.spawning_from_endpoint.call_one("actor_2", root="actor_1").get()
+    actor_2 = get_or_spawn_controller("actor_2", SpawningActorFromEndpointActor).get()
+    # verify that actor_2 was spawned from actor_1 with the correct root
+    assert actor_2.return_root.call_one().get() == "actor_1"
