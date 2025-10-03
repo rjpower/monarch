@@ -59,6 +59,17 @@ pub enum ExtentError {
         /// Number of dimension sizes provided.
         num_sizes: usize,
     },
+
+    /// An overlapping label was found when concatenating extents.
+    ///
+    /// This occurs when attempting to concatenate two extents that
+    /// share one or more dimension labels, which is not allowed in
+    /// the "append dimensions" view of concatenation.
+    #[error("overlapping label found during concatenation: {label}")]
+    OverlappingLabel {
+        /// The label that appears in both extents.
+        label: String,
+    },
 }
 
 /// `Extent` defines the logical shape of a multidimensional space by
@@ -313,23 +324,19 @@ impl Extent {
         let mut labels = self.labels().to_vec();
         let mut sizes = self.sizes().to_vec();
 
-        // Check for conflicting labels with different sizes
-        for (other_label, &other_size) in other.labels().iter().zip(other.sizes().iter()) {
-            if let Some(existing_pos) = labels.iter().position(|l| l == other_label) {
-                // Label already exists, check if sizes match
-                if sizes[existing_pos] != other_size {
-                    return Err(ExtentError::DimMismatch {
-                        num_labels: sizes[existing_pos],
-                        num_sizes: other_size,
-                    });
-                }
-                // Sizes match, skip adding duplicate
-            } else {
-                // New label, add it
-                labels.push(other_label.clone());
-                sizes.push(other_size);
+        // Check for any duplicate labels and return error if found
+        for other_label in other.labels().iter() {
+            if let Some(_existing_pos) = labels.iter().position(|l| l == other_label) {
+                // Label already exists, return error regardless of size match
+                return Err(ExtentError::OverlappingLabel {
+                    label: other_label.clone(),
+                });
             }
         }
+
+        // Add all new labels and sizes
+        labels.extend(other.labels().iter().cloned());
+        sizes.extend(other.sizes().iter().copied());
 
         Extent::new(labels, sizes)
     }
@@ -2164,11 +2171,18 @@ mod test {
         assert_eq!(result.sizes(), &[] as &[usize]);
         assert_eq!(result.num_ranks(), 1); // 0-dimensional extent has 1 rank
 
-        // Test self-concatenation (duplicate labels with same sizes should be merged)
-        let result = extent1.concat(&extent1).unwrap();
-        assert_eq!(result.labels(), &["x", "y"]); // Duplicates merged
-        assert_eq!(result.sizes(), &[2, 3]); // Original sizes preserved
-        assert_eq!(result.num_ranks(), 2 * 3); // Based on merged extent
+        // Test self-concatenation (overlapping labels should cause error)
+        let result = extent1.concat(&extent1);
+        assert!(
+            result.is_err(),
+            "Self-concatenation should error due to overlapping labels"
+        );
+        match result.unwrap_err() {
+            ExtentError::OverlappingLabel { label } => {
+                assert!(label == "x" || label == "y"); // Either overlapping label
+            }
+            other => panic!("Expected OverlappingLabel error, got {:?}", other),
+        }
 
         // Test concatenation creates valid points
         let result = extent1.concat(&extent2).unwrap();
@@ -2176,27 +2190,19 @@ mod test {
         assert_eq!(point.coords(), vec![1, 2, 3, 4]);
         assert_eq!(point.extent(), &result);
 
-        // Test merge behavior with overlapping labels
+        // Test error case: overlapping labels with same size (should error)
         let extent_a = extent!(x = 2, y = 3);
-        let extent_b = extent!(y = 3, z = 4); // y has same size, should merge
-        let result = extent_a.concat(&extent_b).unwrap();
-        assert_eq!(result.labels(), &["x", "y", "z"]); // y merged, not duplicated
-        assert_eq!(result.sizes(), &[2, 3, 4]);
-        assert_eq!(result.num_ranks(), 2 * 3 * 4);
-
-        // Test error case: conflicting label sizes
-        let extent_conflict1 = extent!(x = 2, y = 3);
-        let extent_conflict2 = extent!(y = 4, z = 5); // y has different size
-        let result = extent_conflict1.concat(&extent_conflict2);
-        assert!(result.is_err(), "Should error on conflicting label sizes");
+        let extent_b = extent!(y = 3, z = 4); // y overlaps with same size
+        let result = extent_a.concat(&extent_b);
+        assert!(
+            result.is_err(),
+            "Should error on overlapping labels even with same size"
+        );
         match result.unwrap_err() {
-            ExtentError::DimMismatch {
-                num_labels,
-                num_sizes,
-            } => {
-                assert_eq!(num_labels, 3); // existing size of y
-                assert_eq!(num_sizes, 4); // conflicting size of y
+            ExtentError::OverlappingLabel { label } => {
+                assert_eq!(label, "y"); // the overlapping label
             }
+            other => panic!("Expected OverlappingLabel error, got {:?}", other),
         }
     }
 
