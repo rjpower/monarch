@@ -1383,7 +1383,7 @@ mod tests {
 
             // Message sized to exactly max frame length.
             let payload = Payload {
-                part: Part::from(Bytes::from(vec![0u8; 699])),
+                part: Part::from(Bytes::from(vec![0u8; 698])),
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
@@ -1391,7 +1391,7 @@ mod tests {
                 dest.port::<Payload>().port_id(),
                 &payload,
             );
-            assert_eq!(frame_len, 1025);
+            assert_eq!(frame_len, 1024);
 
             // Send direct. A cast message is > 1024 bytes.
             dest.send(proc_mesh.client(), payload).unwrap();
@@ -1403,7 +1403,7 @@ mod tests {
 
             // Message sized to max frame length + 1.
             let payload = Payload {
-                part: Part::from(Bytes::from(vec![0u8; 700])),
+                part: Part::from(Bytes::from(vec![0u8; 699])),
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
