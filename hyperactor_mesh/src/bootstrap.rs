@@ -396,11 +396,14 @@ impl Bootstrap {
 
 /// Install "kill me if parent dies" and close the race window.
 pub fn install_pdeathsig_kill() -> io::Result<()> {
-    // SAFETY: Calling into libc; does not dereference memory, just
-    // asks the kernel to deliver SIGKILL on parent death.
-    let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as c_int) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: Calling into libc; does not dereference memory, just
+        // asks the kernel to deliver SIGKILL on parent death.
+        let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as c_int) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
     // Race-close: if the parent died between our exec and prctl(),
     // we won't get a signal, so detect that and exit now.
@@ -1343,7 +1346,7 @@ impl BootstrapCommand {
     #[cfg(test)]
     pub(crate) fn test() -> Self {
         Self {
-            program: buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
+            program: crate::testresource::get("monarch/hyperactor_mesh/bootstrap"),
             arg0: None,
             args: vec![],
             env: HashMap::new(),
@@ -2548,7 +2551,7 @@ mod tests {
         let manager = BootstrapProcManager::new(command);
 
         // Spawn a fast-exiting child.
-        let mut cmd = Command::new("/bin/true");
+        let mut cmd = Command::new("true");
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
         let child = cmd.spawn().expect("spawn true");
 
@@ -3225,9 +3228,9 @@ mod tests {
         let (instance, _handle) = proc.instance("client").unwrap();
 
         // Configure a ProcessAllocator with the bootstrap binary.
-        let mut allocator = ProcessAllocator::new(Command::new(
-            buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
-        ));
+        let mut allocator = ProcessAllocator::new(Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        )));
         // Request a new allocation of procs from the ProcessAllocator.
         let alloc = allocator
             .allocate(AllocSpec {
