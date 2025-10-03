@@ -92,7 +92,6 @@ declare_attrs! {
     )
     pub attr DEFAULT_TRANSPORT: ChannelTransport = ChannelTransport::Unix;
 }
-
 /// Get the default transport type to use across the application.
 pub fn default_transport() -> ChannelTransport {
     config::global::get_cloned(DEFAULT_TRANSPORT)
