@@ -638,9 +638,15 @@ impl ChannelAddr {
 
                 if host == "*" {
                     // Wildcard binding - use IPv6 unspecified address directly without hostname resolution
-                    Ok(Self::MetaTls("::".to_string(), port))
+                    Ok(Self::MetaTls(MetaTlsAddr::Host {
+                        hostname: std::net::Ipv6Addr::UNSPECIFIED.to_string(),
+                        port,
+                    }))
                 } else {
-                    Ok(Self::MetaTls(host.to_string(), port))
+                    Ok(Self::MetaTls(MetaTlsAddr::Host {
+                        hostname: host.to_string(),
+                        port,
+                    }))
                 }
             }
             scheme => Err(anyhow::anyhow!("unsupported ZMQ scheme: {}", scheme)),
@@ -950,19 +956,28 @@ mod tests {
         // Test metatls with hostname
         assert_eq!(
             ChannelAddr::from_zmq_url("metatls://example.com:443").unwrap(),
-            ChannelAddr::MetaTls("example.com".to_string(), 443)
+            ChannelAddr::MetaTls(MetaTlsAddr::Host {
+                hostname: "example.com".to_string(),
+                port: 443
+            })
         );
 
         // Test metatls with IP address (should be normalized)
         assert_eq!(
             ChannelAddr::from_zmq_url("metatls://192.168.1.1:443").unwrap(),
-            ChannelAddr::MetaTls("192.168.1.1".to_string(), 443)
+            ChannelAddr::MetaTls(MetaTlsAddr::Host {
+                hostname: "192.168.1.1".to_string(),
+                port: 443
+            })
         );
 
         // Test metatls with wildcard (should use IPv6 unspecified address)
         assert_eq!(
             ChannelAddr::from_zmq_url("metatls://*:8443").unwrap(),
-            ChannelAddr::MetaTls("::".to_string(), 8443)
+            ChannelAddr::MetaTls(MetaTlsAddr::Host {
+                hostname: "::".to_string(),
+                port: 8443
+            })
         );
 
         // Test TCP hostname resolution (should resolve hostname to IP)
