@@ -19,7 +19,6 @@ use hyperactor::Named;
 use hyperactor::attrs::AttrKeyInfo;
 use hyperactor::attrs::ErasedKey;
 use hyperactor::attrs::declare_attrs;
-use hyperactor::attrs::downcast_key;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::config::PYTHON_CONFIG_KEY;
 use pyo3::conversion::IntoPyObjectExt;
@@ -81,7 +80,7 @@ where
     PyErr: From<<T as TryInto<P>>::Error>,
 {
     // Well, it can't fail unless there's a bug in the code in this file.
-    let key = downcast_key::<T>(key).expect("cannot fail");
+    let key = key.downcast_ref::<T>().expect("cannot fail");
     let val: Option<P> = hyperactor::config::global::try_get_cloned(key.clone())
         .map(|v| v.try_into())
         .transpose()?;
@@ -90,7 +89,7 @@ where
 
 fn set_global_config<T: AttrValue + Debug>(key: &'static dyn ErasedKey, value: T) -> PyResult<()> {
     // Again, can't fail unless there's a bug in the code in this file.
-    let key = downcast_key(key).expect("cannot fail");
+    let key = key.downcast_ref().expect("cannot fail");
     hyperactor::config::global::set(*key, value.clone());
     Ok(())
 }

@@ -214,6 +214,13 @@ pub trait ErasedKey: Any + Send + Sync + 'static {
     fn typename(&self) -> &'static str;
 }
 
+impl dyn ErasedKey {
+    /// Downcast a type-erased key to a specific key type.
+    pub fn downcast_ref<T: Named + 'static>(&'static self) -> Option<&'static Key<T>> {
+        (self as &dyn Any).downcast_ref::<Key<T>>()
+    }
+}
+
 impl<T: AttrValue> ErasedKey for Key<T> {
     fn name(&self) -> &'static str {
         self.name
@@ -226,20 +233,6 @@ impl<T: AttrValue> ErasedKey for Key<T> {
     fn typename(&self) -> &'static str {
         T::typename()
     }
-}
-
-/// Downcast a type-erased key to a specific key type.
-pub fn downcast_key<T: Named + 'static>(
-    key: &'static dyn ErasedKey,
-) -> anyhow::Result<&'static Key<T>> {
-    (key as &dyn Any).downcast_ref::<Key<T>>().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Cannot downcast key with name {} and typename {} to type {}",
-            key.name(),
-            key.typename(),
-            T::typename()
-        )
-    })
 }
 
 // Enable attr[key] syntax.
