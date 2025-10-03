@@ -307,6 +307,32 @@ impl Extent {
     pub fn points(&self) -> ExtentPointsIterator<'_> {
         ExtentPointsIterator::new(self)
     }
+
+    /// Creates a new `Extent` by concatenating the labels and sizes of two input extents.
+    pub fn concat(&self, other: &Extent) -> Result<Self, ExtentError> {
+        let mut labels = self.labels().to_vec();
+        let mut sizes = self.sizes().to_vec();
+
+        // Check for conflicting labels with different sizes
+        for (other_label, &other_size) in other.labels().iter().zip(other.sizes().iter()) {
+            if let Some(existing_pos) = labels.iter().position(|l| l == other_label) {
+                // Label already exists, check if sizes match
+                if sizes[existing_pos] != other_size {
+                    return Err(ExtentError::DimMismatch {
+                        num_labels: sizes[existing_pos],
+                        num_sizes: other_size,
+                    });
+                }
+                // Sizes match, skip adding duplicate
+            } else {
+                // New label, add it
+                labels.push(other_label.clone());
+                sizes.push(other_size);
+            }
+        }
+
+        Extent::new(labels, sizes)
+    }
 }
 
 /// Label formatting utilities shared across `Extent`, `Region`, and
@@ -2109,6 +2135,69 @@ mod test {
         assert_eq!(it.len(), 0);
         assert!(it.next().is_none()); // no items
         assert!(it.next().is_none()); // fused
+    }
+
+    #[test]
+    fn test_extent_concat() {
+        // Test basic concatenation of two extents with preserved order of labels
+        let extent1 = extent!(x = 2, y = 3);
+        let extent2 = extent!(z = 4, w = 5);
+
+        let result = extent1.concat(&extent2).unwrap();
+        assert_eq!(result.labels(), &["x", "y", "z", "w"]);
+        assert_eq!(result.sizes(), &[2, 3, 4, 5]);
+        assert_eq!(result.num_ranks(), 2 * 3 * 4 * 5);
+
+        // Test concatenating with empty extent
+        let empty = extent!();
+        let result = extent1.concat(&empty).unwrap();
+        assert_eq!(result.labels(), &["x", "y"]);
+        assert_eq!(result.sizes(), &[2, 3]);
+
+        let result = empty.concat(&extent1).unwrap();
+        assert_eq!(result.labels(), &["x", "y"]);
+        assert_eq!(result.sizes(), &[2, 3]);
+
+        // Test concatenating two empty extents
+        let result = empty.concat(&empty).unwrap();
+        assert_eq!(result.labels(), &[] as &[String]);
+        assert_eq!(result.sizes(), &[] as &[usize]);
+        assert_eq!(result.num_ranks(), 1); // 0-dimensional extent has 1 rank
+
+        // Test self-concatenation (duplicate labels with same sizes should be merged)
+        let result = extent1.concat(&extent1).unwrap();
+        assert_eq!(result.labels(), &["x", "y"]); // Duplicates merged
+        assert_eq!(result.sizes(), &[2, 3]); // Original sizes preserved
+        assert_eq!(result.num_ranks(), 2 * 3); // Based on merged extent
+
+        // Test concatenation creates valid points
+        let result = extent1.concat(&extent2).unwrap();
+        let point = result.point(vec![1, 2, 3, 4]).unwrap();
+        assert_eq!(point.coords(), vec![1, 2, 3, 4]);
+        assert_eq!(point.extent(), &result);
+
+        // Test merge behavior with overlapping labels
+        let extent_a = extent!(x = 2, y = 3);
+        let extent_b = extent!(y = 3, z = 4); // y has same size, should merge
+        let result = extent_a.concat(&extent_b).unwrap();
+        assert_eq!(result.labels(), &["x", "y", "z"]); // y merged, not duplicated
+        assert_eq!(result.sizes(), &[2, 3, 4]);
+        assert_eq!(result.num_ranks(), 2 * 3 * 4);
+
+        // Test error case: conflicting label sizes
+        let extent_conflict1 = extent!(x = 2, y = 3);
+        let extent_conflict2 = extent!(y = 4, z = 5); // y has different size
+        let result = extent_conflict1.concat(&extent_conflict2);
+        assert!(result.is_err(), "Should error on conflicting label sizes");
+        match result.unwrap_err() {
+            ExtentError::DimMismatch {
+                num_labels,
+                num_sizes,
+            } => {
+                assert_eq!(num_labels, 3); // existing size of y
+                assert_eq!(num_sizes, 4); // conflicting size of y
+            }
+        }
     }
 
     #[test]
