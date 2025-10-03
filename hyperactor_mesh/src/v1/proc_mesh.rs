@@ -608,10 +608,13 @@ impl ProcMeshRef {
                     Err(Error::ActorSpawnError { statuses })
                 }
             }
-            Err(mut statuses) => {
+            Err(complete) => {
                 // Fill the remaining statuses with a timeout error.
-                RankedValues::from((0..self.ranks.len(), Status::Timeout(start_time.elapsed())))
-                    .merge_into(&mut statuses);
+                let mut statuses = RankedValues::from((
+                    0..self.ranks.len(),
+                    Status::Timeout(start_time.elapsed()),
+                ));
+                statuses.merge_from(complete);
 
                 Err(Error::ActorSpawnError { statuses })
             }
