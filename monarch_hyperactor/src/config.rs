@@ -17,10 +17,12 @@ use std::fmt::Debug;
 use hyperactor::AttrValue;
 use hyperactor::Named;
 use hyperactor::attrs::AttrKeyInfo;
+use hyperactor::attrs::Attrs;
 use hyperactor::attrs::ErasedKey;
 use hyperactor::attrs::declare_attrs;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::config::PYTHON_CONFIG_KEY;
+use hyperactor::config::global::Source;
 use pyo3::conversion::IntoPyObjectExt;
 use pyo3::exceptions::PyTypeError;
 use pyo3::exceptions::PyValueError;
@@ -90,7 +92,9 @@ where
 fn set_global_config<T: AttrValue + Debug>(key: &'static dyn ErasedKey, value: T) -> PyResult<()> {
     // Again, can't fail unless there's a bug in the code in this file.
     let key = key.downcast_ref().expect("cannot fail");
-    hyperactor::config::global::set(*key, value.clone());
+    let mut attrs = Attrs::new();
+    attrs.set(key.clone(), value);
+    hyperactor::config::global::set(Source::Runtime, attrs);
     Ok(())
 }
 
