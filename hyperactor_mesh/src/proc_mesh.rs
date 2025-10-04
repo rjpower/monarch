@@ -465,6 +465,14 @@ impl ProcMesh {
         })
     }
 
+    /// Bounds:
+    /// - `A: Actor` - we actually spawn this concrete actor on each
+    ///   proc.
+    /// - `A: RemoteActor` - required because we return
+    ///   `Vec<ActorRef<A>>`, and `ActorRef` is only defined for `A:
+    ///   RemoteActor`.
+    /// - `A::Params: RemoteMessage` - params must serialize for
+    ///   cross-proc spawn.
     async fn spawn_on_procs<A: Actor + RemoteActor>(
         cx: &impl context::Actor,
         agents: impl IntoIterator<Item = ActorRef<ProcMeshAgent>> + '_,
@@ -542,6 +550,14 @@ impl ProcMesh {
     /// - `actor_name`: Name for all spawned actors.
     /// - `params`: Reference to the parameter struct, reused for all
     ///   actors.
+    ///
+    /// Bounds:
+    /// - `A: Actor` — we actually spawn this type on each agent.
+    /// - `A: RemoteActor` — we return a `RootActorMesh<'_, A>` that
+    ///   contains `ActorRef<A>`s; those exist only for `A:
+    ///   RemoteActor`.
+    /// - `A::Params: RemoteMessage` — params must be serializable to
+    ///   cross proc boundaries when launching each actor.
     pub async fn spawn<A: Actor + RemoteActor>(
         &self,
         actor_name: &str,
@@ -862,6 +878,8 @@ impl ProcEvents {
 /// static lifetimes.
 #[async_trait]
 pub trait SharedSpawnable {
+    // `Actor`: the type actually runs in the mesh;
+    // `RemoteActor`: so we can hand back ActorRef<A> in RootActorMesh
     async fn spawn<A: Actor + RemoteActor>(
         self,
         actor_name: &str,
@@ -873,6 +891,8 @@ pub trait SharedSpawnable {
 
 #[async_trait]
 impl<D: Deref<Target = ProcMesh> + Send + Sync + 'static> SharedSpawnable for D {
+    // `Actor`: the type actually runs in the mesh;
+    // `RemoteActor`: so we can hand back ActorRef<A> in RootActorMesh
     async fn spawn<A: Actor + RemoteActor>(
         self,
         actor_name: &str,
