@@ -1520,6 +1520,10 @@ def test_mesh_len(v1: bool):
     proc_mesh = spawn_procs_on_fake_host(v1, {"gpus": 12})
     s = proc_mesh.spawn("sync_actor", SyncActor)
     assert 12 == len(s)
+    # FIXME: Actually figure out what's going on here.
+    # Wait for the proc mesh to initialize before exiting.
+    # Otherwise we get a GIL state release fatal error.
+    # proc_mesh.initialized.get()
 
 
 class UndeliverableMessageReceiver(Actor):
