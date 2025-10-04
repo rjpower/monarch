@@ -327,7 +327,7 @@ impl Extent {
     /// `b.concat(&a)`.
     pub fn concat(&self, other: &Extent) -> Result<Self, ExtentError> {
         use std::collections::HashSet;
-        // Check for any overlapping labels in linear time using hash map
+        // Check for any overlapping labels in linear time using hash set
         let lhs: HashSet<&str> = self.labels().iter().map(|s| s.as_str()).collect();
         if let Some(dup) = other.labels().iter().find(|l| lhs.contains(l.as_str())) {
             return Err(ExtentError::OverlappingLabel { label: dup.clone() });
@@ -2180,7 +2180,7 @@ mod test {
         );
         match result.unwrap_err() {
             ExtentError::OverlappingLabel { label } => {
-                assert!(label == "x" || label == "y"); // Either overlapping label
+                assert!(label == "x"); // Overlapping label should be "x"
             }
             other => panic!("Expected OverlappingLabel error, got {:?}", other),
         }
@@ -2217,6 +2217,25 @@ mod test {
             extent_y.concat(&extent_x).unwrap().labels(),
             &["z", "x", "y"]
         );
+
+        // Test associativity: (a ⊕ b) ⊕ c == a ⊕ (b ⊕ c) for disjoint labels
+        let extent_m = extent!(x = 2);
+        let extent_n = extent!(y = 3);
+        let extent_o = extent!(z = 4);
+
+        let left_assoc = extent_m
+            .concat(&extent_n)
+            .unwrap()
+            .concat(&extent_o)
+            .unwrap();
+        let right_assoc = extent_m
+            .concat(&extent_n.concat(&extent_o).unwrap())
+            .unwrap();
+
+        assert_eq!(left_assoc, right_assoc);
+        assert_eq!(left_assoc.labels(), &["x", "y", "z"]);
+        assert_eq!(left_assoc.sizes(), &[2, 3, 4]);
+        assert_eq!(left_assoc.num_ranks(), 2 * 3 * 4);
     }
 
     #[test]
