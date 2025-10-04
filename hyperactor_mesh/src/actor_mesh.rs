@@ -271,6 +271,10 @@ impl Deref for ProcMeshRef<'_> {
 
 /// A mesh of actor instances. ActorMeshes are obtained by spawning an
 /// actor on a [`ProcMesh`].
+///
+/// Generic bound: `A: RemoteActor` — this type hands out typed
+/// `ActorRef<A>` handles (see `ranks`), and `ActorRef` is only
+/// defined for `A: RemoteActor`.
 pub struct RootActorMesh<'a, A: RemoteActor> {
     proc_mesh: ProcMeshRef<'a>,
     name: String,
@@ -1383,7 +1387,7 @@ mod tests {
 
             // Message sized to exactly max frame length.
             let payload = Payload {
-                part: Part::from(Bytes::from(vec![0u8; 699])),
+                part: Part::from(Bytes::from(vec![0u8; 698])),
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
@@ -1403,7 +1407,7 @@ mod tests {
 
             // Message sized to max frame length + 1.
             let payload = Payload {
-                part: Part::from(Bytes::from(vec![0u8; 700])),
+                part: Part::from(Bytes::from(vec![0u8; 699])),
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
