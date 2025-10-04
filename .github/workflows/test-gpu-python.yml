@@ -55,6 +55,8 @@ jobs:
         # Run GPU Python tests split into 10 groups sequentially
         # Each group runs separately with process cleanup in between
         pip install pytest-split
+        FAILED_GROUPS=()
+
         for GROUP in {1..10}; do
           echo "Running test group $GROUP of 10..."
 
@@ -67,18 +69,32 @@ jobs:
           sleep 2
 
           # Run tests for this group
-          LC_ALL=C pytest python/tests/ -s -v -m "not oss_skip" \
+          if LC_ALL=C pytest python/tests/ -s -v -m "not oss_skip" \
+            --ignore-glob="**/meta/**" \
             --dist=no \
             --group=$GROUP \
-            --splits=10 || {
-            echo "Test group $GROUP failed with exit code $?"
-            exit 1
-          }
+            --splits=10; then
+            echo "✓ Test group $GROUP completed successfully"
+          else
+            FAILED_GROUPS+=($GROUP)
+            echo "✗ Test group $GROUP failed with exit code $?"
+          fi
 
-          echo "Completed test group $GROUP of 10"
         done
 
-        echo "All test groups completed successfully!"
+        # Final cleanup after all groups
+        echo "Final cleanup of Python processes..."
+        pkill -9 python || true
+        pkill -9 pytest || true
+
+        # Check if any groups failed and exit with appropriate code
+        if [ ${#FAILED_GROUPS[@]} -eq 0 ]; then
+          echo "✓ All test groups completed successfully!"
+        else
+          echo "✗ The following test groups failed: ${FAILED_GROUPS[*]}"
+          echo "Failed groups count: ${#FAILED_GROUPS[@]}/10"
+          exit 1
+        fi
         # TODO(meriksen): temporarily disabled to unblock lands while debugging
         # mock CUDA issues on the OSS setup
         # python python/tests/test_mock_cuda.py
