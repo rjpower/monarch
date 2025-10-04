@@ -8,6 +8,7 @@
 
 use crate::comm::multicast::CAST_ORIGINATING_SENDER;
 use crate::reference::ActorMeshId;
+use crate::resource;
 pub mod multicast;
 
 use std::cmp::Ordering;
@@ -263,22 +264,29 @@ impl CommActor {
         // Split ports, if any, and update message with new ports. In this
         // way, children actors will reply to this comm actor's ports, instead
         // of to the original ports provided by parent.
-        message
-            .data_mut()
-            .visit_mut::<UnboundPort>(|UnboundPort(port_id, reducer_spec)| {
-                let split = port_id.split(cx, reducer_spec.clone())?;
+        message.data_mut().visit_mut::<UnboundPort>(
+            |UnboundPort(port_id, reducer_spec, reducer_opts)| {
+                let split = port_id.split(cx, reducer_spec.clone(), reducer_opts.clone())?;
 
                 #[cfg(test)]
                 tests::collect_split_port(port_id, &split, deliver_here);
 
                 *port_id = split;
                 Ok(())
-            })?;
+            },
+        )?;
 
         // Deliver message here, if necessary.
         if deliver_here {
             let rank_on_root_mesh = mode.self_rank(cx.self_id())?;
             let cast_rank = message.relative_rank(rank_on_root_mesh)?;
+            // Replace ranks with self ranks.
+            message
+                .data_mut()
+                .visit_mut::<resource::Rank>(|resource::Rank(rank)| {
+                    *rank = Some(cast_rank);
+                    Ok(())
+                })?;
             let cast_shape = message.shape();
             let point = cast_shape
                 .extent()
