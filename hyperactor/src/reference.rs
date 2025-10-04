@@ -47,7 +47,6 @@ use crate::ActorHandle;
 use crate::Named;
 use crate::RemoteHandles;
 use crate::RemoteMessage;
-use crate::accum::ReducerOpts;
 use crate::accum::ReducerSpec;
 use crate::actor::RemoteActor;
 use crate::attrs::Attrs;
@@ -908,9 +907,8 @@ impl PortId {
         &self,
         cx: &impl context::Mailbox,
         reducer_spec: Option<ReducerSpec>,
-        reducer_opts: Option<ReducerOpts>,
     ) -> anyhow::Result<PortId> {
-        cx.split(self.clone(), reducer_spec, reducer_opts)
+        cx.split(self.clone(), reducer_spec)
     }
 }
 
@@ -951,13 +949,6 @@ pub struct PortRef<M> {
         Hash = "ignore"
     )]
     reducer_spec: Option<ReducerSpec>,
-    #[derivative(
-        PartialEq = "ignore",
-        PartialOrd = "ignore",
-        Ord = "ignore",
-        Hash = "ignore"
-    )]
-    reducer_opts: Option<ReducerOpts>,
     phantom: PhantomData<M>,
 }
 
@@ -968,7 +959,6 @@ impl<M: RemoteMessage> PortRef<M> {
         Self {
             port_id,
             reducer_spec: None,
-            reducer_opts: None,
             phantom: PhantomData,
         }
     }
@@ -979,7 +969,6 @@ impl<M: RemoteMessage> PortRef<M> {
         Self {
             port_id,
             reducer_spec,
-            reducer_opts: None, // TODO: provide attest_reducible_opts
             phantom: PhantomData,
         }
     }
@@ -1060,7 +1049,6 @@ impl<M: RemoteMessage> Clone for PortRef<M> {
         Self {
             port_id: self.port_id.clone(),
             reducer_spec: self.reducer_spec.clone(),
-            reducer_opts: self.reducer_opts.clone(),
             phantom: PhantomData,
         }
     }
@@ -1074,7 +1062,7 @@ impl<M: RemoteMessage> fmt::Display for PortRef<M> {
 
 /// The parameters extracted from [`PortRef`] to [`Bindings`].
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Named)]
-pub struct UnboundPort(pub PortId, pub Option<ReducerSpec>, pub Option<ReducerOpts>);
+pub struct UnboundPort(pub PortId, pub Option<ReducerSpec>);
 
 impl UnboundPort {
     /// Update the port id of this binding.
@@ -1085,11 +1073,7 @@ impl UnboundPort {
 
 impl<M: RemoteMessage> From<&PortRef<M>> for UnboundPort {
     fn from(port_ref: &PortRef<M>) -> Self {
-        UnboundPort(
-            port_ref.port_id.clone(),
-            port_ref.reducer_spec.clone(),
-            port_ref.reducer_opts.clone(),
-        )
+        UnboundPort(port_ref.port_id.clone(), port_ref.reducer_spec.clone())
     }
 }
 
@@ -1104,7 +1088,6 @@ impl<M: RemoteMessage> Bind for PortRef<M> {
         let bound = bindings.try_pop_front::<UnboundPort>()?;
         self.port_id = bound.0;
         self.reducer_spec = bound.1;
-        self.reducer_opts = bound.2;
         Ok(())
     }
 }
