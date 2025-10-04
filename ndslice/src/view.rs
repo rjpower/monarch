@@ -318,25 +318,27 @@ impl Extent {
         ExtentPointsIterator::new(self)
     }
 
-    /// Creates a new `Extent` by concatenating the labels and sizes of two input extents.
+    /// Append the dimensions of `other` to this extent, preserving order.
+    ///
+    /// Duplicate labels are not allowed: if any label in `other` already appears
+    /// in `self`, this returns `ExtentError::OverlappingLabel`.
+    ///
+    /// This operation is not commutative: `a.concat(&b)` may differ from
+    /// `b.concat(&a)`.
     pub fn concat(&self, other: &Extent) -> Result<Self, ExtentError> {
+        use std::collections::HashSet;
+        // Check for any overlapping labels in linear time using hash map
+        let lhs: HashSet<&str> = self.labels().iter().map(|s| s.as_str()).collect();
+        if let Some(dup) = other.labels().iter().find(|l| lhs.contains(l.as_str())) {
+            return Err(ExtentError::OverlappingLabel { label: dup.clone() });
+        }
+        // Combine labels and sizes from both extents with pre-allocated memory
         let mut labels = self.labels().to_vec();
         let mut sizes = self.sizes().to_vec();
-
-        // Check for any duplicate labels and return error if found
-        for other_label in other.labels().iter() {
-            if let Some(_existing_pos) = labels.iter().position(|l| l == other_label) {
-                // Label already exists, return error regardless of size match
-                return Err(ExtentError::OverlappingLabel {
-                    label: other_label.clone(),
-                });
-            }
-        }
-
-        // Add all new labels and sizes
+        labels.reserve(other.labels().len());
+        sizes.reserve(other.sizes().len());
         labels.extend(other.labels().iter().cloned());
         sizes.extend(other.sizes().iter().copied());
-
         Extent::new(labels, sizes)
     }
 }
@@ -2203,6 +2205,18 @@ mod test {
             }
             other => panic!("Expected OverlappingLabel error, got {:?}", other),
         }
+
+        // Test that Extent::concat preserves order and is not commutative
+        let extent_x = extent!(x = 2, y = 3);
+        let extent_y = extent!(z = 4);
+        assert_eq!(
+            extent_x.concat(&extent_y).unwrap().labels(),
+            &["x", "y", "z"]
+        );
+        assert_eq!(
+            extent_y.concat(&extent_x).unwrap().labels(),
+            &["z", "x", "y"]
+        );
     }
 
     #[test]
