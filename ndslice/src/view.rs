@@ -60,12 +60,11 @@ pub enum ExtentError {
         num_sizes: usize,
     },
 
-    /// An overlapping label was found when concatenating extents.
+    /// An overlapping label was found.
     ///
-    /// This occurs when attempting to concatenate two extents that
-    /// share one or more dimension labels, which is not allowed in
-    /// the "append dimensions" view of concatenation.
-    #[error("overlapping label found during concatenation: {label}")]
+    /// This occurs when attempting to combine extents that
+    /// share one or more dimension labels, which is not allowed.
+    #[error("overlapping label found: {label}")]
     OverlappingLabel {
         /// The label that appears in both extents.
         label: String,
