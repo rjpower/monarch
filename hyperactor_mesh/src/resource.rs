@@ -583,4 +583,24 @@ mod tests {
             RankedValues::from((0..10, Status::Failed("foo".to_string()))),
         );
     }
+
+    #[test]
+    fn test_default_through_merging() {
+        let values: RankedValues<usize> =
+            [(0..10, 1), (15..20, 1), (30..50, 1)].into_iter().collect();
+
+        let mut default = RankedValues::from((0..50, 0));
+        default.merge_from(values);
+
+        assert_eq!(
+            default.iter().cloned().collect::<Vec<_>>(),
+            vec![
+                (0..10, 1),
+                (10..15, 0),
+                (15..20, 1),
+                (20..30, 0),
+                (30..50, 1)
+            ]
+        );
+    }
 }

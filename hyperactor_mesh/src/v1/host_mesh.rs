@@ -53,7 +53,7 @@ use crate::v1::host_mesh::mesh_agent::ShutdownHostClient;
 use crate::v1::proc_mesh::ProcRef;
 
 declare_attrs! {
-    /// TODO
+    /// The maximum idle time between updates while spawning proc meshes.
     @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_PROC_SPAWN_MAX_IDLE".to_string())
     pub attr PROC_SPAWN_MAX_IDLE: Duration = Duration::from_secs(30);
 }
