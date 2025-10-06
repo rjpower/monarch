@@ -240,6 +240,7 @@ impl RemoteProcessAllocator {
                                 extent,
                                 constraints,
                                 proc_name: None, // TODO(meriksen, direct addressing): we need to pass the addressing mode here
+                                transport: ChannelTransport::Unix,
                             };
 
                             match process_allocator.allocate(spec.clone()).await {
@@ -586,7 +587,6 @@ pub struct RemoteProcessAlloc {
     initializer: Box<dyn RemoteProcessAllocInitializer + Send + Sync>,
     spec: AllocSpec,
     remote_allocator_port: u16,
-    transport: ChannelTransport,
     world_id: WorldId,
     ordered_hosts: Vec<RemoteProcessAllocHost>,
     // Indicates that the initial remote allocation requests have been sent.
@@ -617,12 +617,11 @@ impl RemoteProcessAlloc {
     pub async fn new(
         spec: AllocSpec,
         world_id: WorldId,
-        transport: ChannelTransport,
         remote_allocator_port: u16,
         initializer: impl RemoteProcessAllocInitializer + Send + Sync + 'static,
     ) -> Result<Self, anyhow::Error> {
-        let (bootstrap_addr, rx) =
-            channel::serve(ChannelAddr::any(transport.clone())).map_err(anyhow::Error::from)?;
+        let (bootstrap_addr, rx) = channel::serve(ChannelAddr::any(spec.transport.clone()))
+            .map_err(anyhow::Error::from)?;
 
         tracing::info!(
             "starting alloc for {} on: {}",
@@ -657,7 +656,6 @@ impl RemoteProcessAlloc {
         Ok(Self {
             spec,
             world_id,
-            transport,
             remote_allocator_port,
             initializer: Box::new(initializer),
             world_offsets: HashMap::new(),
@@ -766,7 +764,7 @@ impl RemoteProcessAlloc {
             let host = &hosts[i];
             tracing::debug!("allocating: {} for host: {}", region, host.id);
 
-            let remote_addr = match self.transport {
+            let remote_addr = match self.spec.transport {
                 ChannelTransport::MetaTls(_) => {
                     format!("metatls!{}:{}", host.hostname, self.remote_allocator_port)
                 }
@@ -779,7 +777,7 @@ impl RemoteProcessAlloc {
                     anyhow::bail!(
                         "unsupported transport for host {}: {:?}",
                         host.id,
-                        self.transport
+                        self.spec.transport,
                     );
                 }
             };
@@ -1171,10 +1169,6 @@ impl Alloc for RemoteProcessAlloc {
 
     fn world_id(&self) -> &WorldId {
         &self.world_id
-    }
-
-    fn transport(&self) -> ChannelTransport {
-        self.transport.clone()
     }
 
     async fn stop(&mut self) -> Result<(), AllocatorError> {
@@ -2041,20 +2035,22 @@ mod test_alloc {
             extent: extent!(host = 2, gpu = 2),
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Unix,
         };
         let world_id = WorldId("test_world_id".to_string());
-        let transport = ChannelTransport::Unix;
 
         let task1_allocator = RemoteProcessAllocator::new();
         let task1_addr = ChannelAddr::any(ChannelTransport::Unix);
         let task1_addr_string = task1_addr.to_string();
-        let task1_cmd =
-            Command::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap());
+        let task1_cmd = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        ));
         let task2_allocator = RemoteProcessAllocator::new();
         let task2_addr = ChannelAddr::any(ChannelTransport::Unix);
         let task2_addr_string = task2_addr.to_string();
-        let task2_cmd =
-            Command::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap());
+        let task2_cmd = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        ));
         let task1_allocator_copy = task1_allocator.clone();
         let task1_allocator_handle = tokio::spawn(async move {
             tracing::info!("spawning task1");
@@ -2084,7 +2080,7 @@ mod test_alloc {
                 },
             ])
         });
-        let mut alloc = RemoteProcessAlloc::new(spec.clone(), world_id, transport, 0, initializer)
+        let mut alloc = RemoteProcessAlloc::new(spec.clone(), world_id, 0, initializer)
             .await
             .unwrap();
         let mut created = HashSet::new();
@@ -2168,20 +2164,22 @@ mod test_alloc {
             extent: extent!(host = 2, gpu = 2),
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Unix,
         };
         let world_id = WorldId("test_world_id".to_string());
-        let transport = ChannelTransport::Unix;
 
         let task1_allocator = RemoteProcessAllocator::new();
         let task1_addr = ChannelAddr::any(ChannelTransport::Unix);
         let task1_addr_string = task1_addr.to_string();
-        let task1_cmd =
-            Command::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap());
+        let task1_cmd = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        ));
         let task2_allocator = RemoteProcessAllocator::new();
         let task2_addr = ChannelAddr::any(ChannelTransport::Unix);
         let task2_addr_string = task2_addr.to_string();
-        let task2_cmd =
-            Command::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap());
+        let task2_cmd = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        ));
         let task1_allocator_copy = task1_allocator.clone();
         let task1_allocator_handle = tokio::spawn(async move {
             tracing::info!("spawning task1");
@@ -2213,7 +2211,7 @@ mod test_alloc {
                 },
             ])
         });
-        let mut alloc = RemoteProcessAlloc::new(spec.clone(), world_id, transport, 0, initializer)
+        let mut alloc = RemoteProcessAlloc::new(spec.clone(), world_id, 0, initializer)
             .await
             .unwrap();
         for _ in 0..spec.extent.num_ranks() * 2 {
@@ -2296,15 +2294,16 @@ mod test_alloc {
             extent: extent!(host = 2, gpu = 2),
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Unix,
         };
         let world_id = WorldId("test_world_id".to_string());
-        let transport = ChannelTransport::Unix;
 
         let task1_allocator = RemoteProcessAllocator::new();
         let task1_addr = ChannelAddr::any(ChannelTransport::Unix);
         let task1_addr_string = task1_addr.to_string();
-        let task1_cmd =
-            Command::new(buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap());
+        let task1_cmd = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        ));
         let task2_allocator = RemoteProcessAllocator::new();
         let task2_addr = ChannelAddr::any(ChannelTransport::Unix);
         let task2_addr_string = task2_addr.to_string();
@@ -2339,7 +2338,7 @@ mod test_alloc {
                 },
             ])
         });
-        let mut alloc = RemoteProcessAlloc::new(spec.clone(), world_id, transport, 0, initializer)
+        let mut alloc = RemoteProcessAlloc::new(spec.clone(), world_id, 0, initializer)
             .await
             .unwrap();
         let mut created = HashSet::new();
@@ -2427,10 +2426,9 @@ mod test_alloc {
         let remote_process_allocators = addresses
             .iter()
             .map(|addr| {
-                Command::new(
-                    buck_resources::get("monarch/hyperactor_mesh/remote_process_allocator")
-                        .unwrap(),
-                )
+                Command::new(crate::testresource::get(
+                    "monarch/hyperactor_mesh/remote_process_allocator",
+                ))
                 .env("RUST_LOG", "info")
                 .arg(format!("--addr={addr}"))
                 .stdout(std::process::Stdio::piped())
@@ -2442,9 +2440,9 @@ mod test_alloc {
         let done_allocating_addr = ChannelAddr::any(ChannelTransport::Unix);
         let (done_allocating_addr, mut done_allocating_rx) =
             channel::serve::<()>(done_allocating_addr).unwrap();
-        let mut remote_process_alloc = Command::new(
-            buck_resources::get("monarch/hyperactor_mesh/remote_process_alloc").unwrap(),
-        )
+        let mut remote_process_alloc = Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/remote_process_alloc",
+        ))
         .arg(format!("--done-allocating-addr={}", done_allocating_addr))
         .arg(format!("--addresses={}", addresses.join(",")))
         .arg(format!("--num-proc-meshes={}", num_proc_meshes))

@@ -26,6 +26,7 @@ use crate::alloc::AllocSpec;
 use crate::alloc::Allocator;
 use crate::alloc::LocalAllocator;
 use crate::alloc::ProcessAllocator;
+use crate::proc_mesh::default_transport;
 use crate::v1::ProcMesh;
 use crate::v1::host_mesh::HostMesh;
 
@@ -53,6 +54,7 @@ pub async fn proc_meshes(cx: &impl context::Actor, extent: Extent) -> Vec<ProcMe
                 extent: extent.clone(),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Local,
             })
             .await
             .unwrap();
@@ -63,14 +65,15 @@ pub async fn proc_meshes(cx: &impl context::Actor, extent: Extent) -> Vec<ProcMe
     });
 
     meshes.push({
-        let mut allocator = ProcessAllocator::new(Command::new(
-            buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
-        ));
+        let mut allocator = ProcessAllocator::new(Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        )));
         let alloc = allocator
             .allocate(AllocSpec {
                 extent,
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await
             .unwrap();
@@ -89,14 +92,15 @@ pub async fn allocs(extent: Extent) -> Vec<Box<dyn Alloc + Send + Sync>> {
         extent: extent.clone(),
         constraints: Default::default(),
         proc_name: None,
+        transport: default_transport(),
     };
 
     vec![
         // Box::new(LocalAllocator.allocate(spec.clone()).await.unwrap()),
         Box::new(
-            ProcessAllocator::new(Command::new(
-                buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
-            ))
+            ProcessAllocator::new(Command::new(crate::testresource::get(
+                "monarch/hyperactor_mesh/bootstrap",
+            )))
             .allocate(spec.clone())
             .await
             .unwrap(),
@@ -116,6 +120,7 @@ pub async fn local_proc_mesh(extent: Extent) -> (ProcMesh, Instance<()>, DialMai
             extent,
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Local,
         })
         .await
         .unwrap();
@@ -130,14 +135,15 @@ pub async fn local_proc_mesh(extent: Extent) -> (ProcMesh, Instance<()>, DialMai
 
 /// Create a host mesh using multiple processes running on the test machine.
 pub async fn host_mesh(extent: Extent) -> HostMesh {
-    let mut allocator = ProcessAllocator::new(Command::new(
-        buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
-    ));
+    let mut allocator = ProcessAllocator::new(Command::new(crate::testresource::get(
+        "monarch/hyperactor_mesh/bootstrap",
+    )));
     let alloc = allocator
         .allocate(AllocSpec {
             extent,
             constraints: Default::default(),
             proc_name: None,
+            transport: ChannelTransport::Unix,
         })
         .await
         .unwrap();
