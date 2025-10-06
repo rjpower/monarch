@@ -20,6 +20,7 @@ import threading
 import time
 import unittest
 import unittest.mock
+from tempfile import TemporaryDirectory
 from types import ModuleType
 from typing import cast, Dict, Tuple
 
@@ -65,6 +66,7 @@ from monarch._src.actor.v1.proc_mesh import ProcMesh as ProcMeshV1
 from monarch.actor import (
     Accumulator,
     Actor,
+    attach_to_workers,
     current_actor_name,
     current_rank,
     current_size,
