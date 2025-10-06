@@ -40,6 +40,7 @@ use hyperactor::channel::Tx;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
 use hyperactor::config::CONFIG_ENV_VAR;
+use hyperactor::config::global as config;
 use hyperactor::declare_attrs;
 use hyperactor::host;
 use hyperactor::host::Host;
@@ -212,7 +213,10 @@ pub enum Bootstrap {
         backend_addr: ChannelAddr,
         /// The callback address used to indicate successful spawning.
         callback_addr: ChannelAddr,
-        /// Config snapshot for the child.
+        /// Optional config snapshot (`hyperactor::config::Attrs`)
+        /// captured by the parent. If present, the child installs it
+        /// as the `Runtime` layer so the parent's effective config
+        /// takes precedence over Env/File/Defaults.
         config: Option<Attrs>,
     },
 
@@ -224,7 +228,10 @@ pub enum Bootstrap {
         /// If specified, use the provided command instead of
         /// [`BootstrapCommand::current`].
         command: Option<BootstrapCommand>,
-        /// Config snapshot for the child.
+        /// Optional config snapshot (`hyperactor::config::Attrs`)
+        /// captured by the parent. If present, the child installs it
+        /// as the `Runtime` layer so the parent’s effective config
+        /// takes precedence over Env/File/Defaults.
         config: Option<Attrs>,
     },
 
@@ -320,10 +327,9 @@ impl Bootstrap {
                 callback_addr,
                 config,
             } => {
-                if config.is_some() {
-                    tracing::debug!(
-                        "bootstrap: Proc received config snapshot (carried, not applied)"
-                    );
+                if let Some(attrs) = config {
+                    config::set(config::Source::Runtime, attrs);
+                    tracing::debug!("bootstrap: installed Runtime config snapshot (Proc)");
                 } else {
                     tracing::debug!("bootstrap: no config snapshot provided (Proc)");
                 }
@@ -353,10 +359,9 @@ impl Bootstrap {
                 command,
                 config,
             } => {
-                if config.is_some() {
-                    tracing::debug!(
-                        "bootstrap: Host received config snapshot (carried, not applied)"
-                    );
+                if let Some(attrs) = config {
+                    config::set(config::Source::Runtime, attrs);
+                    tracing::debug!("bootstrap: installed Runtime config snapshot (Host)");
                 } else {
                     tracing::debug!("bootstrap: no config snapshot provided (Host)");
                 }
@@ -396,11 +401,14 @@ impl Bootstrap {
 
 /// Install "kill me if parent dies" and close the race window.
 pub fn install_pdeathsig_kill() -> io::Result<()> {
-    // SAFETY: Calling into libc; does not dereference memory, just
-    // asks the kernel to deliver SIGKILL on parent death.
-    let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as c_int) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: Calling into libc; does not dereference memory, just
+        // asks the kernel to deliver SIGKILL on parent death.
+        let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as c_int) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
     // Race-close: if the parent died between our exec and prctl(),
     // we won't get a signal, so detect that and exit now.
@@ -1343,7 +1351,7 @@ impl BootstrapCommand {
     #[cfg(test)]
     pub(crate) fn test() -> Self {
         Self {
-            program: buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
+            program: crate::testresource::get("monarch/hyperactor_mesh/bootstrap"),
             arg0: None,
             args: vec![],
             env: HashMap::new(),
@@ -2548,7 +2556,7 @@ mod tests {
         let manager = BootstrapProcManager::new(command);
 
         // Spawn a fast-exiting child.
-        let mut cmd = Command::new("/bin/true");
+        let mut cmd = Command::new("true");
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
         let child = cmd.spawn().expect("spawn true");
 
@@ -3225,15 +3233,16 @@ mod tests {
         let (instance, _handle) = proc.instance("client").unwrap();
 
         // Configure a ProcessAllocator with the bootstrap binary.
-        let mut allocator = ProcessAllocator::new(Command::new(
-            buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
-        ));
+        let mut allocator = ProcessAllocator::new(Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        )));
         // Request a new allocation of procs from the ProcessAllocator.
         let alloc = allocator
             .allocate(AllocSpec {
                 extent: extent!(replicas = 1),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await
             .unwrap();
