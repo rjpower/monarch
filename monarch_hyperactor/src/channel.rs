@@ -10,8 +10,10 @@ use std::str::FromStr;
 
 use hyperactor::channel::ChannelAddr;
 use hyperactor::channel::ChannelTransport;
+use hyperactor::channel::MetaTlsAddr;
 use hyperactor::channel::TlsMode;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 /// Python binding for [`hyperactor::channel::ChannelTransport`]
@@ -28,6 +30,33 @@ pub enum PyChannelTransport {
     Local,
     Unix,
     // Sim(/*transport:*/ ChannelTransport), TODO kiuk@ add support
+}
+
+#[pymethods]
+impl PyChannelTransport {
+    fn get(&self) -> Self {
+        self.clone()
+    }
+}
+
+impl TryFrom<ChannelTransport> for PyChannelTransport {
+    type Error = PyErr;
+
+    fn try_from(transport: ChannelTransport) -> PyResult<Self> {
+        match transport {
+            ChannelTransport::Tcp => Ok(PyChannelTransport::Tcp),
+            ChannelTransport::MetaTls(TlsMode::Hostname) => {
+                Ok(PyChannelTransport::MetaTlsWithHostname)
+            }
+            ChannelTransport::MetaTls(TlsMode::IpV6) => Ok(PyChannelTransport::MetaTlsWithIpV6),
+            ChannelTransport::Local => Ok(PyChannelTransport::Local),
+            ChannelTransport::Unix => Ok(PyChannelTransport::Unix),
+            _ => Err(PyValueError::new_err(format!(
+                "unsupported transport: {}",
+                transport
+            ))),
+        }
+    }
 }
 
 #[pyclass(
@@ -66,8 +95,9 @@ impl PyChannelAddr {
     /// `0` for transports for which unix ports do not apply (e.g. `unix`, `local`)
     pub fn get_port(&self) -> PyResult<u16> {
         match self.inner {
-            ChannelAddr::Tcp(socket_addr) => Ok(socket_addr.port()),
-            ChannelAddr::MetaTls(_, port) => Ok(port),
+            ChannelAddr::Tcp(socket_addr)
+            | ChannelAddr::MetaTls(MetaTlsAddr::Socket(socket_addr)) => Ok(socket_addr.port()),
+            ChannelAddr::MetaTls(MetaTlsAddr::Host { port, .. }) => Ok(port),
             ChannelAddr::Unix(_) | ChannelAddr::Local(_) => Ok(0),
             _ => Err(PyRuntimeError::new_err(format!(
                 "unsupported transport: `{:?}` for channel address: `{}`",

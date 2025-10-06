@@ -146,7 +146,14 @@ impl<M: ProcManager> Host<M> {
 
         // Set up a system proc. This is often used to manage the host itself.
         let service_proc_id = ProcId::Direct(frontend_addr.clone(), "service".to_string());
-        let service_proc = Proc::new(service_proc_id, router.boxed());
+        let service_proc = Proc::new(service_proc_id.clone(), router.boxed());
+
+        tracing::info!(
+            frontend_addr = frontend_addr.to_string(),
+            backend_addr = backend_addr.to_string(),
+            service_proc_id = service_proc_id.to_string(),
+            "serving host"
+        );
 
         let host = Host {
             procs: HashMap::new(),
@@ -167,6 +174,11 @@ impl<M: ProcManager> Host<M> {
         let frontend_handle = router.serve(frontend_rx);
 
         Ok((host, frontend_handle))
+    }
+
+    /// The underlying proc manager.
+    pub fn manager(&self) -> &M {
+        &self.manager
     }
 
     /// The address which accepts messages destined for this host.
@@ -466,8 +478,11 @@ impl<M: ProcManager + BulkTerminate> Host<M> {
 /// Managers that do not support signaling must return `Unsupported`.
 #[async_trait]
 pub trait ProcHandle: Clone + Send + Sync + 'static {
-    /// The type of the agent actor installed in ths proc by the
-    /// manager.
+    /// The agent actor type installed in the proc by the manager.
+    /// Must implement both:
+    /// - [`Actor`], because the agent actually runs inside the proc,
+    ///   and
+    /// - [`RemoteActor`], so callers can hold `ActorRef<Self::Agent>`.
     type Agent: Actor + RemoteActor;
 
     /// The type of terminal status produced when the proc exits.
@@ -644,6 +659,9 @@ where
 /// `addr()`, `agent_ref()`) and implements `terminate()`/`kill()` by
 /// calling into the underlying `Proc::destroy_and_wait`, i.e.,
 /// **proc-level** shutdown.
+///
+/// **Type parameter:** `A` is constrained by the `ProcHandle::Agent`
+/// bound (`Actor + RemoteActor`).
 #[derive(Debug)]
 pub struct LocalHandle<A: Actor + RemoteActor> {
     proc_id: ProcId,
@@ -666,6 +684,8 @@ impl<A: Actor + RemoteActor> Clone for LocalHandle<A> {
 
 #[async_trait]
 impl<A: Actor + RemoteActor> ProcHandle for LocalHandle<A> {
+    /// `Agent = A` (inherits `Actor + RemoteActor` from the trait
+    /// bound).
     type Agent = A;
     type TerminalStatus = ();
 
@@ -737,6 +757,20 @@ impl<A: Actor + RemoteActor> ProcHandle for LocalHandle<A> {
     }
 }
 
+/// Local, in-process ProcManager.
+///
+/// **Type bounds:**
+/// - `A: Actor + RemoteActor + Binds<A>`
+///   - `Actor`: the agent actually runs inside the proc.
+///   - `RemoteActor`: callers hold `ActorRef<A>` to the agent; this
+///     bound is required for typed remote refs.
+///   - `Binds<A>`: lets the runtime wire the agent's message ports.
+/// - `F: Future<Output = anyhow::Result<ActorHandle<A>>> + Send`:
+///   the spawn closure returns a Send future (we `tokio::spawn` it).
+/// - `S: Fn(Proc) -> F + Sync`: the factory can be called from
+///   concurrent contexts.
+///
+/// Result handle is `LocalHandle<A>` (whose `Agent = A` via `ProcHandle`).
 #[async_trait]
 impl<A, S, F> ProcManager for LocalProcManager<S>
 where
@@ -847,6 +881,12 @@ impl<A> Drop for ProcessProcManager<A> {
 /// intentionally `Unsupported` here; process cleanup relies on
 /// `cmd.kill_on_drop(true)` when launching the child (the OS will
 /// SIGKILL it if the handle is dropped).
+///
+/// The type bound `A: Actor + RemoteActor` comes from the
+/// [`ProcHandle::Agent`] requirement: `Actor` because the agent
+/// actually runs inside the proc, and `RemoteActor` because it must
+/// be referenceable via [`ActorRef<A>`] (i.e., safe to carry as a
+/// typed remote reference).
 #[derive(Debug)]
 pub struct ProcessHandle<A: Actor + RemoteActor> {
     proc_id: ProcId,
@@ -867,6 +907,8 @@ impl<A: Actor + RemoteActor> Clone for ProcessHandle<A> {
 
 #[async_trait]
 impl<A: Actor + RemoteActor> ProcHandle for ProcessHandle<A> {
+    /// Agent must be both an `Actor` (runs in the proc) and a
+    /// `RemoteActor` (so it can be referenced via `ActorRef<A>`).
     type Agent = A;
     type TerminalStatus = ();
 
@@ -907,6 +949,8 @@ impl<A: Actor + RemoteActor> ProcHandle for ProcessHandle<A> {
 #[async_trait]
 impl<A> ProcManager for ProcessProcManager<A>
 where
+    // Agent actor runs in the proc (`Actor`) and must be
+    // referenceable (`RemoteActor`).
     A: Actor + RemoteActor,
 {
     type Handle = ProcessHandle<A>;
@@ -972,6 +1016,8 @@ where
 
 impl<A> ProcessProcManager<A>
 where
+    // `Actor`: runs in the proc; `RemoteActor`: referenceable via
+    // ActorRef; `Binds<A>`: wires ports.
     A: Actor + RemoteActor + Binds<A>,
 {
     /// Boot a process in a ProcessProcManager<A>. Should be called from processes spawned
@@ -1012,6 +1058,8 @@ pub async fn spawn_proc<A, S, F>(
     spawn: S,
 ) -> Result<Proc, HostError>
 where
+    // `Actor`: runs in the proc; `RemoteActor`: allows ActorRef<A>;
+    // `Binds<A>`: wires ports
     A: Actor + RemoteActor + Binds<A>,
     S: FnOnce(Proc) -> F,
     F: Future<Output = Result<ActorHandle<A>, anyhow::Error>>,
@@ -1146,6 +1194,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // TODO: OSS: called `Result::unwrap()` on an `Err` value: ReadFailed { manifest_path: "/meta-pytorch/monarch/target/debug/deps/hyperactor-0e1fe83af739d976.resources.json", source: Os { code: 2, kind: NotFound, message: "No such file or directory" } }
+    #[cfg_attr(not(feature = "fb"), ignore)]
     async fn test_process_proc_manager() {
         hyperactor_telemetry::initialize_logging(crate::clock::ClockKind::default());
 

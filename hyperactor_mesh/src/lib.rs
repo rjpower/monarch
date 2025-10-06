@@ -11,6 +11,8 @@
 #![feature(assert_matches)]
 #![feature(exit_status_error)]
 #![feature(impl_trait_in_bindings)]
+#![feature(get_disjoint_mut_helpers)]
+#![feature(exact_size_is_empty)]
 
 pub mod actor_mesh;
 pub mod alloc;
@@ -30,6 +32,7 @@ mod router;
 pub mod shared_cell;
 pub mod shortuuid;
 pub mod test_utils;
+mod testresource;
 pub mod v1;
 
 pub use actor_mesh::RootActorMesh;

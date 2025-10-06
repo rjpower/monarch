@@ -15,6 +15,7 @@ use std::future;
 use std::io;
 use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -39,6 +40,7 @@ use hyperactor::channel::Tx;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
 use hyperactor::config::CONFIG_ENV_VAR;
+use hyperactor::config::global as config;
 use hyperactor::declare_attrs;
 use hyperactor::host;
 use hyperactor::host::Host;
@@ -211,7 +213,10 @@ pub enum Bootstrap {
         backend_addr: ChannelAddr,
         /// The callback address used to indicate successful spawning.
         callback_addr: ChannelAddr,
-        /// Config snapshot for the child.
+        /// Optional config snapshot (`hyperactor::config::Attrs`)
+        /// captured by the parent. If present, the child installs it
+        /// as the `Runtime` layer so the parent's effective config
+        /// takes precedence over Env/File/Defaults.
         config: Option<Attrs>,
     },
 
@@ -220,8 +225,13 @@ pub enum Bootstrap {
     Host {
         /// The address on which to serve the host.
         addr: ChannelAddr,
-
-        /// Config snapshot for the child.
+        /// If specified, use the provided command instead of
+        /// [`BootstrapCommand::current`].
+        command: Option<BootstrapCommand>,
+        /// Optional config snapshot (`hyperactor::config::Attrs`)
+        /// captured by the parent. If present, the child installs it
+        /// as the `Runtime` layer so the parent’s effective config
+        /// takes precedence over Env/File/Defaults.
         config: Option<Attrs>,
     },
 
@@ -277,6 +287,13 @@ impl Bootstrap {
         if Debug::is_active() {
             let mut buf = Vec::new();
             writeln!(&mut buf, "bootstrapping {}:", std::process::id()).unwrap();
+            #[cfg(unix)]
+            writeln!(
+                &mut buf,
+                "\tparent pid: {}",
+                std::os::unix::process::parent_id()
+            )
+            .unwrap();
             writeln!(
                 &mut buf,
                 "\tconfig: {}",
@@ -296,6 +313,11 @@ impl Bootstrap {
                 writeln!(&mut buf, "\t\t{}={}", key, val).unwrap();
             }
             let _ = Debug.write(&buf);
+            if let Ok(s) = std::str::from_utf8(&buf) {
+                tracing::info!("{}", s);
+            } else {
+                tracing::info!("{:?}", buf);
+            }
         }
 
         match self {
@@ -305,10 +327,9 @@ impl Bootstrap {
                 callback_addr,
                 config,
             } => {
-                if config.is_some() {
-                    tracing::debug!(
-                        "bootstrap: Proc received config snapshot (carried, not applied)"
-                    );
+                if let Some(attrs) = config {
+                    config::set(config::Source::Runtime, attrs);
+                    tracing::debug!("bootstrap: installed Runtime config snapshot (Proc)");
                 } else {
                     tracing::debug!("bootstrap: no config snapshot provided (Proc)");
                 }
@@ -333,16 +354,22 @@ impl Bootstrap {
                     Err(e) => e.into(),
                 }
             }
-            Bootstrap::Host { addr, config } => {
-                if config.is_some() {
-                    tracing::debug!(
-                        "bootstrap: Host received config snapshot (carried, not applied)"
-                    );
+            Bootstrap::Host {
+                addr,
+                command,
+                config,
+            } => {
+                if let Some(attrs) = config {
+                    config::set(config::Source::Runtime, attrs);
+                    tracing::debug!("bootstrap: installed Runtime config snapshot (Host)");
                 } else {
                     tracing::debug!("bootstrap: no config snapshot provided (Host)");
                 }
 
-                let command = ok!(BootstrapCommand::current());
+                let command = match command {
+                    Some(command) => command,
+                    None => ok!(BootstrapCommand::current()),
+                };
                 let manager = BootstrapProcManager::new(command);
                 let (host, _handle) = ok!(Host::serve(manager, addr).await);
                 let addr = host.addr().clone();
@@ -374,11 +401,14 @@ impl Bootstrap {
 
 /// Install "kill me if parent dies" and close the race window.
 pub fn install_pdeathsig_kill() -> io::Result<()> {
-    // SAFETY: Calling into libc; does not dereference memory, just
-    // asks the kernel to deliver SIGKILL on parent death.
-    let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as c_int) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: Calling into libc; does not dereference memory, just
+        // asks the kernel to deliver SIGKILL on parent death.
+        let rc = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as c_int) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
     // Race-close: if the parent died between our exec and prctl(),
     // we won't get a signal, so detect that and exit now.
@@ -406,7 +436,7 @@ pub fn install_pdeathsig_kill() -> io::Result<()> {
 /// In short:
 /// - `ProcState`/`ProcStopReason`: historical / event-driven model
 /// - `ProcStatus`: immediate status surface for lifecycle control
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProcStatus {
     /// The OS process has been spawned but is not yet fully running.
     /// (Process-level: child handle exists, no confirmation yet.)
@@ -415,7 +445,7 @@ pub enum ProcStatus {
     /// (Process-level: `pid` is known; Proc-level: bootstrap
     /// may still be running.)
     Running { pid: u32, started_at: SystemTime },
-    /// Ready means boostrap has completed and the proc is serving.
+    /// Ready means bootstrap has completed and the proc is serving.
     /// (Process-level: `pid` is known; Proc-level: bootstrap
     /// completed.)
     Ready {
@@ -1289,9 +1319,9 @@ impl hyperactor::host::ProcHandle for BootstrapProcHandle {
 }
 
 /// A specification of the command used to bootstrap procs.
-#[derive(Debug, Named, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Named, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct BootstrapCommand {
-    pub program: std::path::PathBuf,
+    pub program: PathBuf,
     pub arg0: Option<String>,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
@@ -1321,7 +1351,19 @@ impl BootstrapCommand {
     #[cfg(test)]
     pub(crate) fn test() -> Self {
         Self {
-            program: buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
+            program: crate::testresource::get("monarch/hyperactor_mesh/bootstrap"),
+            arg0: None,
+            args: vec![],
+            env: HashMap::new(),
+        }
+    }
+}
+
+impl<T: Into<PathBuf>> From<T> for BootstrapCommand {
+    /// Creates a bootstrap command from the provided path.
+    fn from(s: T) -> Self {
+        Self {
+            program: s.into(),
             arg0: None,
             args: vec![],
             env: HashMap::new(),
@@ -1418,10 +1460,15 @@ impl BootstrapProcManager {
         }
     }
 
+    /// The bootstrap command used to launch processes.
+    pub fn command(&self) -> &BootstrapCommand {
+        &self.command
+    }
+
     /// Return the current [`ProcStatus`] for the given [`ProcId`], if
     /// the proc is known to this manager.
     ///
-    /// This queries the live [`BootstrapProcHandle`] stored in the
+    /// This querprocies the live [`BootstrapProcHandle`] stored in the
     /// manager's internal map. It provides an immediate snapshot of
     /// lifecycle state (`Starting`, `Running`, `Stopping`, `Stopped`,
     /// etc.).
@@ -1938,22 +1985,38 @@ fn debug_sink() -> &'static Mutex<DebugSink> {
     })
 }
 
+/// If true, send `Debug` messages to stderr.
+const DEBUG_TO_STDERR: bool = false;
+
 /// A bootstrap specific debug writer. If the file /tmp/monarch-bootstrap-debug.log
 /// exists, then the writer's destination is that file; otherwise it discards all writes.
 struct Debug;
 
 impl Debug {
     fn is_active() -> bool {
-        debug_sink().lock().unwrap().is_file()
+        DEBUG_TO_STDERR || debug_sink().lock().unwrap().is_file()
     }
 }
 
 impl Write for Debug {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        debug_sink().lock().unwrap().write(buf)
+        let res = debug_sink().lock().unwrap().write(buf);
+        if DEBUG_TO_STDERR {
+            let n = match res {
+                Ok(n) => n,
+                Err(_) => buf.len(),
+            };
+            let _ = io::stderr().write_all(&buf[..n]);
+        }
+
+        res
     }
     fn flush(&mut self) -> io::Result<()> {
-        debug_sink().lock().unwrap().flush()
+        let res = debug_sink().lock().unwrap().flush();
+        if DEBUG_TO_STDERR {
+            let _ = io::stderr().flush();
+        }
+        res
     }
 }
 
@@ -2026,6 +2089,7 @@ mod tests {
     fn test_bootstrap_mode_env_string_none_config_host() {
         let value = Bootstrap::Host {
             addr: ChannelAddr::any(ChannelTransport::Unix),
+            command: None,
             config: None,
         };
 
@@ -2080,6 +2144,7 @@ mod tests {
         {
             let original = Bootstrap::Host {
                 addr: ChannelAddr::any(ChannelTransport::Unix),
+                command: None,
                 config: Some(attrs.clone()),
             };
             let env_str = original.to_env_safe_string().expect("encode bootstrap");
@@ -2491,7 +2556,7 @@ mod tests {
         let manager = BootstrapProcManager::new(command);
 
         // Spawn a fast-exiting child.
-        let mut cmd = Command::new("/bin/true");
+        let mut cmd = Command::new("true");
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
         let child = cmd.spawn().expect("spawn true");
 
@@ -3168,15 +3233,16 @@ mod tests {
         let (instance, _handle) = proc.instance("client").unwrap();
 
         // Configure a ProcessAllocator with the bootstrap binary.
-        let mut allocator = ProcessAllocator::new(Command::new(
-            buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap(),
-        ));
+        let mut allocator = ProcessAllocator::new(Command::new(crate::testresource::get(
+            "monarch/hyperactor_mesh/bootstrap",
+        )));
         // Request a new allocation of procs from the ProcessAllocator.
         let alloc = allocator
             .allocate(AllocSpec {
                 extent: extent!(replicas = 1),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await
             .unwrap();

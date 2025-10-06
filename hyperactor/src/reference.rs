@@ -47,6 +47,7 @@ use crate::ActorHandle;
 use crate::Named;
 use crate::RemoteHandles;
 use crate::RemoteMessage;
+use crate::accum::ReducerOpts;
 use crate::accum::ReducerSpec;
 use crate::actor::RemoteActor;
 use crate::attrs::Attrs;
@@ -70,9 +71,6 @@ use parse::Lexer;
 use parse::ParseError;
 use parse::Token;
 use parse::parse;
-
-use crate::proc::SEQ_INFO;
-use crate::proc::SeqInfo;
 
 /// A universal reference to hierarchical identifiers in Hyperactor.
 ///
@@ -722,7 +720,7 @@ impl<A: RemoteActor> ActorRef<A> {
     /// Send an [`M`]-typed message to the referenced actor.
     pub fn send<M: RemoteMessage>(
         &self,
-        cx: &impl context::Mailbox,
+        cx: &impl context::Actor,
         message: M,
     ) -> Result<(), MailboxSenderError>
     where
@@ -735,7 +733,7 @@ impl<A: RemoteActor> ActorRef<A> {
     /// headers.
     pub fn send_with_headers<M: RemoteMessage>(
         &self,
-        cx: &impl context::Mailbox,
+        cx: &impl context::Actor,
         headers: Attrs,
         message: M,
     ) -> Result<(), MailboxSenderError>
@@ -882,7 +880,7 @@ impl PortId {
     /// Send a serialized message to this port, provided a sending capability,
     /// such as [`crate::actor::Instance`]. It is the sender's responsibility
     /// to ensure that the provided message is well-typed.
-    pub fn send(&self, cx: &impl context::Mailbox, serialized: Serialized) {
+    pub fn send(&self, cx: &impl context::Actor, serialized: Serialized) {
         let mut headers = Attrs::new();
         crate::mailbox::headers::set_send_timestamp(&mut headers);
         cx.post(self.clone(), headers, serialized);
@@ -893,7 +891,7 @@ impl PortId {
     /// It is the sender's responsibility to ensure that the provided message is well-typed.
     pub fn send_with_headers(
         &self,
-        cx: &impl context::Mailbox,
+        cx: &impl context::Actor,
         serialized: Serialized,
         mut headers: Attrs,
     ) {
@@ -907,8 +905,9 @@ impl PortId {
         &self,
         cx: &impl context::Mailbox,
         reducer_spec: Option<ReducerSpec>,
+        reducer_opts: Option<ReducerOpts>,
     ) -> anyhow::Result<PortId> {
-        cx.split(self.clone(), reducer_spec)
+        cx.split(self.clone(), reducer_spec, reducer_opts)
     }
 }
 
@@ -949,6 +948,13 @@ pub struct PortRef<M> {
         Hash = "ignore"
     )]
     reducer_spec: Option<ReducerSpec>,
+    #[derivative(
+        PartialEq = "ignore",
+        PartialOrd = "ignore",
+        Ord = "ignore",
+        Hash = "ignore"
+    )]
+    reducer_opts: Option<ReducerOpts>,
     phantom: PhantomData<M>,
 }
 
@@ -959,6 +965,7 @@ impl<M: RemoteMessage> PortRef<M> {
         Self {
             port_id,
             reducer_spec: None,
+            reducer_opts: None,
             phantom: PhantomData,
         }
     }
@@ -969,6 +976,7 @@ impl<M: RemoteMessage> PortRef<M> {
         Self {
             port_id,
             reducer_spec,
+            reducer_opts: None, // TODO: provide attest_reducible_opts
             phantom: PhantomData,
         }
     }
@@ -1003,7 +1011,7 @@ impl<M: RemoteMessage> PortRef<M> {
 
     /// Send a message to this port, provided a sending capability, such as
     /// [`crate::actor::Instance`].
-    pub fn send(&self, cx: &impl context::Mailbox, message: M) -> Result<(), MailboxSenderError> {
+    pub fn send(&self, cx: &impl context::Actor, message: M) -> Result<(), MailboxSenderError> {
         self.send_with_headers(cx, Attrs::new(), message)
     }
 
@@ -1012,7 +1020,7 @@ impl<M: RemoteMessage> PortRef<M> {
     /// headers.
     pub fn send_with_headers(
         &self,
-        cx: &impl context::Mailbox,
+        cx: &impl context::Actor,
         headers: Attrs,
         message: M,
     ) -> Result<(), MailboxSenderError> {
@@ -1022,7 +1030,7 @@ impl<M: RemoteMessage> PortRef<M> {
                 MailboxSenderErrorKind::Serialize(err.into()),
             )
         })?;
-        self.send_serialized(cx, serialized, headers);
+        self.send_serialized(cx, headers, serialized);
         Ok(())
     }
 
@@ -1030,16 +1038,16 @@ impl<M: RemoteMessage> PortRef<M> {
     /// [`crate::actor::Instance`].
     pub fn send_serialized(
         &self,
-        cx: &impl context::Mailbox,
-        message: Serialized,
+        cx: &impl context::Actor,
         mut headers: Attrs,
+        message: Serialized,
     ) {
         crate::mailbox::headers::set_send_timestamp(&mut headers);
         cx.post(self.port_id.clone(), headers, message);
     }
 
     /// Convert this port into a sink that can be used to send messages using the given capability.
-    pub fn into_sink<C: context::Mailbox>(self, cx: C) -> PortSink<C, M> {
+    pub fn into_sink<C: context::Actor>(self, cx: C) -> PortSink<C, M> {
         PortSink::new(cx, self)
     }
 }
@@ -1049,6 +1057,7 @@ impl<M: RemoteMessage> Clone for PortRef<M> {
         Self {
             port_id: self.port_id.clone(),
             reducer_spec: self.reducer_spec.clone(),
+            reducer_opts: self.reducer_opts.clone(),
             phantom: PhantomData,
         }
     }
@@ -1062,7 +1071,7 @@ impl<M: RemoteMessage> fmt::Display for PortRef<M> {
 
 /// The parameters extracted from [`PortRef`] to [`Bindings`].
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Named)]
-pub struct UnboundPort(pub PortId, pub Option<ReducerSpec>);
+pub struct UnboundPort(pub PortId, pub Option<ReducerSpec>, pub Option<ReducerOpts>);
 
 impl UnboundPort {
     /// Update the port id of this binding.
@@ -1073,7 +1082,11 @@ impl UnboundPort {
 
 impl<M: RemoteMessage> From<&PortRef<M>> for UnboundPort {
     fn from(port_ref: &PortRef<M>) -> Self {
-        UnboundPort(port_ref.port_id.clone(), port_ref.reducer_spec.clone())
+        UnboundPort(
+            port_ref.port_id.clone(),
+            port_ref.reducer_spec.clone(),
+            port_ref.reducer_opts.clone(),
+        )
     }
 }
 
@@ -1088,6 +1101,7 @@ impl<M: RemoteMessage> Bind for PortRef<M> {
         let bound = bindings.try_pop_front::<UnboundPort>()?;
         self.port_id = bound.0;
         self.reducer_spec = bound.1;
+        self.reducer_opts = bound.2;
         Ok(())
     }
 }
@@ -1121,7 +1135,7 @@ impl<M: RemoteMessage> OncePortRef<M> {
 
     /// Send a message to this port, provided a sending capability, such as
     /// [`crate::actor::Instance`].
-    pub fn send(self, cx: &impl context::Mailbox, message: M) -> Result<(), MailboxSenderError> {
+    pub fn send(self, cx: &impl context::Actor, message: M) -> Result<(), MailboxSenderError> {
         self.send_with_headers(cx, Attrs::new(), message)
     }
 
@@ -1129,7 +1143,7 @@ impl<M: RemoteMessage> OncePortRef<M> {
     /// [`crate::actor::Instance`]. Additional context can be provided in the form of headers.
     pub fn send_with_headers(
         self,
-        cx: &impl context::Mailbox,
+        cx: &impl context::Actor,
         mut headers: Attrs,
         message: M,
     ) -> Result<(), MailboxSenderError> {
