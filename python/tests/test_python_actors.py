@@ -48,7 +48,11 @@ from monarch._src.actor.host_mesh import (
     fake_in_process_host,
     HostMesh,
 )
-from monarch._src.actor.proc_mesh import _get_bootstrap_args, ProcMesh
+from monarch._src.actor.proc_mesh import (
+    _get_bootstrap_args,
+    get_or_spawn_controller,
+    ProcMesh,
+)
 from monarch._src.actor.v1.host_mesh import (
     _bootstrap_cmd,
     fake_in_process_host as fake_in_process_host_v1,
@@ -1509,13 +1513,27 @@ def test_select_result() -> None:
     b = PythonTask.spawn_blocking(lambda: s(0))
     r = PythonTask.select_one([a.task(), b.task()]).block_on()
     assert r == (0, 1)
+    # FIXME: Sleep for 6 seconds to ensure that task `a` completes
+    # before the test exits. Otherwise we get a SIGABRT.
+    time.sleep(6)
+
+
+class SleepActor(Actor):
+    @endpoint
+    async def sleep(self, t: float) -> None:
+        await asyncio.sleep(t)
 
 
 @pytest.mark.parametrize("v1", [True, False])
 def test_mesh_len(v1: bool):
     proc_mesh = spawn_procs_on_fake_host(v1, {"gpus": 12})
-    s = proc_mesh.spawn("sync_actor", SyncActor)
+    s = proc_mesh.spawn("sleep_actor", SleepActor)
     assert 12 == len(s)
+    # FIXME: Actually figure out what's going on here.
+    # Call an endpoint on the actor before the test
+    # exits. Otherwise we might get a fatal PyGILState_Release
+    # error.
+    s.sleep.call(1).get()
 
 
 class UndeliverableMessageReceiver(Actor):
@@ -1536,14 +1554,14 @@ class UndeliverableMessageReceiver(Actor):
 class UndeliverableMessageSender(Actor):
     @endpoint
     def send_undeliverable(self) -> None:
-        mailbox = context().actor_instance._mailbox
+        actor_instance = context().actor_instance
         port_id = PortId(
             actor_id=ActorId(world_name="bogus", rank=0, actor_name="bogus"),
             port=1234,
         )
         port_ref = PortRef(port_id)
         port_ref.send(
-            mailbox,
+            actor_instance._as_rust(),
             PythonMessage(PythonMessageKind.Result(None), b"123"),
         )
 
@@ -1640,3 +1658,25 @@ def test_cuda_is_not_initialized_in_a_new_proc():
         pytest.skip("cannot find cuda")
     proc = this_host().spawn_procs().spawn("is_init", IsInit)
     assert not proc.is_cuda_initialized.call_one().get()
+
+
+class SpawningActorFromEndpointActor(Actor):
+    def __init__(self, root="None"):
+        self._root = root
+
+    @endpoint
+    def return_root(self):
+        return self._root
+
+    @endpoint
+    async def spawning_from_endpoint(self, name, root) -> None:
+        await get_or_spawn_controller(name, SpawningActorFromEndpointActor, root=root)
+
+
+@pytest.mark.timeout(60)
+def test_get_or_spawn_controller_inside_actor_endpoint():
+    actor_1 = get_or_spawn_controller("actor_1", SpawningActorFromEndpointActor).get()
+    actor_1.spawning_from_endpoint.call_one("actor_2", root="actor_1").get()
+    actor_2 = get_or_spawn_controller("actor_2", SpawningActorFromEndpointActor).get()
+    # verify that actor_2 was spawned from actor_1 with the correct root
+    assert actor_2.return_root.call_one().get() == "actor_1"

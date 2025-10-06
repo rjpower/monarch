@@ -47,6 +47,7 @@ use crate::proc_mesh::mesh_agent::MeshAgentMessageClient;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::proc_mesh::mesh_agent::ReconfigurableMailboxSender;
 use crate::resource;
+use crate::resource::RankedValues;
 use crate::v1;
 use crate::v1::ActorMesh;
 use crate::v1::ActorMeshRef;
@@ -141,6 +142,8 @@ impl ProcRef {
         self.proc_id.actor_id(name.to_string(), 0)
     }
 
+    /// Generic bound: `A: RemoteActor` - required because we return
+    /// an `ActorRef<A>`.
     pub(crate) fn attest<A: RemoteActor>(&self, name: &Name) -> ActorRef<A> {
         ActorRef::attest(self.actor_id(name))
     }
@@ -184,11 +187,11 @@ impl ProcMesh {
             region,
             ranks,
             None, // this is the root mesh
-            root_comm_actor,
+            None, // comm actor is not alive yet
         )
         .unwrap();
 
-        let proc_mesh = Self {
+        let mut proc_mesh = Self {
             name,
             allocation,
             comm_actor_name: comm_actor_name.clone(),
@@ -196,6 +199,8 @@ impl ProcMesh {
         };
 
         if let Some(comm_actor_name) = comm_actor_name {
+            // CommActor satisfies `Actor + RemoteActor`, so it can be
+            // spawned and safely referenced via ActorRef<CommActor>.
             let comm_actor_mesh = proc_mesh
                 .spawn_with_name::<CommActor>(cx, comm_actor_name, &Default::default())
                 .await?;
@@ -210,7 +215,11 @@ impl ProcMesh {
                     .send(cx, CommActorMode::Mesh(*rank, address_book.clone()))
                     .map_err(|e| Error::SendingError(comm_actor.actor_id().clone(), Box::new(e)))?
             }
+
+            // The comm actor is now set up and ready to go.
+            proc_mesh.current_ref.root_comm_actor = root_comm_actor;
         }
+
         Ok(proc_mesh)
     }
 
@@ -521,7 +530,15 @@ impl ProcMeshRef {
         Ok(vm)
     }
 
-    /// Spawn an actor on all of the procs in this mesh, returning a new ActorMesh.
+    /// Spawn an actor on all of the procs in this mesh, returning a
+    /// new ActorMesh.
+    ///
+    /// Bounds:
+    /// - `A: Actor` - the actor actually runs inside each proc.
+    /// - `A: RemoteActor` - so we can return typed `ActorRef<A>`s
+    ///   inside the `ActorMesh`.
+    /// - `A::Params: RemoteMessage` - spawn parameters must be
+    ///   serializable and routable.
     pub async fn spawn<A: Actor + RemoteActor>(
         &self,
         cx: &impl context::Actor,
@@ -534,7 +551,20 @@ impl ProcMeshRef {
         self.spawn_with_name(cx, Name::new(name), params).await
     }
 
-    pub async fn spawn_with_name<A: Actor + RemoteActor>(
+    /// Spawn an actor on all procs in this mesh under the given
+    /// [`Name`], returning a new `ActorMesh`.
+    ///
+    /// This is the underlying implementation used by [`spawn`]; it
+    /// differs only in that the actor name is passed explicitly
+    /// rather than as a `&str`.
+    ///
+    /// Bounds:
+    /// - `A: Actor` - the actor actually runs inside each proc.
+    /// - `A: RemoteActor` - so we can return typed `ActorRef<A>`s
+    ///   inside the `ActorMesh`.
+    /// - `A::Params: RemoteMessage` — spawn parameters must be
+    ///   serializable and routable.
+    pub(crate) async fn spawn_with_name<A: Actor + RemoteActor>(
         &self,
         cx: &impl context::Actor,
         name: Name,
@@ -544,6 +574,8 @@ impl ProcMeshRef {
         A::Params: RemoteMessage,
     {
         let remote = Remote::collect();
+        // `RemoteActor` ensures the type `A` is registered with
+        // `Remote`.
         let actor_type = remote
             .name_of::<A>()
             .ok_or(Error::ActorTypeNotRegistered(type_name::<A>().to_string()))?
@@ -551,58 +583,52 @@ impl ProcMeshRef {
 
         let serialized_params = bincode::serialize(params)?;
 
-        let (completed_handle, mut completed_receiver) = cx.mailbox().open_port();
-        for (rank, proc_ref) in self.ranks.iter().enumerate() {
-            proc_ref
-                .agent
-                .send(
-                    cx,
-                    resource::CreateOrUpdate::<mesh_agent::ActorSpec> {
-                        name: name.clone(),
-                        spec: mesh_agent::ActorSpec {
-                            actor_type: actor_type.clone(),
-                            params_data: serialized_params.clone(),
-                        },
-                        reply: completed_handle.contramap(move |ok| (rank, ok)).bind(),
-                    },
-                )
-                .map_err(|e| Error::SendingError(proc_ref.agent.actor_id().clone(), Box::new(e)))?;
-        }
+        self.agent_mesh().cast(
+            cx,
+            resource::CreateOrUpdate::<mesh_agent::ActorSpec> {
+                name: name.clone(),
+                rank: Default::default(),
+                spec: mesh_agent::ActorSpec {
+                    actor_type: actor_type.clone(),
+                    params_data: serialized_params.clone(),
+                },
+            },
+        )?;
 
-        let mut completed = Ranks::new(self.ranks.len());
-        while !completed.is_full() {
-            let (rank, ok) = completed_receiver.recv().await?;
-            if rank >= self.ranks.len() {
-                tracing::error!("ignoring invalid rank {}", rank);
-                continue;
+        let (port, mut rx) = cx.mailbox().open_accum_port(RankedValues::default());
+
+        self.agent_mesh().cast(
+            cx,
+            resource::GetRankStatus {
+                name: name.clone(),
+                reply: port.bind(),
+            },
+        )?;
+
+        // Wait for everyone to report back.
+        // TODO: move out of critical path
+        let statuses = loop {
+            let statuses = rx.recv().await?;
+            if statuses.rank(self.ranks.len()) == self.ranks.len() {
+                break statuses;
             }
+        };
 
-            if completed.insert(rank, (rank, ok)).is_some() {
-                tracing::error!("multiple completions received for rank {}", rank);
-            }
-        }
-
-        // TODO: at this point, we know that non-failed ranks have been created.
-        // This is good enough for mailbox setup: the actors are now routable.
-        //
-        // However, we should retrieve detailed failure information from failed spawns.
-
-        let failed: Vec<_> = completed
-            .into_iter()
-            .filter_map(|rank| {
-                if let Some((rank, ok)) = rank
-                    && !ok
-                {
-                    Some(rank)
+        let failed: Vec<_> = statuses
+            .iter()
+            .filter_map(|(ranks, status)| {
+                if status.is_terminating() {
+                    Some(ranks.clone())
                 } else {
                     None
                 }
             })
+            .flatten()
             .collect();
         if !failed.is_empty() {
             return Err(Error::GspawnError(
                 name,
-                format!("failed ranks: {:?}", failed),
+                format!("failed ranks: {:?}", failed,),
             ));
         }
 
@@ -644,10 +670,13 @@ impl view::RankedSliceable for ProcMeshRef {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use ndslice::ViewExt;
     use ndslice::extent;
     use timed_test::async_timed_test;
 
+    use crate::v1;
     use crate::v1::testactor;
     use crate::v1::testing;
 
@@ -682,6 +711,21 @@ mod tests {
         for proc_mesh in testing::proc_meshes(&instance, extent!(replicas = 4, hosts = 2)).await {
             testactor::assert_mesh_shape(proc_mesh.spawn(instance, "test", &()).await.unwrap())
                 .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_failing_spawn_actor() {
+        hyperactor_telemetry::initialize_logging(hyperactor::clock::ClockKind::default());
+
+        let instance = testing::instance().await;
+
+        for proc_mesh in testing::proc_meshes(&instance, extent!(replicas = 4, hosts = 2)).await {
+            let err = proc_mesh
+                .spawn::<testactor::FailingCreateTestActor>(instance, "testfail", &())
+                .await
+                .unwrap_err();
+            assert_matches!(err, v1::Error::GspawnError(_, _))
         }
     }
 }

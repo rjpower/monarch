@@ -92,6 +92,12 @@ impl Allocator for ProcessAllocator {
         let (bootstrap_addr, rx) = channel::serve(ChannelAddr::any(ChannelTransport::Unix))
             .map_err(anyhow::Error::from)?;
 
+        if spec.transport == ChannelTransport::Local {
+            return Err(AllocatorError::Other(anyhow::anyhow!(
+                "ProcessAllocator does not support local transport"
+            )));
+        }
+
         let name = ShortUuid::generate();
         Ok(ProcessAlloc {
             name: name.clone(),
@@ -566,10 +572,6 @@ impl Alloc for ProcessAlloc {
         &self.world_id
     }
 
-    fn transport(&self) -> ChannelTransport {
-        ChannelTransport::Unix
-    }
-
     async fn stop(&mut self) -> Result<(), AllocatorError> {
         // We rely on the teardown here, and that the process should
         // exit on its own. We should have a hard timeout here as well,
@@ -601,12 +603,12 @@ mod tests {
 
     #[cfg(fbcode_build)] // we use an external binary, produced by buck
     crate::alloc_test_suite!(ProcessAllocator::new(Command::new(
-        buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap()
+        crate::testresource::get("monarch/hyperactor_mesh/bootstrap")
     )));
 
     #[tokio::test]
     async fn test_sigterm_on_group_fail() {
-        let bootstrap_binary = buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap();
+        let bootstrap_binary = crate::testresource::get("monarch/hyperactor_mesh/bootstrap");
         let mut allocator = ProcessAllocator::new(Command::new(bootstrap_binary));
 
         let mut alloc = allocator
@@ -614,6 +616,7 @@ mod tests {
                 extent: ndslice::extent!(replica = 1),
                 constraints: Default::default(),
                 proc_name: None,
+                transport: ChannelTransport::Unix,
             })
             .await
             .unwrap();
