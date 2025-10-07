@@ -782,9 +782,9 @@ mod tests {
         let params = TestActorParams {
             forward_port: tx.bind(),
         };
-        let actor_mesh = proc_mesh
-            .clone()
-            .spawn::<TestActor>(dest_actor_name, &params)
+        let instance = crate::v1::testing::instance().await;
+        let actor_mesh = Arc::clone(&proc_mesh)
+            .spawn::<TestActor>(&instance, dest_actor_name, &params)
             .await
             .unwrap();
 
@@ -887,7 +887,7 @@ mod tests {
         // Reply from each dest actor. The replies should be received by client.
         {
             for (dest_actor, (reply_to1, reply_to2)) in
-                actor_mesh.ranks.iter().zip(reply_tos.iter())
+                actor_mesh.ranks().iter().zip(reply_tos.iter())
             {
                 let rank = dest_actor.actor_id().rank() as u64;
                 reply_to1.send(proc_mesh_client, rank).unwrap();
@@ -911,7 +911,7 @@ mod tests {
             let n = 100;
             let mut expected2: HashMap<usize, Vec<MyReply>> = hashmap! {};
             for (dest_actor, (_reply_to1, reply_to2)) in
-                actor_mesh.ranks.iter().zip(reply_tos.iter())
+                actor_mesh.ranks().iter().zip(reply_tos.iter())
             {
                 let rank = dest_actor.actor_id().rank();
                 let mut sent2 = vec![];
@@ -932,7 +932,7 @@ mod tests {
 
             let mut received2: HashMap<usize, Vec<MyReply>> = hashmap! {};
 
-            for _ in 0..(n * actor_mesh.ranks.len()) {
+            for _ in 0..(n * actor_mesh.ranks().len()) {
                 let my_reply = reply2_rx.recv().await.unwrap();
                 received2
                     .entry(my_reply.sender.rank())
@@ -983,7 +983,7 @@ mod tests {
             let mut sum = 0;
             let n = 100;
             for (dest_actor, (reply_to1, _reply_to2)) in
-                actor_mesh.ranks.iter().zip(reply_tos.iter())
+                actor_mesh.ranks().iter().zip(reply_tos.iter())
             {
                 let rank = dest_actor.actor_id().rank();
                 for i in 0..n {

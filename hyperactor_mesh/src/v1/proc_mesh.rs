@@ -153,6 +153,10 @@ impl ProcRef {
         }
     }
 
+    pub(crate) fn proc_id(&self) -> &ProcId {
+        &self.proc_id
+    }
+
     pub(crate) fn actor_id(&self, name: &Name) -> ActorId {
         self.proc_id.actor_id(name.to_string(), 0)
     }
@@ -165,7 +169,6 @@ impl ProcRef {
 }
 
 /// A mesh of processes.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ProcMesh {
     name: Name,
@@ -370,6 +373,11 @@ impl ProcMesh {
         )
         .await
     }
+
+    /// Detach the proc mesh from the lifetime of `self`, and return its reference.
+    pub(crate) fn detach(self) -> ProcMeshRef {
+        self.current_ref
+    }
 }
 
 impl Deref for ProcMesh {
@@ -491,6 +499,10 @@ impl ProcMeshRef {
         self.root_comm_actor.as_ref()
     }
 
+    pub(crate) fn name(&self) -> &Name {
+        &self.name
+    }
+
     /// The current statuses of procs in this mesh.
     pub async fn status(&self, cx: &impl context::Actor) -> v1::Result<ValueMesh<bool>> {
         let vm: ValueMesh<_> = self.map_into(|proc_ref| {
@@ -500,7 +512,7 @@ impl ProcMeshRef {
         vm.join().await.transpose()
     }
 
-    fn agent_mesh(&self) -> ActorMeshRef<ProcMeshAgent> {
+    pub(crate) fn agent_mesh(&self) -> ActorMeshRef<ProcMeshAgent> {
         let agent_name = self.ranks.first().unwrap().agent.actor_id().name();
         // This name must match the ProcMeshAgent name, which can change depending on the allocator.
         ActorMeshRef::new(Name::new_reserved(agent_name), self.clone())
