@@ -989,7 +989,7 @@ mod tests {
             _cx: &Context<Self>,
             message: String,
         ) -> Result<(), anyhow::Error> {
-            let mut behavior = self.0.lock().unwrap();
+            let mut vals = self.0.lock().unwrap();
             vals.1 = message;
             Ok(())
         }
