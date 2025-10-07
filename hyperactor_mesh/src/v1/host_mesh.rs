@@ -511,23 +511,11 @@ impl HostMeshRef {
             )));
         }
 
-        let labels = self
-            .region
-            .labels()
-            .to_vec()
-            .into_iter()
-            .chain(per_host.labels().to_vec().into_iter())
-            .collect();
-        let sizes = self
+        let extent = self
             .region
             .extent()
-            .sizes()
-            .to_vec()
-            .into_iter()
-            .chain(per_host.sizes().to_vec().into_iter())
-            .collect();
-        let extent =
-            Extent::new(labels, sizes).map_err(|err| v1::Error::ConfigurationError(err.into()))?;
+            .concat(&per_host)
+            .map_err(|err| v1::Error::ConfigurationError(err.into()))?;
 
         let mesh_name = Name::new(name);
         let mut procs = Vec::new();
@@ -831,7 +819,7 @@ mod tests {
         let config = hyperactor::config::global::lock();
         let _guard = config.override_key(crate::bootstrap::MESH_BOOTSTRAP_ENABLE_PDEATHSIG, false);
 
-        let program = buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap();
+        let program = crate::testresource::get("monarch/hyperactor_mesh/bootstrap");
 
         let hosts = vec![free_localhost_addr(), free_localhost_addr()];
 
