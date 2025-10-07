@@ -229,13 +229,24 @@ pub fn get<T: AttrValue + Copy>(key: Key<T>) -> T {
 /// Default. Panics if the key has no default and is not set in
 /// any layer.
 pub fn get_cloned<T: AttrValue>(key: Key<T>) -> T {
+    try_get_cloned(key)
+        .expect("key must have a default")
+        .clone()
+}
+
+/// Try to get a key by cloning the value.
+///
+/// Resolution order: TestOverride -> Runtime -> Env -> File ->
+/// Default. Returns None if the key has no default and is not set in
+/// any layer.
+pub fn try_get_cloned<T: AttrValue>(key: Key<T>) -> Option<T> {
     let layers = LAYERS.read().unwrap();
     for layer in &layers.ordered {
         if layer.attrs.contains_key(key) {
-            return layer.attrs.get(key).unwrap().clone();
+            return layer.attrs.get(key).cloned();
         }
     }
-    key.default().expect("key must have a default").clone()
+    key.default().cloned()
 }
 
 /// Insert or replace a configuration layer for the given source.
@@ -342,7 +353,7 @@ fn test_override_index(layers: &Layers) -> Option<usize> {
         .position(|l| matches!(l.source, Source::TestOverride))
 }
 
-fn ensure_test_override_layer_mut<'a>(layers: &'a mut Layers) -> &'a mut Attrs {
+fn ensure_test_override_layer_mut(layers: &mut Layers) -> &mut Attrs {
     if let Some(i) = test_override_index(layers) {
         return &mut layers.ordered[i].attrs;
     }
