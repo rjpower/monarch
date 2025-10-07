@@ -9,6 +9,8 @@
 Monarch Actor API - Public interface for actor functionality.
 """
 
+from typing import TYPE_CHECKING
+
 from monarch._rust_bindings.monarch_hyperactor.channel import ChannelTransport
 from monarch._rust_bindings.monarch_hyperactor.shape import Extent
 from monarch._src.actor.actor_mesh import (
@@ -34,19 +36,17 @@ from monarch._src.actor.debugger.debug_controller import debug_controller
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
 
-from monarch._src.actor.host_mesh import (
-    HostMesh,
-    hosts_from_config,
-    this_host,
-    this_proc,
-)
-from monarch._src.actor.proc_mesh import (
-    get_or_spawn_controller,
-    local_proc_mesh,
-    proc_mesh,
-    ProcMesh,
-    sim_proc_mesh,
-)
+from monarch._src.actor.host_mesh import hosts_from_config
+from monarch._src.actor.proc_mesh import local_proc_mesh, proc_mesh, sim_proc_mesh
+
+from monarch._src.actor.v1 import enabled as v1_enabled
+
+if TYPE_CHECKING or not v1_enabled:
+    from monarch._src.actor.host_mesh import HostMesh, this_host, this_proc
+    from monarch._src.actor.proc_mesh import get_or_spawn_controller, ProcMesh
+else:
+    from monarch._src.actor.v1.host_mesh import HostMesh, this_host, this_proc
+    from monarch._src.actor.v1.proc_mesh import get_or_spawn_controller, ProcMesh
 
 __all__ = [
     "Accumulator",

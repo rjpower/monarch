@@ -14,8 +14,7 @@ from typing import Dict, Literal, NamedTuple, Optional, Sequence
 
 # note: the jobs api is intended as a library so it should
 # only be importing _public_ monarch API functions.
-from monarch._src.actor.host_mesh import HostMesh, this_host
-from typing_extensions import Self
+from monarch.actor import HostMesh, this_host
 
 
 class JobState:
