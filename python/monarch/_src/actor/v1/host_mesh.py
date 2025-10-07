@@ -47,12 +47,7 @@ def this_host() -> "HostMesh":
 
     This is just shorthand for looking it up via the context
     """
-    proc = this_proc()
-    if proc.host_mesh.is_fake_in_process:
-        return create_local_host_mesh("root_host")
-    # The proc always has logical rank 0 in a singleton
-    # proc mesh
-    return proc.host(0)
+    return this_proc().host_mesh
 
 
 def this_proc() -> "ProcMesh":

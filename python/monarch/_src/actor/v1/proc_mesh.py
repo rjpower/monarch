@@ -109,7 +109,16 @@ class ProcMesh(MeshTrait):
 
     @property
     def host_mesh(self) -> "HostMesh":
-        return self._host_mesh
+        if self.extent.nelements != 1:
+            raise NotImplementedError(
+                "`ProcMesh.host_mesh` is not yet supported for non-singleton proc meshes."
+            )
+        elif self._host_mesh.is_fake_in_process:
+            from monarch._src.actor.v1.host_mesh import create_local_host_mesh
+
+            return create_local_host_mesh("root_host")
+        else:
+            return self._host(0)
 
     @property
     def _ndslice(self) -> Slice:
@@ -363,19 +372,19 @@ class ProcMesh(MeshTrait):
     def __reduce_ex__(self, protocol: ...) -> Tuple[Any, Tuple[Any, ...]]:
         return ProcMesh._from_initialized_hy_proc_mesh, (
             self._proc_mesh.block_on(),
-            self.host_mesh,
+            self._host_mesh,
             self._region,
             self._root_region,
         )
 
-    def host(self, proc_rank: int) -> "HostMesh":
+    def _host(self, proc_rank: int) -> "HostMesh":
         base_proc_rank = self._region.slice().get(proc_rank)
         n_procs = len(self._root_region.slice())
-        procs_per_host = n_procs // len(self.host_mesh.region.slice())
+        procs_per_host = n_procs // len(self._host_mesh.region.slice())
         host_rank = base_proc_rank // procs_per_host
-        base_host_rank = self.host_mesh.region.slice().get(host_rank)
-        return self.host_mesh.slice(
-            **self.host_mesh.region.point_of_base_rank(base_host_rank)
+        base_host_rank = self._host_mesh.region.slice().get(host_rank)
+        return self._host_mesh.slice(
+            **self._host_mesh.region.point_of_base_rank(base_host_rank)
         )
 
 
