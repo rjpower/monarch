@@ -240,21 +240,18 @@ impl Child {
     }
 
     fn ensure_killed(pid: Arc<std::sync::Mutex<Option<i32>>>) {
-        match pid.lock().unwrap().take() {
-            Some(pid) => {
-                if let Err(e) = signal::kill(Pid::from_raw(pid), signal::SIGTERM) {
-                    match e {
-                        nix::errno::Errno::ESRCH => {
-                            // Process already gone.
-                            tracing::debug!("pid {} already exited", pid);
-                        }
-                        _ => {
-                            tracing::error!("failed to kill {}: {}", pid, e);
-                        }
+        if let Some(pid) = pid.lock().unwrap().take() {
+            if let Err(e) = signal::kill(Pid::from_raw(pid), signal::SIGTERM) {
+                match e {
+                    nix::errno::Errno::ESRCH => {
+                        // Process already gone.
+                        tracing::debug!("pid {} already exited", pid);
+                    }
+                    _ => {
+                        tracing::error!("failed to kill {}: {}", pid, e);
                     }
                 }
             }
-            None => (),
         }
     }
 
@@ -485,10 +482,11 @@ impl Alloc for ProcessAlloc {
 
         loop {
             // Do no allocate new processes if we are in failed state.
-            if self.running && !self.failed {
-                if let state @ Some(_) = self.maybe_spawn().await {
-                    return state;
-                }
+            if self.running
+                && !self.failed
+                && let state @ Some(_) = self.maybe_spawn().await
+            {
+                return state;
             }
 
             let transport = self.transport().clone();
@@ -603,12 +601,12 @@ mod tests {
 
     #[cfg(fbcode_build)] // we use an external binary, produced by buck
     crate::alloc_test_suite!(ProcessAllocator::new(Command::new(
-        buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap()
+        crate::testresource::get("monarch/hyperactor_mesh/bootstrap")
     )));
 
     #[tokio::test]
     async fn test_sigterm_on_group_fail() {
-        let bootstrap_binary = buck_resources::get("monarch/hyperactor_mesh/bootstrap").unwrap();
+        let bootstrap_binary = crate::testresource::get("monarch/hyperactor_mesh/bootstrap");
         let mut allocator = ProcessAllocator::new(Command::new(bootstrap_binary));
 
         let mut alloc = allocator
