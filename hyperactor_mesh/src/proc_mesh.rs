@@ -26,13 +26,14 @@ use hyperactor::Named;
 use hyperactor::RemoteMessage;
 use hyperactor::WorldId;
 use hyperactor::actor::ActorStatus;
-use hyperactor::actor::RemoteActor;
+use hyperactor::actor::Referable;
 use hyperactor::actor::remote::Remote;
 use hyperactor::channel;
 use hyperactor::channel::ChannelAddr;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::config;
 use hyperactor::config::CONFIG_ENV_VAR;
+use hyperactor::config::PYTHON_CONFIG_KEY;
 use hyperactor::context;
 use hyperactor::declare_attrs;
 use hyperactor::mailbox;
@@ -88,10 +89,12 @@ use std::sync::RwLock;
 
 declare_attrs! {
     /// Default transport type to use across the application.
-    @meta(CONFIG_ENV_VAR = "HYPERACTOR_MESH_DEFAULT_TRANSPORT".to_string())
-    attr DEFAULT_TRANSPORT: ChannelTransport = ChannelTransport::Unix;
+    @meta(
+        CONFIG_ENV_VAR = "HYPERACTOR_MESH_DEFAULT_TRANSPORT".to_string(),
+        PYTHON_CONFIG_KEY = "default_transport".to_string(),
+    )
+    pub attr DEFAULT_TRANSPORT: ChannelTransport = ChannelTransport::Unix;
 }
-
 /// Get the default transport type to use across the application.
 pub fn default_transport() -> ChannelTransport {
     config::global::get_cloned(DEFAULT_TRANSPORT)
@@ -493,12 +496,12 @@ impl ProcMesh {
     /// Bounds:
     /// - `A: Actor` - we actually spawn this concrete actor on each
     ///   proc.
-    /// - `A: RemoteActor` - required because we return
+    /// - `A: Referable` - required because we return
     ///   `Vec<ActorRef<A>>`, and `ActorRef` is only defined for `A:
-    ///   RemoteActor`.
+    ///   Referable`.
     /// - `A::Params: RemoteMessage` - params must serialize for
     ///   cross-proc spawn.
-    async fn spawn_on_procs<A: Actor + RemoteActor>(
+    async fn spawn_on_procs<A: Actor + Referable>(
         cx: &impl context::Actor,
         agents: impl IntoIterator<Item = ActorRef<ProcMeshAgent>> + '_,
         actor_name: &str,
@@ -600,12 +603,12 @@ impl ProcMesh {
     ///
     /// Bounds:
     /// - `A: Actor` — we actually spawn this type on each agent.
-    /// - `A: RemoteActor` — we return a `RootActorMesh<'_, A>` that
+    /// - `A: Referable` — we return a `RootActorMesh<'_, A>` that
     ///   contains `ActorRef<A>`s; those exist only for `A:
-    ///   RemoteActor`.
+    ///   Referable`.
     /// - `A::Params: RemoteMessage` — params must be serializable to
     ///   cross proc boundaries when launching each actor.
-    pub async fn spawn<A: Actor + RemoteActor>(
+    pub async fn spawn<A: Actor + Referable>(
         &self,
         cx: &impl context::Actor,
         actor_name: &str,
@@ -969,8 +972,8 @@ impl ProcEvents {
 #[async_trait]
 pub trait SharedSpawnable {
     // `Actor`: the type actually runs in the mesh;
-    // `RemoteActor`: so we can hand back ActorRef<A> in RootActorMesh
-    async fn spawn<A: Actor + RemoteActor>(
+    // `Referable`: so we can hand back ActorRef<A> in RootActorMesh
+    async fn spawn<A: Actor + Referable>(
         self,
         cx: &impl context::Actor,
         actor_name: &str,
@@ -983,8 +986,8 @@ pub trait SharedSpawnable {
 #[async_trait]
 impl<D: Deref<Target = ProcMesh> + Send + Sync + 'static> SharedSpawnable for D {
     // `Actor`: the type actually runs in the mesh;
-    // `RemoteActor`: so we can hand back ActorRef<A> in RootActorMesh
-    async fn spawn<A: Actor + RemoteActor>(
+    // `Referable`: so we can hand back ActorRef<A> in RootActorMesh
+    async fn spawn<A: Actor + Referable>(
         self,
         cx: &impl context::Actor,
         actor_name: &str,
