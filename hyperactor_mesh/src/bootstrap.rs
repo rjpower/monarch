@@ -179,7 +179,7 @@ async fn exit_if_missed_heartbeat(bootstrap_index: usize, bootstrap_addr: Channe
 }
 
 #[macro_export]
-macro_rules! ok {
+macro_rules! ok {re
     ($expr:expr $(,)?) => {
         match $expr {
             Ok(value) => value,
