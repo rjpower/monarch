@@ -308,7 +308,7 @@ pub struct RootActorMesh<'a, A: Referable> {
     name: OnceLock<String>,
 }
 
-enum ActorMeshKind<'a, A: RemoteActor> {
+enum ActorMeshKind<'a, A: Referable> {
     V0 {
         proc_mesh: ProcMeshRef<'a>,
         name: String,
@@ -321,7 +321,7 @@ enum ActorMeshKind<'a, A: RemoteActor> {
     V1(v1::ActorMeshRef<A>),
 }
 
-impl<'a, A: RemoteActor> From<v1::ActorMeshRef<A>> for RootActorMesh<'a, A> {
+impl<'a, A: Referable> From<v1::ActorMeshRef<A>> for RootActorMesh<'a, A> {
     fn from(actor_mesh: v1::ActorMeshRef<A>) -> Self {
         Self {
             inner: ActorMeshKind::V1(actor_mesh),
@@ -332,7 +332,7 @@ impl<'a, A: RemoteActor> From<v1::ActorMeshRef<A>> for RootActorMesh<'a, A> {
     }
 }
 
-impl<'a, A: RemoteActor> From<v1::ActorMesh<A>> for RootActorMesh<'a, A> {
+impl<'a, A: Referable> From<v1::ActorMesh<A>> for RootActorMesh<'a, A> {
     fn from(actor_mesh: v1::ActorMesh<A>) -> Self {
         actor_mesh.detach().into()
     }

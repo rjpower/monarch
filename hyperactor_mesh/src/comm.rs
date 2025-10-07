@@ -904,7 +904,7 @@ mod tests {
     ) {
         // Reply from each dest actor. The replies should be received by client.
         {
-            for (dest_actor, (reply_to1, reply_to2)) in ranks().iter().zip(reply_tos.iter()) {
+            for (dest_actor, (reply_to1, reply_to2)) in ranks.iter().zip(reply_tos.iter()) {
                 let rank = dest_actor.actor_id().rank() as u64;
                 reply_to1.send(instance, rank).unwrap();
                 let my_reply = MyReply {
@@ -926,7 +926,7 @@ mod tests {
         {
             let n = 100;
             let mut expected2: HashMap<usize, Vec<MyReply>> = hashmap! {};
-            for (dest_actor, (_reply_to1, reply_to2)) in ranks().iter().zip(reply_tos.iter()) {
+            for (dest_actor, (_reply_to1, reply_to2)) in ranks.iter().zip(reply_tos.iter()) {
                 let rank = dest_actor.actor_id().rank();
                 let mut sent2 = vec![];
                 for i in 0..n {
@@ -946,7 +946,7 @@ mod tests {
 
             let mut received2: HashMap<usize, Vec<MyReply>> = hashmap! {};
 
-            for _ in 0..(n * ranks().len()) {
+            for _ in 0..(n * ranks.len()) {
                 let my_reply = reply2_rx.recv().await.unwrap();
                 received2
                     .entry(my_reply.sender.rank())
@@ -968,7 +968,7 @@ mod tests {
         } = setup_mesh::<NoneAccumulator>(None).await;
         let proc_mesh_client = actor_mesh.proc_mesh().client();
 
-        let ranks = actor_mesh.ranks.clone();
+        let ranks = actor_mesh.ranks().clone();
         execute_cast_and_reply(ranks, proc_mesh_client, reply1_rx, reply2_rx, reply_tos).await;
     }
 
@@ -1032,7 +1032,7 @@ mod tests {
             ..
         } = setup_mesh(Some(accum::sum::<u64>())).await;
         let proc_mesh_client = actor_mesh.proc_mesh().client();
-        let ranks = actor_mesh.ranks.clone();
+        let ranks = actor_mesh.ranks().clone();
         execute_cast_and_accum(ranks, proc_mesh_client, reply1_rx, reply_tos).await;
     }
 
