@@ -357,7 +357,7 @@ impl Bootstrap {
 
                 let (local_addr, name) = ok!(proc_id
                     .as_direct()
-                    .ok_or_else(|| anyhow::anyhow!("invalid proc id type")));
+                    .ok_or_else(|| anyhow::anyhow!("invalid proc id type: {}", proc_id)));
                 // TODO provide a direct way to construct these
                 let serve_addr = format!("unix:{}", socket_dir_path.join(name).display());
                 let serve_addr = serve_addr.parse().unwrap();
@@ -3154,8 +3154,6 @@ mod tests {
         instance: &hyperactor::Instance<()>,
         _tag: &str,
     ) -> (ProcId, ChannelAddr) {
-        let proc_id = id!(bootstrap_child[0]);
-
         // Serve a Unix channel as the "backend_addr" and hook it into
         // this test proc.
         let (backend_addr, rx) = channel::serve(ChannelAddr::any(ChannelTransport::Unix)).unwrap();
@@ -3165,6 +3163,9 @@ mod tests {
         // router.
         instance.proc().clone().serve(rx);
 
+        // We return an arbitrary (but unbound!) unix direct proc id here;
+        // it is okay, as we're not testing connectivity.
+        let proc_id = ProcId::Direct(ChannelTransport::Unix.any(), "test".to_string());
         (proc_id, backend_addr)
     }
 
