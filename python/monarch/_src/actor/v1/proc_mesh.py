@@ -80,12 +80,14 @@ class ProcMesh(MeshTrait):
         hy_proc_mesh: "Shared[HyProcMesh]",
         host_mesh: "HostMesh",
         region: Region,
+        root_region: Region,
         _device_mesh: Optional["DeviceMesh"] = None,
     ) -> None:
         _proc_mesh_registry.add(self)
         self._proc_mesh = hy_proc_mesh
         self._host_mesh = host_mesh
         self._region = region
+        self._root_region = root_region
         self._maybe_device_mesh = _device_mesh
         self._logging_manager = LoggingManager()
         self._controller_controller: Optional["_ControllerController"] = None
@@ -134,6 +136,7 @@ class ProcMesh(MeshTrait):
             PythonTask.from_coroutine(task()).spawn(),
             self._host_mesh,
             shape.region,
+            self._root_region,
             _device_mesh=device_mesh,
         )
 
@@ -176,7 +179,7 @@ class ProcMesh(MeshTrait):
         setup: Callable[[], None] | None = None,
         _attach_controller_controller: bool = True,
     ) -> "ProcMesh":
-        pm = ProcMesh(hy_proc_mesh, host_mesh, region)
+        pm = ProcMesh(hy_proc_mesh, host_mesh, region, region)
 
         if _attach_controller_controller:
             instance = context().actor_instance
@@ -341,7 +344,11 @@ class ProcMesh(MeshTrait):
 
     @classmethod
     def _from_initialized_hy_proc_mesh(
-        cls, hy_proc_mesh: HyProcMesh, host_mesh: "HostMesh", region: Region
+        cls,
+        hy_proc_mesh: HyProcMesh,
+        host_mesh: "HostMesh",
+        region: Region,
+        root_region: Region,
     ) -> "ProcMesh":
         async def task() -> HyProcMesh:
             return hy_proc_mesh
@@ -350,6 +357,7 @@ class ProcMesh(MeshTrait):
             PythonTask.from_coroutine(task()).spawn(),
             host_mesh,
             region,
+            root_region,
         )
 
     def __reduce_ex__(self, protocol: ...) -> Tuple[Any, Tuple[Any, ...]]:
@@ -357,6 +365,17 @@ class ProcMesh(MeshTrait):
             self._proc_mesh.block_on(),
             self.host_mesh,
             self._region,
+            self._root_region,
+        )
+
+    def host(self, proc_rank: int) -> "HostMesh":
+        base_proc_rank = self._region.slice().get(proc_rank)
+        n_procs = len(self._root_region.slice())
+        procs_per_host = n_procs // len(self.host_mesh.region.slice())
+        host_rank = base_proc_rank // procs_per_host
+        base_host_rank = self.host_mesh.region.slice().get(host_rank)
+        return self.host_mesh.slice(
+            **self.host_mesh.region.point_of_base_rank(base_host_rank)
         )
 
 
