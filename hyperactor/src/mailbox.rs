@@ -1244,12 +1244,29 @@ impl Mailbox {
         )
     }
 
+    /// Open a new port with an accumulator with default reduce options.
+    /// See [`open_accum_port_opts`] for more details.
+    pub fn open_accum_port<A>(&self, accum: A) -> (PortHandle<A::Update>, PortReceiver<A::State>)
+    where
+        A: Accumulator + Send + Sync + 'static,
+        A::Update: Message,
+        A::State: Message + Default + Clone,
+    {
+        self.open_accum_port_opts(accum, None)
+    }
+
     /// Open a new port with an accumulator. This port accepts A::Update type
     /// messages, accumulate them into A::State with the given accumulator.
     /// The latest changed state can be received from the returned receiver as
     /// a single A::State message. If there is no new update, the receiver will
     /// not receive any message.
-    pub fn open_accum_port<A>(&self, accum: A) -> (PortHandle<A::Update>, PortReceiver<A::State>)
+    ///
+    /// If provided, reducer options are applied to reduce operations.
+    pub fn open_accum_port_opts<A>(
+        &self,
+        accum: A,
+        reducer_opts: Option<ReducerOpts>,
+    ) -> (PortHandle<A::Update>, PortReceiver<A::State>)
     where
         A: Accumulator + Send + Sync + 'static,
         A::Update: Message,
@@ -1273,7 +1290,7 @@ impl Mailbox {
                 sender: UnboundedPortSender::Func(Arc::new(enqueue)),
                 bound: Arc::new(OnceLock::new()),
                 reducer_spec,
-                reducer_opts: None, // TODO: provide open_accum_port_opts
+                reducer_opts,
             },
             PortReceiver::new(receiver, port_id, /*coalesce=*/ true, self.clone()),
         )
@@ -1719,10 +1736,10 @@ impl<M> PortReceiver<M> {
     pub fn try_recv(&mut self) -> Result<Option<M>, MailboxError> {
         let mut next = self.receiver.try_recv();
         // To coalesce, drain the mpsc queue and only keep the last one.
-        if self.coalesce {
-            if let Some(latest) = self.drain().pop() {
-                next = Ok(latest);
-            }
+        if self.coalesce
+            && let Some(latest) = self.drain().pop()
+        {
+            next = Ok(latest);
         }
         match next {
             Ok(msg) => Ok(Some(msg)),
@@ -1740,10 +1757,10 @@ impl<M> PortReceiver<M> {
         let mut next = self.receiver.recv().await;
         // To coalesce, get the last message from the queue if there are
         // more on the mspc queue.
-        if self.coalesce {
-            if let Some(latest) = self.drain().pop() {
-                next = Some(latest);
-            }
+        if self.coalesce
+            && let Some(latest) = self.drain().pop()
+        {
+            next = Some(latest);
         }
         next.ok_or(MailboxError::new(
             self.actor_id().clone(),
@@ -2152,6 +2169,12 @@ pub struct MailboxMuxer {
     mailboxes: Arc<DashMap<ActorId, Box<dyn MailboxSender + Send + Sync>>>,
 }
 
+impl Default for MailboxMuxer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MailboxMuxer {
     /// Create a new, empty, muxer.
     pub fn new() -> Self {
@@ -2214,6 +2237,12 @@ impl MailboxSender for MailboxMuxer {
 #[derive(Debug, Clone)]
 pub struct MailboxRouter {
     entries: Arc<RwLock<BTreeMap<Reference, Arc<dyn MailboxSender + Send + Sync>>>>,
+}
+
+impl Default for MailboxRouter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MailboxRouter {
@@ -2364,6 +2393,12 @@ pub struct DialMailboxRouter {
     direct_addressed_remote_only: bool,
 }
 
+impl Default for DialMailboxRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DialMailboxRouter {
     /// Create a new [`DialMailboxRouter`] with an empty routing table.
     pub fn new() -> Self {
@@ -2403,11 +2438,11 @@ impl DialMailboxRouter {
     /// cache to ensure fresh routing on next use.
     pub fn bind(&self, dest: Reference, addr: ChannelAddr) {
         if let Ok(mut w) = self.address_book.write() {
-            if let Some(old_addr) = w.insert(dest.clone(), addr.clone()) {
-                if old_addr != addr {
-                    tracing::info!("rebinding {:?} from {:?} to {:?}", dest, old_addr, addr);
-                    self.sender_cache.remove(&old_addr);
-                }
+            if let Some(old_addr) = w.insert(dest.clone(), addr.clone())
+                && old_addr != addr
+            {
+                tracing::info!("rebinding {:?} from {:?} to {:?}", dest, old_addr, addr);
+                self.sender_cache.remove(&old_addr);
             }
         } else {
             tracing::error!("address book poisoned during bind of {:?}", dest);
