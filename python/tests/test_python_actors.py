@@ -57,12 +57,16 @@ from monarch._src.actor.proc_mesh import (
 )
 from monarch._src.actor.v1.host_mesh import (
     _bootstrap_cmd,
+    create_local_host_mesh as create_local_host_mesh_v1,
     fake_in_process_host as fake_in_process_host_v1,
     HostMesh as HostMeshV1,
     this_host as this_host_v1,
     this_proc as this_proc_v1,
 )
-from monarch._src.actor.v1.proc_mesh import ProcMesh as ProcMeshV1
+from monarch._src.actor.v1.proc_mesh import (
+    get_or_spawn_controller as get_or_spawn_controller_v1,
+    ProcMesh as ProcMeshV1,
+)
 
 from monarch.actor import (
     Accumulator,
@@ -1696,15 +1700,18 @@ class SpawningActorFromEndpointActor(Actor):
         return self._root
 
     @endpoint
-    async def spawning_from_endpoint(self, name, root) -> None:
-        await get_or_spawn_controller(name, SpawningActorFromEndpointActor, root=root)
+    async def spawning_from_endpoint(self, name, root, get_or_spawn) -> None:
+        await get_or_spawn(name, SpawningActorFromEndpointActor, root=root)
 
 
+@pytest.mark.parametrize(
+    "get_or_spawn", [get_or_spawn_controller, get_or_spawn_controller_v1]
+)
 @pytest.mark.timeout(60)
-def test_get_or_spawn_controller_inside_actor_endpoint():
-    actor_1 = get_or_spawn_controller("actor_1", SpawningActorFromEndpointActor).get()
-    actor_1.spawning_from_endpoint.call_one("actor_2", root="actor_1").get()
-    actor_2 = get_or_spawn_controller("actor_2", SpawningActorFromEndpointActor).get()
+def test_get_or_spawn_controller_inside_actor_endpoint(get_or_spawn):
+    actor_1 = get_or_spawn("actor_1", SpawningActorFromEndpointActor).get()
+    actor_1.spawning_from_endpoint.call_one("actor_2", "actor_1", get_or_spawn).get()
+    actor_2 = get_or_spawn("actor_2", SpawningActorFromEndpointActor).get()
     # verify that actor_2 was spawned from actor_1 with the correct root
     assert actor_2.return_root.call_one().get() == "actor_1"
 
@@ -1746,3 +1753,50 @@ def test_simple_bootstrap():
         for proc in procs:
             proc.kill()
             proc.wait()
+
+
+class HostMeshActor(Actor):
+    @endpoint
+    async def this_host(self) -> HostMeshV1:
+        return this_host_v1()
+
+
+@pytest.mark.timeout(60)
+def test_this_host() -> None:
+    host = create_local_host_mesh_v1("host", Extent(["hosts"], [6]))
+    hosts_by_rank = [host.slice(hosts=i) for i in range(6)]
+    for r, h in enumerate(hosts_by_rank):
+        hy_host = h._hy_host_mesh.block_on()
+        assert hy_host.region.slice().offset == r
+        assert len(hy_host.region.slice()) == 1
+
+    proc_mesh_all = host.spawn_procs(per_host={"gpus": 2})
+    # Make sure it works with a proc mesh spawned on a sliced host mesh
+    proc_mesh_012 = host.slice(hosts=slice(0, 3)).spawn_procs(per_host={"gpus": 2})
+    proc_mesh_345 = host.slice(hosts=slice(3, 6)).spawn_procs(per_host={"gpus": 2})
+
+    am_all = proc_mesh_all.spawn("all", HostMeshActor)
+    am_012 = proc_mesh_012.spawn("012", HostMeshActor)
+    am_345 = proc_mesh_345.spawn("345", HostMeshActor)
+
+    expected_hosts_by_rank = [h for h in hosts_by_rank for _ in range(2)]
+    assert list(am_all.this_host.call().get().values()) == expected_hosts_by_rank
+    assert list(am_012.this_host.call().get().values()) == expected_hosts_by_rank[:6]
+    assert list(am_345.this_host.call().get().values()) == expected_hosts_by_rank[6:]
+
+    # Procs 3 and 5 on hosts 1 and 2
+    proc_mesh_012 = proc_mesh_012.slice(hosts=slice(1, 3), gpus=1)
+    # Procs 6 and 10 on hosts 3 and 5
+    proc_mesh_345 = proc_mesh_345.slice(hosts=slice(0, 3, 2), gpus=0)
+
+    am_012 = proc_mesh_012.spawn("012", HostMeshActor)
+    am_345 = proc_mesh_345.spawn("345", HostMeshActor)
+
+    assert list(am_012.this_host.call().get().values()) == [
+        expected_hosts_by_rank[3],
+        expected_hosts_by_rank[5],
+    ]
+    assert list(am_345.this_host.call().get().values()) == [
+        expected_hosts_by_rank[6],
+        expected_hosts_by_rank[10],
+    ]
