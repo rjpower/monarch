@@ -185,8 +185,7 @@ macro_rules! ok {
             Ok(value) => value,
             Err(e) => return ::anyhow::Error::from(e),
         }
-    };
-}
+    };}
 
 async fn halt<R>() -> R {
     future::pending::<()>().await;
