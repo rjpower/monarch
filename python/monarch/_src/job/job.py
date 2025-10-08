@@ -467,6 +467,6 @@ class SSHJob(LoginJob):
             isinstance(spec, SSHJob)
             and spec._python_exe == self._python_exe
             and self._port == spec._port
-            and self._ssh_args == spec._ssh_args
+            and self._ssh_args == self._ssh_args
             and super().can_run(spec)
         )
