@@ -28,7 +28,7 @@ from typing import (
 from weakref import WeakSet
 
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
-from monarch._rust_bindings.monarch_hyperactor.shape import Region, Shape, Slice
+from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Region, Shape, Slice
 
 from monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh import (
     ProcMesh as HyProcMesh,
@@ -80,12 +80,14 @@ class ProcMesh(MeshTrait):
         hy_proc_mesh: "Shared[HyProcMesh]",
         host_mesh: "HostMesh",
         region: Region,
+        root_region: Region,
         _device_mesh: Optional["DeviceMesh"] = None,
     ) -> None:
         _proc_mesh_registry.add(self)
         self._proc_mesh = hy_proc_mesh
         self._host_mesh = host_mesh
         self._region = region
+        self._root_region = root_region
         self._maybe_device_mesh = _device_mesh
         self._logging_manager = LoggingManager()
         self._controller_controller: Optional["_ControllerController"] = None
@@ -107,7 +109,16 @@ class ProcMesh(MeshTrait):
 
     @property
     def host_mesh(self) -> "HostMesh":
-        return self._host_mesh
+        if self.extent.nelements != 1:
+            raise NotImplementedError(
+                "`ProcMesh.host_mesh` is not yet supported for non-singleton proc meshes."
+            )
+        elif self._host_mesh.is_fake_in_process:
+            from monarch._src.actor.v1.host_mesh import create_local_host_mesh
+
+            return create_local_host_mesh("root_host")
+        else:
+            return self._host(0)
 
     @property
     def _ndslice(self) -> Slice:
@@ -134,6 +145,7 @@ class ProcMesh(MeshTrait):
             PythonTask.from_coroutine(task()).spawn(),
             self._host_mesh,
             shape.region,
+            self._root_region,
             _device_mesh=device_mesh,
         )
 
@@ -176,7 +188,7 @@ class ProcMesh(MeshTrait):
         setup: Callable[[], None] | None = None,
         _attach_controller_controller: bool = True,
     ) -> "ProcMesh":
-        pm = ProcMesh(hy_proc_mesh, host_mesh, region)
+        pm = ProcMesh(hy_proc_mesh, host_mesh, region, region)
 
         if _attach_controller_controller:
             instance = context().actor_instance
@@ -341,7 +353,11 @@ class ProcMesh(MeshTrait):
 
     @classmethod
     def _from_initialized_hy_proc_mesh(
-        cls, hy_proc_mesh: HyProcMesh, host_mesh: "HostMesh", region: Region
+        cls,
+        hy_proc_mesh: HyProcMesh,
+        host_mesh: "HostMesh",
+        region: Region,
+        root_region: Region,
     ) -> "ProcMesh":
         async def task() -> HyProcMesh:
             return hy_proc_mesh
@@ -350,13 +366,25 @@ class ProcMesh(MeshTrait):
             PythonTask.from_coroutine(task()).spawn(),
             host_mesh,
             region,
+            root_region,
         )
 
     def __reduce_ex__(self, protocol: ...) -> Tuple[Any, Tuple[Any, ...]]:
         return ProcMesh._from_initialized_hy_proc_mesh, (
             self._proc_mesh.block_on(),
-            self.host_mesh,
+            self._host_mesh,
             self._region,
+            self._root_region,
+        )
+
+    def _host(self, proc_rank: int) -> "HostMesh":
+        base_proc_rank = self._region.slice().get(proc_rank)
+        n_procs = len(self._root_region.slice())
+        procs_per_host = n_procs // len(self._host_mesh.region.slice())
+        host_rank = base_proc_rank // procs_per_host
+        base_host_rank = self._host_mesh.region.slice().get(host_rank)
+        return self._host_mesh.slice(
+            **self._host_mesh.region.point_of_base_rank(base_host_rank)
         )
 
 
@@ -372,7 +400,9 @@ class _ControllerController(Actor):
         if name not in self._controllers:
             from monarch._src.actor.v1.host_mesh import this_proc
 
-            self._controllers[name] = this_proc().spawn(name, Class, *args, **kwargs)
+            proc = this_proc()
+            proc._controller_controller = _get_controller_controller()[1]
+            self._controllers[name] = proc.spawn(name, Class, *args, **kwargs)
         return cast(TActor, self._controllers[name])
 
 
@@ -394,11 +424,16 @@ def _get_controller_controller() -> "Tuple[ProcMesh, _ControllerController]":
 
             _cc_proc_mesh = fake_in_process_host(
                 "controller_controller_host"
-            ).spawn_procs(name="controller_controller_proc")
+            )._spawn_nonblocking(
+                name="controller_controller_proc",
+                per_host=Extent([], []),
+                setup=None,
+                _attach_controller_controller=False,
+            )
             _controller_controller = _cc_proc_mesh.spawn(
                 "controller_controller", _ControllerController
             )
-    assert _cc_proc_mesh is not None
+    assert _cc_proc_mesh is not None and _controller_controller is not None
     return _cc_proc_mesh, _controller_controller
 
 
@@ -419,7 +454,11 @@ def get_or_spawn_controller(
         A Future that resolves to a reference to the actor.
     """
     cc = context().actor_instance._controller_controller
-    if not isinstance(cc, _ControllerController):
+    if (
+        cc is not None
+        and cast(ActorMesh[_ControllerController], cc)._class
+        is not _ControllerController
+    ):
         # This can happen in the client process
         cc = _get_controller_controller()[1]
     return cc.get_or_spawn.call_one(name, Class, *args, **kwargs)
