@@ -950,7 +950,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let instance = crate::v1::testing::instance().await;
+                let instance = $crate::v1::testing::instance().await;
                 let mesh = ProcMesh::allocate(alloc).await.unwrap();
 
                 let (undeliverable_msg_tx, _) = mesh.client().open_port();
