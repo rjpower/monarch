@@ -7,6 +7,7 @@
  */
 
 //! This module contains various utilities for dealing with time.
+//! (This probably belongs in a separate crate.)
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -129,7 +130,7 @@ impl AlarmSleeper {
                 AlarmStatus::Armed {
                     version: _,
                     deadline,
-                } => Some(deadline.clone()),
+                } => Some(deadline),
             };
 
             if let Some(deadline) = deadline {
