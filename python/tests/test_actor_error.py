@@ -747,7 +747,7 @@ async def test_supervision_with_proc_mesh_stopped(mesh, v1: bool) -> None:
 # TODO - re-enable after resolving T232206970
 @pytest.mark.oss_skip
 @pytest.mark.parametrize("v1", [True, False])
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(30)
 async def test_supervision_with_sending_error(v1: bool) -> None:
     # Messages of length > this will cause a send error and a returned
     # undeliverable.
