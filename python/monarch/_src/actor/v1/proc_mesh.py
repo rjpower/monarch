@@ -85,6 +85,16 @@ class ProcMesh(MeshTrait):
         _device_mesh: Optional["DeviceMesh"] = None,
     ) -> None:
         _proc_mesh_registry.add(self)
+
+        self._initialized_proc_mesh = _initialized_hy_proc_mesh
+        if not self._initialized_proc_mesh:
+
+            async def task(hy_proc_mesh_task: Shared[HyProcMesh]) -> HyProcMesh:
+                self._initialized_proc_mesh = await hy_proc_mesh_task
+                return self._initialized_proc_mesh
+
+            hy_proc_mesh = PythonTask.from_coroutine(task(hy_proc_mesh)).spawn()
+
         self._proc_mesh = hy_proc_mesh
         self._host_mesh = host_mesh
         self._region = region
@@ -92,7 +102,6 @@ class ProcMesh(MeshTrait):
         self._maybe_device_mesh = _device_mesh
         self._logging_manager = LoggingManager()
         self._controller_controller: Optional["_ControllerController"] = None
-        self._initialized_proc_mesh = _initialized_hy_proc_mesh
 
     @property
     def initialized(self) -> Future[Literal[True]]:
@@ -224,7 +233,6 @@ class ProcMesh(MeshTrait):
             stream_log_to_client: bool,
         ) -> HyProcMesh:
             hy_proc_mesh = await hy_proc_mesh_task
-            pm._initialized_proc_mesh = hy_proc_mesh
 
             await pm._logging_manager.init(hy_proc_mesh, stream_log_to_client)
 
