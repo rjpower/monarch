@@ -96,11 +96,13 @@ class HostMesh(MeshTrait):
         region: Region,
         stream_logs: bool,
         is_fake_in_process: bool,
+        _initialized_hy_host_mesh: Optional[HyHostMesh],
     ) -> None:
         self._hy_host_mesh = hy_host_mesh
         self._region = region
         self._stream_logs = stream_logs
         self._is_fake_in_process = is_fake_in_process
+        self._initialized_host_mesh = _initialized_hy_host_mesh
 
     @classmethod
     def allocate_nonblocking(
@@ -122,12 +124,23 @@ class HostMesh(MeshTrait):
                 bootstrap_cmd,
             )
 
-        return cls(
-            PythonTask.from_coroutine(task()).spawn(),
+        hy_host_mesh_task = PythonTask.from_coroutine(task()).spawn()
+
+        hm: HostMesh = cls(
+            hy_host_mesh_task,
             extent.region,
             alloc.stream_logs,
             isinstance(allocator, LocalAllocator),
+            None,
         )
+
+        async def task(hy_host_mesh_task: Shared[HyHostMesh]) -> HyHostMesh:
+            hm._initialized_host_mesh = await hy_host_mesh_task
+            return hm._initialized_host_mesh
+
+        hm._hy_host_mesh = PythonTask.from_coroutine(task(hy_host_mesh_task)).spawn()
+
+        return hm
 
     def spawn_procs(
         self,
@@ -187,15 +200,25 @@ class HostMesh(MeshTrait):
         if shape.region == self._region:
             return self
 
+        initialized_hm: Optional[HyHostMesh] = (
+            None
+            if self._initialized_host_mesh is None
+            else self._initialized_host_mesh.sliced(shape.region)
+        )
+
         async def task() -> HyHostMesh:
-            hy_host_mesh = await self._hy_host_mesh
-            return hy_host_mesh.sliced(shape.region)
+            return (
+                initialized_hm
+                if initialized_hm
+                else (await self._hy_host_mesh).sliced(shape.region)
+            )
 
         return HostMesh(
             PythonTask.from_coroutine(task()).spawn(),
             shape.region,
             self.stream_logs,
             self.is_fake_in_process,
+            initialized_hm,
         )
 
     @property
@@ -222,11 +245,12 @@ class HostMesh(MeshTrait):
             region,
             stream_logs,
             is_fake_in_process,
+            hy_host_mesh,
         )
 
     def __reduce_ex__(self, protocol: ...) -> Tuple[Any, Tuple[Any, ...]]:
         return HostMesh._from_initialized_hy_host_mesh, (
-            self._hy_host_mesh.block_on(),
+            self._initialized_mesh(),
             self._region,
             self.stream_logs,
             self.is_fake_in_process,
@@ -238,11 +262,17 @@ class HostMesh(MeshTrait):
 
     def __eq__(self, other: "HostMesh") -> bool:
         return (
-            self._hy_host_mesh.block_on() == other._hy_host_mesh.block_on()
+            self._initialized_mesh() == other._initialized_mesh()
             and self._region == other._region
             and self.stream_logs == other.stream_logs
             and self.is_fake_in_process == other.is_fake_in_process
         )
+
+    def _initialized_mesh(self) -> HyHostMesh:
+        if self._initialized_host_mesh is None:
+            self._hy_host_mesh.block_on()
+            assert self._initialized_host_mesh is not None
+        return self._initialized_host_mesh
 
 
 def fake_in_process_host(name: str) -> "HostMesh":
