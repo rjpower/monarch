@@ -405,7 +405,6 @@ mod tests {
     use crate::v1::ActorMeshRef;
     use crate::v1::Name;
     use crate::v1::ProcMesh;
-    use crate::v1::proc_mesh::GET_ACTOR_STATE_MAX_IDLE;
     use crate::v1::testactor;
     use crate::v1::testing;
 
@@ -577,9 +576,6 @@ mod tests {
     #[async_timed_test(timeout_secs = 30)]
     async fn test_actor_states_with_process_exit() {
         hyperactor_telemetry::initialize_logging_for_test();
-
-        let config = hyperactor::config::global::lock();
-        let _guard = config.override_key(GET_ACTOR_STATE_MAX_IDLE, Duration::from_secs(1));
 
         let instance = testing::instance().await;
         // Listen for supervision events sent to the parent instance.
