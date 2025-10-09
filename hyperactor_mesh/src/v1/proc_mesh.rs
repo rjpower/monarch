@@ -8,6 +8,7 @@
 
 use std::any::type_name;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ use hyperactor::Named;
 use hyperactor::ProcId;
 use hyperactor::RemoteMessage;
 use hyperactor::accum::ReducerOpts;
+use hyperactor::actor::ActorStatus;
 use hyperactor::actor::Referable;
 use hyperactor::actor::remote::Remote;
 use hyperactor::channel;
@@ -32,6 +34,7 @@ use hyperactor::context;
 use hyperactor::declare_attrs;
 use hyperactor::mailbox::DialMailboxRouter;
 use hyperactor::mailbox::MailboxServer;
+use hyperactor::supervision::ActorSupervisionEvent;
 use ndslice::Extent;
 use ndslice::ViewExt as _;
 use ndslice::view;
@@ -263,7 +266,6 @@ impl ProcMesh {
 
     /// Allocate a new ProcMesh from the provided alloc.
     /// Allocate does not require an owning actor because references are not owned.
-    /// Allocate a new ProcMesh from the provided alloc.
     pub async fn allocate(
         cx: &impl context::Actor,
         mut alloc: Box<dyn Alloc + Send + Sync + 'static>,
@@ -538,16 +540,66 @@ impl ProcMeshRef {
         let expected = self.ranks.len();
         let mut states = Vec::with_capacity(expected);
         for _ in 0..expected {
-            let state = rx.recv().await?;
-            match state.state {
-                Some(ref inner) => {
-                    states.push((inner.create_rank, state));
+            // The agent runs on the same process as the running actor, so if some
+            // fatal event caused the process to crash (e.g. OOM, signal, process exit),
+            // the agent will be unresponsive.
+            // We handle this by setting a timeout on the recv, and if we don't get a
+            // message we assume the agent is dead and return a failed state.
+            let state = RealClock.timeout(Duration::from_secs(1), rx.recv()).await;
+            if let Ok(state) = state {
+                // Handle non-timeout receiver error.
+                let state = state?;
+                match state.state {
+                    Some(ref inner) => {
+                        states.push((inner.create_rank, state));
+                    }
+                    None => {
+                        return Err(Error::NotExist(state.name));
+                    }
                 }
-                None => {
-                    return Err(Error::NotExist(state.name));
+            } else {
+                tracing::error!(
+                    "Timeout waiting for a message from proc mesh agent in mesh: {:?}",
+                    agent_mesh
+                );
+                // Timeout error, stop reading from the receiver and send back what we have so far,
+                // padding with failed states.
+                let all_ranks = (0..self.ranks.len()).collect::<HashSet<_>>();
+                let completed_ranks = states.iter().map(|(rank, _)| *rank).collect::<HashSet<_>>();
+                let mut leftover_ranks = all_ranks.difference(&completed_ranks).collect::<Vec<_>>();
+                assert_eq!(leftover_ranks.len(), expected - states.len());
+                while states.len() < expected {
+                    let rank = *leftover_ranks
+                        .pop()
+                        .expect("leftover ranks should not be empty");
+                    let agent = agent_mesh.get(rank).expect("agent should exist");
+                    let agent_id = agent.actor_id().clone();
+                    states.push((
+                        // We populate with any ranks leftover at the time of the timeout.
+                        rank,
+                        resource::State {
+                            name: name.clone(),
+                            status: resource::Status::Stopped,
+                            // We don't know the ActorId that used to live on this rank.
+                            // But we do know the mesh agent id, so we'll use that.
+                            state: Some(ActorState {
+                                actor_id: agent_id.clone(),
+                                create_rank: rank,
+                                supervision_events: vec![ActorSupervisionEvent::new(
+                                    agent_id,
+                                    ActorStatus::Stopped,
+                                    None,
+                                    None,
+                                )],
+                            }),
+                        },
+                    ));
                 }
+                break;
             }
         }
+        // Ensure that all ranks have replied. Note that if the mesh is sliced,
+        // not all create_ranks may be in the mesh.
         // Sort by rank, so that the resulting mesh is ordered.
         states.sort_by_key(|(rank, _)| *rank);
         let vm = states
@@ -576,6 +628,26 @@ impl ProcMeshRef {
         A::Params: RemoteMessage,
     {
         self.spawn_with_name(cx, Name::new(name), params).await
+    }
+
+    /// Spawn a 'service' actor. Service actors are *singletons*, using
+    /// reserved names. The provided name is used verbatim as the actor's
+    /// name, and thus it may be persistently looked up by constructing
+    /// the appropriate name.
+    ///
+    /// Note: avoid using service actors if possible; the mechanism will
+    /// be replaced by an actor registry.
+    pub async fn spawn_service<A: Actor + Referable>(
+        &self,
+        cx: &impl context::Actor,
+        name: &str,
+        params: &A::Params,
+    ) -> v1::Result<ActorMesh<A>>
+    where
+        A::Params: RemoteMessage,
+    {
+        self.spawn_with_name(cx, Name::new_reserved(name), params)
+            .await
     }
 
     /// Spawn an actor on all procs in this mesh under the given
@@ -639,6 +711,8 @@ impl ProcMeshRef {
 
         let start_time = RealClock.now();
 
+        // These will fail if there are any supervision events that occurred
+        // on the proc.
         match GetRankStatus::wait(
             rx,
             self.ranks.len(),

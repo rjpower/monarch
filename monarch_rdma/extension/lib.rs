@@ -37,6 +37,7 @@ fn setup_rdma_context(
     local_proc_id: String,
 ) -> (ActorRef<RdmaManagerActor>, RdmaBuffer) {
     let proc_id: ProcId = local_proc_id.parse().unwrap();
+    // TODO: find some better way to look this up, or else formally define "service names"
     let local_owner_id = ActorId(proc_id, "rdma_manager".to_string(), 0);
     let local_owner_ref: ActorRef<RdmaManagerActor> = ActorRef::attest(local_owner_id);
     let buffer = rdma_buffer.buffer.clone();
@@ -57,6 +58,7 @@ async fn create_rdma_buffer(
     client: PyInstance,
 ) -> PyResult<PyRdmaBuffer> {
     // Get the owning RdmaManagerActor's ActorRef
+    // TODO: find some better way to look this up, or else formally define "service names"
     let owner_id = ActorId(proc_id, "rdma_manager".to_string(), 0);
     let owner_ref: ActorRef<RdmaManagerActor> = ActorRef::attest(owner_id);
 
@@ -322,10 +324,12 @@ impl PyRdmaManager {
                     proc_mesh
                         // Pass None to use default config - RdmaManagerActor will use default IbverbsConfig
                         // TODO - make IbverbsConfig configurable
-                        .spawn::<RdmaManagerActor>(cx, "rdma_manager", &None)
+                        .spawn_service::<RdmaManagerActor>(cx, "rdma_manager", &None)
                         .await
                         .map_err(|err| PyException::new_err(err.to_string()))?
                 });
+
+                eprintln!("spawned rdma_manager: {:?}", actor_mesh);
 
                 let actor_mesh = RootActorMesh::from(actor_mesh);
                 let actor_mesh = SharedCell::from(actor_mesh);

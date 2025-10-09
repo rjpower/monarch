@@ -10,7 +10,7 @@ import functools
 import logging
 import warnings
 from collections import defaultdict
-from typing import cast, List, Optional, Tuple
+from typing import Any, cast, List, Optional, Tuple
 
 import torch
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
@@ -27,7 +27,7 @@ from typing import Dict
 from monarch._src.actor.actor_mesh import Actor, context
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
-from monarch._src.actor.proc_mesh import (
+from monarch._src.actor.v1 import (
     get_or_spawn_controller as get_or_spawn_controller_v0,
     ProcMesh as ProcMeshV0,
 )
@@ -62,12 +62,12 @@ def is_rdma_available():
 def _ensure_init_rdma_manager() -> Shared[None]:
     async def task() -> None:
         proc_mesh = context().actor_instance.proc_mesh
-        if isinstance(proc_mesh, ProcMeshV0):
-            controller = await get_or_spawn_controller_v0(
+        if isinstance(proc_mesh, ProcMeshV1):
+            controller = await get_or_spawn_controller_v1(
                 "rdma_controller", RdmaController
             )
         else:
-            controller = await get_or_spawn_controller_v1(
+            controller = await get_or_spawn_controller_v0(
                 "rdma_controller", RdmaController
             )
 
@@ -141,7 +141,9 @@ class RdmaController(Actor):
         if proc_mesh not in self._manager_futures:
 
             async def create_manager() -> _RdmaManager:
-                proc_mesh_result = await Future(coro=proc_mesh._proc_mesh.task())
+                proc_mesh_result = await Future(
+                    coro=cast("PythonTask[Any]", proc_mesh._proc_mesh.task())
+                )
                 return none_throws(
                     await _RdmaManager.create_rdma_manager_nonblocking(
                         proc_mesh_result, context().actor_instance
