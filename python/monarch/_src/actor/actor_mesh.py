@@ -237,7 +237,7 @@ _transport: Optional[ChannelTransport] = None
 _transport_lock = threading.Lock()
 
 
-def enable_transport(transport: ChannelTransport) -> None:
+def enable_transport(transport: "ChannelTransport | str") -> None:
     """
     Allow monarch to communicate with transport type 'transport'
     This must be called before any other calls in the monarch API.
@@ -247,6 +247,15 @@ def enable_transport(transport: ChannelTransport) -> None:
     Currently only one transport type may be enabled at one time.
     In the future we may allow multiple to be enabled.
     """
+    if isinstance(transport, str):
+        transport = {
+            "tcp": ChannelTransport.Tcp,
+            "ipc": ChannelTransport.Unix,
+            "metatls": ChannelTransport.MetaTlsWithIpV6,
+        }.get(transport)
+        if transport is None:
+            raise ValueError(f"unknown transport: {transport}")
+
     if _context.get(None) is not None:
         raise RuntimeError(
             "`enable_transport()` must be called before any other calls in the monarch API. "
@@ -307,7 +316,7 @@ class _SingletonActorAdapator:
     def new_with_region(self, region: Region) -> "ActorMeshProtocol":
         return _SingletonActorAdapator(self._inner, self._region)
 
-    def supervision_event(self) -> "Optional[Shared[Exception]]":
+    def supervision_event(self, instance: HyInstance) -> "Optional[Shared[Exception]]":
         return None
 
     def stop(self) -> "PythonTask[None]":
@@ -379,7 +388,10 @@ class ActorEndpoint(Endpoint[P, R]):
 
     def _port(self, once: bool = False) -> "Tuple[Port[R], PortReceiver[R]]":
         p, r = super()._port(once=once)
-        monitor: Optional[Shared[Exception]] = self._actor_mesh.supervision_event()
+        instance = context().actor_instance._as_rust()
+        monitor: Optional[Shared[Exception]] = self._actor_mesh.supervision_event(
+            instance
+        )
         r._set_monitor(monitor)
         return (p, r)
 
