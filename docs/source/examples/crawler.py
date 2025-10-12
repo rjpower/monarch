@@ -72,16 +72,15 @@ class QueueActor(Actor):
 class CrawlActor(Actor):
     """
     Define the CrawlActor class.
-    - Takes in all queues, but slices down to only use the first one.  This is a temporary
-      workaround until ProcMesh.slice is implemented.
+    - Takes in a reference to the central QueueActor.
     - Runs a long crawl() process that continuously takes items off the central queue, parses them,
       and adds links it finds back to the queue.
     - Crawls to a configured depth and terminates after the queue is empty for a configured number
       of seconds.
     """
 
-    def __init__(self, all_queues: QueueActor):
-        self.target_queue: QueueActor = all_queues.slice(procs=slice(0, 1))
+    def __init__(self, queue: QueueActor):
+        self.target_queue: QueueActor = queue
         self.processed = 0
 
     @staticmethod
@@ -130,16 +129,14 @@ async def main():
         per_host={"procs": NUM_CRAWLERS}
     )
 
-    # Create queues across the mesh and use slice to target the first one; we will not use the rest.
-    # TODO: One ProcMesh::slice is implemented, avoid spawning the extra ones here.
-    all_queues = local_proc_mesh.spawn("queues", QueueActor)
-    target_queue = all_queues.slice(procs=slice(0, 1))
+    # Create a single queue on just the first proc using slice spawn.
+    target_queue = local_proc_mesh.slice(procs=slice(0, 1)).spawn("queue", QueueActor)
 
     # Prime the queue with the base URL we want to crawl.
     await target_queue.insert.call_one(BASE, DEPTH)
 
-    # Make the crawlers and pass in the queues; crawlers will just use the first one as well.
-    crawlers = local_proc_mesh.spawn("crawlers", CrawlActor, all_queues)
+    # Make the crawlers and pass in the queue.
+    crawlers = local_proc_mesh.spawn("crawlers", CrawlActor, target_queue)
 
     # Run the crawlers; display the count of documents they crawled when done.
     results = await crawlers.crawl.call()

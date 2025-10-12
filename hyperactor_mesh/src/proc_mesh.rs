@@ -1080,12 +1080,81 @@ impl Mesh for SlicedProcMesh<'_> {
         Ok(Self(self.0, self.1.select(label, range)?))
     }
 
-    fn get(&self, _index: usize) -> Option<ProcId> {
-        unimplemented!()
+    fn get(&self, index: usize) -> Option<ProcId> {
+        // Get the rank in the parent mesh that corresponds to this index in the slice
+        let parent_rank = self.1.slice().get(index)?;
+        self.0.get(parent_rank)
     }
 
     fn id(&self) -> Self::Id {
         self.0.id()
+    }
+}
+
+impl<'a> SlicedProcMesh<'a> {
+    /// Spawn an `ActorMesh` on only the procs in this slice.
+    ///
+    /// This enables spawning actors on a subset of the parent mesh's procs,
+    /// which is useful for patterns like having a single queue accessed by
+    /// multiple workers.
+    ///
+    /// - `cx`: Context for actor operations
+    /// - `actor_name`: Name for all spawned actors
+    /// - `params`: Reference to the parameter struct, reused for all actors
+    ///
+    /// Bounds:
+    /// - `A: Actor` — we actually spawn this type on each agent in the slice
+    /// - `A: Referable` — we return a `RootActorMesh<'_, A>` that contains `ActorRef<A>`s
+    /// - `A::Params: RemoteMessage` — params must be serializable to cross proc boundaries
+    pub async fn spawn<A: Actor + Referable>(
+        &self,
+        cx: &impl context::Actor,
+        actor_name: &str,
+        params: &A::Params,
+    ) -> Result<RootActorMesh<'a, A>, anyhow::Error>
+    where
+        A::Params: RemoteMessage,
+    {
+        match &self.0.inner {
+            ProcMeshKind::V0 {
+                actor_event_router,
+                client,
+                ..
+            } => {
+                let (tx, rx) = mpsc::unbounded_channel::<ActorSupervisionEvent>();
+                {
+                    // Instantiate supervision routing BEFORE spawning the actor mesh.
+                    actor_event_router.insert(actor_name.to_string(), tx);
+                    tracing::info!(
+                        name = "router_insert",
+                        actor_name = %actor_name,
+                        "the length of the router is {}", actor_event_router.len(),
+                    );
+                }
+
+                // Collect only the agents that correspond to the procs in this slice
+                let slice_agents: Vec<_> = self.1.slice()
+                    .iter()
+                    .filter_map(|parent_rank| {
+                        // Get the agent for this parent rank
+                        self.0.agents().nth(parent_rank)
+                    })
+                    .collect();
+
+                let root_mesh = RootActorMesh::new(
+                    self,
+                    actor_name.to_string(),
+                    rx,
+                    ProcMesh::spawn_on_procs::<A>(client, slice_agents, actor_name, params).await?,
+                );
+                Ok(root_mesh)
+            }
+            ProcMeshKind::V1(proc_mesh) => {
+                // V1 already supports spawning on sliced meshes via ProcMeshRef::sliced()
+                let actor_mesh = proc_mesh.spawn(cx, actor_name, params).await?;
+                Ok(RootActorMesh::new_v1(actor_mesh.detach()))
+            }
+        }
     }
 }
 
@@ -1234,6 +1303,34 @@ mod tests {
             .unwrap();
         let result = mesh.spawn::<TestActor>(&instance, "dup", &()).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_on_sliced_mesh() {
+        // Test that we can spawn actors on only a subset of the mesh using slice().spawn()
+        let alloc = LocalAllocator
+            .allocate(AllocSpec {
+                extent: extent!(procs = 4),
+                constraints: Default::default(),
+                proc_name: None,
+                transport: ChannelTransport::Local,
+            })
+            .await
+            .unwrap();
+        let mesh = ProcMesh::allocate(alloc).await.unwrap();
+        let instance = crate::v1::testing::instance().await;
+
+        // Create a slice that only includes the first proc (index 0)
+        let sliced_mesh = mesh.select("procs", 0..1).unwrap();
+
+        // Spawn an actor mesh on only the sliced portion (first proc)
+        let actors = sliced_mesh.spawn::<TestActor>(&instance, "test_slice", &()).await.unwrap();
+
+        // Verify that the actor mesh shape matches the slice (1 proc, not 4)
+        assert_eq!(actors.shape().total_size(), 1);
+
+        // Verify we have exactly 1 actor (not 4)
+        assert_eq!(actors.iter_actor_refs().count(), 1);
     }
 
     mod shim {
