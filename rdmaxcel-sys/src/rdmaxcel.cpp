@@ -18,11 +18,11 @@
 // TODO: explicitly obtain from ibverbs config, for now assume 32
 const int SGE_MAX = 32;
 
-// Maximum size for a single MR: 2GB
-const size_t MAX_MR_SIZE = 2ULL * 1024 * 1024 * 1024;
-
 // MR size must be a multiple of 2MB
 const size_t MR_ALIGNMENT = 2ULL * 1024 * 1024;
+
+// Maximum size for a single MR: 4GB max,  need to be one page under.
+const size_t MAX_MR_SIZE = 4ULL * 1024 * 1024 * 1024 - MR_ALIGNMENT;
 
 // Structure to hold segment information
 struct SegmentInfo {
@@ -399,6 +399,36 @@ int get_cuda_pci_address_from_ptr(
   if (written < 0 || written >= (int)pci_addr_size) {
     return RDMAXCEL_BUFFER_TOO_SMALL;
   }
+
+  return 0; // Success
+}
+
+// Deregister all segments and clean up
+int deregister_segments() {
+  std::lock_guard<std::mutex> lock(segmentsMutex);
+
+  for (auto& pair : activeSegments) {
+    SegmentInfo& seg = pair.second;
+
+    // Deregister all MRs for this segment
+    for (auto* mr : seg.mrs) {
+      if (mr) {
+        ibv_dereg_mr(mr);
+      }
+    }
+    seg.mrs.clear();
+
+    // Destroy mkey if it exists
+    if (seg.mkey) {
+      mlx5dv_destroy_mkey(seg.mkey);
+      seg.mkey = nullptr;
+    }
+
+    seg.mr_size = 0;
+  }
+
+  // Clear all segments
+  activeSegments.clear();
 
   return 0; // Success
 }
