@@ -161,6 +161,13 @@ class ProcMeshRef:
     def _proc_mesh(self) -> Shared["HyProcMeshV0"]:
         return _deref_proc_mesh(self)._proc_mesh
 
+    @property
+    def initialized(self) -> Future[Literal[True]]:
+        async def task() -> Literal[True]:
+            return True
+
+        return Future(coro=task())
+
 
 _proc_mesh_lock: threading.Lock = threading.Lock()
 _proc_mesh_key: int = 0
@@ -585,6 +592,7 @@ class ProcMeshV0(MeshTrait):
 
         assert self._code_sync_client is not None
         await self._code_sync_client.sync_workspaces(
+            instance=context().actor_instance._as_rust(),
             workspaces=list(workspaces.values()),
             auto_reload=auto_reload,
         )

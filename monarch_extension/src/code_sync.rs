@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use futures::TryFutureExt;
+use hyperactor::context;
 use hyperactor_mesh::Mesh;
 use hyperactor_mesh::RootActorMesh;
 use hyperactor_mesh::shared_cell::SharedCell;
@@ -27,6 +28,7 @@ use monarch_hyperactor::code_sync::manager::WorkspaceShape;
 use monarch_hyperactor::code_sync::manager::code_sync_mesh;
 use monarch_hyperactor::context::PyInstance;
 use monarch_hyperactor::instance_dispatch;
+use monarch_hyperactor::instance_into_dispatch;
 use monarch_hyperactor::proc_mesh::PyProcMesh;
 use monarch_hyperactor::runtime::signal_safe_block_on;
 use monarch_hyperactor::v1::proc_mesh::PyProcMesh as PyProcMeshV1;
@@ -241,6 +243,7 @@ pub struct CodeSyncMeshClient {
 
 impl CodeSyncMeshClient {
     async fn sync_workspace_(
+        instance: &impl context::Actor,
         actor_mesh: SharedCell<RootActorMesh<'static, CodeSyncManager>>,
         local: PathBuf,
         remote: RemoteWorkspace,
@@ -257,7 +260,7 @@ impl CodeSyncMeshClient {
             location: remote.location.into(),
             shape,
         };
-        code_sync_mesh(&actor_mesh, local, remote, method, auto_reload)
+        code_sync_mesh(instance, &actor_mesh, local, remote, method, auto_reload)
             .await
             .map_err(|err| PyRuntimeError::new_err(format!("{:#?}", err)))?;
         Ok(())
@@ -309,48 +312,59 @@ impl CodeSyncMeshClient {
         }
     }
 
-    #[pyo3(signature = (*, local, remote, method = PyCodeSyncMethod::Rsync {}, auto_reload = false))]
+    #[pyo3(signature = (*, instance, local, remote, method = PyCodeSyncMethod::Rsync {}, auto_reload = false))]
     fn sync_workspace<'py>(
         &self,
         py: Python<'py>,
+        instance: &PyInstance,
         local: PathBuf,
         remote: RemoteWorkspace,
         method: PyCodeSyncMethod,
         auto_reload: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        monarch_hyperactor::runtime::future_into_py(
-            py,
-            CodeSyncMeshClient::sync_workspace_(
-                self.actor_mesh.clone(),
-                local,
-                remote,
-                method.into(),
-                auto_reload,
-            )
-            .err_into(),
-        )
+        let instance = instance.clone();
+        let actor_mesh = self.actor_mesh.clone();
+        instance_into_dispatch!(instance, |cx| {
+            monarch_hyperactor::runtime::future_into_py(py, async move {
+                CodeSyncMeshClient::sync_workspace_(
+                    &cx,
+                    actor_mesh,
+                    local,
+                    remote,
+                    method.into(),
+                    auto_reload,
+                )
+                .err_into()
+                .await
+            })
+        })
     }
 
-    #[pyo3(signature = (*, workspaces, auto_reload = false))]
+    #[pyo3(signature = (*, instance, workspaces, auto_reload = false))]
     fn sync_workspaces<'py>(
         &self,
         py: Python<'py>,
+        instance: &PyInstance,
         workspaces: Vec<PyWorkspaceConfig>,
         auto_reload: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let actor_mesh = self.actor_mesh.clone();
+        let instance = instance.clone();
         monarch_hyperactor::runtime::future_into_py(
             py,
             async move {
                 for workspace in workspaces.into_iter() {
-                    CodeSyncMeshClient::sync_workspace_(
-                        actor_mesh.clone(),
-                        workspace.local,
-                        workspace.remote,
-                        workspace.method.into(),
-                        auto_reload,
-                    )
-                    .await?
+                    instance_dispatch!(instance, async |cx| {
+                        CodeSyncMeshClient::sync_workspace_(
+                            cx,
+                            actor_mesh.clone(),
+                            workspace.local,
+                            workspace.remote,
+                            workspace.method.into(),
+                            auto_reload,
+                        )
+                        .await
+                    })?;
                 }
                 anyhow::Ok(())
             }

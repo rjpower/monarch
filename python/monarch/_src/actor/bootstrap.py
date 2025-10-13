@@ -119,4 +119,5 @@ def attach_to_workers(
         stream_logs=True,
         is_fake_in_process=False,
         _initialized_hy_host_mesh=None,
+        _code_sync_proc_mesh=None,
     )

@@ -26,9 +26,11 @@ from monarch._src.actor.allocator import (
     LocalAllocator,
     ProcessAllocator,
 )
+from monarch._src.actor.future import Future
 from monarch._src.actor.proc_mesh import _get_bootstrap_args
 from monarch._src.actor.shape import MeshTrait, NDSlice, Shape
 from monarch._src.actor.v1.proc_mesh import ProcMesh
+from monarch.tools.config.workspace import Workspace
 
 
 def _bootstrap_cmd() -> BootstrapCommand:
@@ -104,6 +106,7 @@ class HostMesh(MeshTrait):
         stream_logs: bool,
         is_fake_in_process: bool,
         _initialized_hy_host_mesh: Optional[HyHostMesh],
+        _code_sync_proc_mesh: Optional["ProcMesh"],
     ) -> None:
         self._initialized_host_mesh = _initialized_hy_host_mesh
         if not self._initialized_host_mesh:
@@ -118,6 +121,9 @@ class HostMesh(MeshTrait):
         self._region = region
         self._stream_logs = stream_logs
         self._is_fake_in_process = is_fake_in_process
+        self._code_sync_proc_mesh: "ProcMesh" = (
+            _code_sync_proc_mesh if _code_sync_proc_mesh else self.spawn_procs()
+        )
 
     @classmethod
     def allocate_nonblocking(
@@ -144,6 +150,7 @@ class HostMesh(MeshTrait):
             extent.region,
             alloc.stream_logs,
             isinstance(allocator, LocalAllocator),
+            None,
             None,
         )
 
@@ -214,6 +221,8 @@ class HostMesh(MeshTrait):
             else self._initialized_host_mesh.sliced(shape.region)
         )
 
+        code_sync_proc_mesh = self._code_sync_proc_mesh._new_with_shape(shape)
+
         async def task() -> HyHostMesh:
             return (
                 initialized_hm
@@ -227,6 +236,7 @@ class HostMesh(MeshTrait):
             self.stream_logs,
             self.is_fake_in_process,
             initialized_hm,
+            code_sync_proc_mesh,
         )
 
     @property
@@ -244,6 +254,7 @@ class HostMesh(MeshTrait):
         region: Region,
         stream_logs: bool,
         is_fake_in_process: bool,
+        code_sync_proc_mesh: "ProcMesh",
     ) -> "HostMesh":
         async def task() -> HyHostMesh:
             return hy_host_mesh
@@ -254,6 +265,7 @@ class HostMesh(MeshTrait):
             stream_logs,
             is_fake_in_process,
             hy_host_mesh,
+            code_sync_proc_mesh,
         )
 
     def __reduce_ex__(self, protocol: ...) -> Tuple[Any, Tuple[Any, ...]]:
@@ -262,6 +274,7 @@ class HostMesh(MeshTrait):
             self._region,
             self.stream_logs,
             self.is_fake_in_process,
+            None,
         )
 
     @property
@@ -281,6 +294,46 @@ class HostMesh(MeshTrait):
             self._hy_host_mesh.block_on()
             assert self._initialized_host_mesh is not None
         return self._initialized_host_mesh
+
+    def shutdown(self) -> Future[None]:
+        """
+        Shutdown the host mesh and all of its processes. It will throw an exception
+        if this host mesh is a *reference* rather than *owned*, which can happen
+        if this `HostMesh` object was received from a remote actor or if it was
+        produced by slicing.
+
+        Returns:
+            Future[None]: A future that completes when the host mesh has been shut down.
+        """
+
+        async def task() -> None:
+            hy_mesh = await self._hy_host_mesh
+            await hy_mesh.shutdown(context().actor_instance._as_rust())
+
+        return Future(coro=task())
+
+    async def sync_workspace(
+        self,
+        workspace: Workspace,
+        conda: bool = False,
+        auto_reload: bool = False,
+    ) -> None:
+        """
+        Sync local code changes to the remote hosts.
+
+        Args:
+            workspace: The workspace to sync.
+            conda: If True, also sync the currently activated conda env.
+            auto_reload: If True, automatically reload the workspace on changes.
+        """
+        if self._code_sync_proc_mesh:
+            await self._code_sync_proc_mesh._sync_workspace(
+                workspace, conda, auto_reload
+            )
+        else:
+            raise RuntimeError(
+                "cannot call sync_workspace on a host mesh that was sent over an actor endpoint"
+            )
 
 
 def fake_in_process_host() -> "HostMesh":

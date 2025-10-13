@@ -31,6 +31,7 @@ use hyperactor::Handler;
 use hyperactor::Named;
 use hyperactor::PortRef;
 use hyperactor::Unbind;
+use hyperactor::context;
 use hyperactor::forward;
 use hyperactor_mesh::RootActorMesh;
 use hyperactor_mesh::SlicedActorMesh;
@@ -182,6 +183,7 @@ pub enum CodeSyncMessage {
         result: PortRef<Result<(), String>>,
     },
     Reload {
+        sender_rank: Option<usize>,
         result: PortRef<Result<(), String>>,
     },
 }
@@ -310,15 +312,15 @@ impl CodeSyncMessageHandler for CodeSyncManager {
                         .get()
                         .ok_or_else(|| anyhow::anyhow!("missing self mesh"))?;
                     let mesh = workspace_shape.downstream_mesh(mesh, *rank)?;
-                    // FIXME: This is a hack because right now code sync requires excluding the current rank
-                    // from the sync, but there's no way to do that with v1.
-                    mesh.iter().try_for_each(|(_, actor)| {
-                        if actor.actor_id() == cx.self_id() {
-                            return Ok(());
-                        }
-                        actor.send(cx, CodeSyncMessage::Reload { result: tx.clone() })
-                    })?;
-                    len = mesh.region().slice().len();
+                    mesh.cast(
+                        cx,
+                        CodeSyncMessage::Reload {
+                            sender_rank: Some(*rank),
+                            result: tx.clone(),
+                        },
+                    )?;
+                    // Exclude self from the sync.
+                    len = mesh.region().slice().len() - 1;
                 } else {
                     let mesh = workspace_shape.downstream_mesh_v0(cx.self_id())?;
                     mesh.cast(
@@ -328,13 +330,16 @@ impl CodeSyncMessageHandler for CodeSyncManager {
                         // concurrently below.
                         sel!(*)
                             .without(mesh.shape().slice(), &HashSet::from([cx.self_id().rank()]))?,
-                        CodeSyncMessage::Reload { result: tx.clone() },
+                        CodeSyncMessage::Reload {
+                            sender_rank: None,
+                            result: tx.clone(),
+                        },
                     )?;
                     len = mesh.shape().slice().len();
                 }
                 let _: ((), Vec<()>) = try_join!(
                     // Run reload for this rank.
-                    self.reload(cx, tx),
+                    self.reload(cx, self.rank.get().cloned(), tx),
                     rx.take(len)
                         .map(|res| res?.map_err(anyhow::Error::msg))
                         .try_collect(),
@@ -361,8 +366,16 @@ impl CodeSyncMessageHandler for CodeSyncManager {
     async fn reload(
         &mut self,
         cx: &Context<Self>,
+        sender_rank: Option<usize>,
         result: PortRef<Result<(), String>>,
     ) -> Result<()> {
+        if self
+            .rank
+            .get()
+            .is_some_and(|rank| sender_rank.is_some_and(|sender_rank| *rank == sender_rank))
+        {
+            return Ok(());
+        }
         let res = async move {
             let (tx, mut rx) = cx.open_port();
             self.get_auto_reload_actor(cx)
@@ -411,13 +424,14 @@ pub enum CodeSyncMethod {
 }
 
 pub async fn code_sync_mesh(
+    cx: &impl context::Actor,
     actor_mesh: &RootActorMesh<'_, CodeSyncManager>,
     local_workspace: PathBuf,
     remote_workspace: WorkspaceConfig,
     method: CodeSyncMethod,
     auto_reload: bool,
 ) -> Result<()> {
-    let instance = actor_mesh.proc_mesh().client();
+    let instance = cx.instance();
 
     // Create a slice of the actor mesh that only includes workspace "owners" (e.g. on multi-GPU hosts,
     // only one of the ranks on that host will participate in the code sync).
@@ -667,6 +681,7 @@ mod tests {
         // Test code_sync_mesh function - this coordinates sync operations across the mesh
         // Test without auto-reload first
         code_sync_mesh(
+            instance,
             &actor_mesh,
             source_workspace.path().to_path_buf(),
             remote_workspace_config.clone(),

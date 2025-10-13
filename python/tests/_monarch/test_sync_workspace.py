@@ -13,9 +13,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from collections.abc import Callable
 from pathlib import Path
-from typing import Generator, Optional
+from typing import Generator
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
 from monarch._rust_bindings.monarch_hyperactor.channel import (
@@ -35,19 +34,17 @@ from monarch._src.actor.v1 import enabled as v1_enabled
 from monarch.tools.config.workspace import Workspace
 
 
-def proc_mesh_from_alloc(
-    allocator: AllocateMixin,
-    spec: AllocSpec,
-    setup: Optional[Callable[[], None]] = None,
-    constraints: Optional[AllocConstraints] = None,
-) -> ProcMesh:
+def code_sync_mesh(allocator: AllocateMixin, spec: AllocSpec) -> ProcMesh | HostMesh:
     if not v1_enabled:
         alloc = allocator.allocate(spec)
-        return ProcMesh.from_alloc(alloc, setup)
+        return ProcMesh.from_alloc(alloc, None, True)
     else:
         return HostMesh.allocate_nonblocking(
-            "hosts", Extent(*zip(*list(spec.extent.items()))), allocator, constraints
-        ).spawn_procs(bootstrap=setup)
+            "hosts",
+            Extent(*zip(*list(spec.extent.items()))),
+            allocator,
+            AllocConstraints(),
+        )
 
 
 @contextlib.contextmanager
@@ -111,7 +108,7 @@ class TestSyncWorkspace(unittest.IsolatedAsyncioTestCase):
                 initializer=StaticRemoteAllocInitializer(host),
             )
             spec = AllocSpec(AllocConstraints(), hosts=1, gpus=1)
-            proc_mesh = proc_mesh_from_alloc(allocator, spec)
+            mesh = code_sync_mesh(allocator, spec)
 
             # local workspace dir is empty & remote workspace dir hasn't been primed yet
             self.assertFalse(remote_workspace_dir.is_dir())
@@ -120,7 +117,7 @@ class TestSyncWorkspace(unittest.IsolatedAsyncioTestCase):
             with open(local_workspace_dir / "README.md", mode="w") as f:
                 f.write("hello world")
 
-            await proc_mesh.sync_workspace(workspace)
+            await mesh.sync_workspace(workspace)
 
             # validate README has been created remotely
             with open(remote_workspace_dir / "README.md", mode="r") as f:

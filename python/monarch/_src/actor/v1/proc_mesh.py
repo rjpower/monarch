@@ -440,14 +440,16 @@ class ProcMesh(MeshTrait):
         conda: bool = False,
         auto_reload: bool = False,
     ) -> None:
-        """
-        Sync local code changes to the remote processes.
+        raise NotImplementedError(
+            "sync_workspace is not implemented for v1 ProcMesh. Use HostMesh.sync_workspace instead."
+        )
 
-        Args:
-            workspace: The workspace to sync.
-            conda: If True, also sync the currently activated conda env.
-            auto_reload: If True, automatically reload the workspace on changes.
-        """
+    async def _sync_workspace(
+        self,
+        workspace: Workspace,
+        conda: bool = False,
+        auto_reload: bool = False,
+    ) -> None:
         """
         Sync local code changes to the remote processes.
 
@@ -570,6 +572,7 @@ class ProcMesh(MeshTrait):
 
         assert self._code_sync_client is not None
         await self._code_sync_client.sync_workspaces(
+            instance=context().actor_instance._as_rust(),
             workspaces=list(workspaces.values()),
             auto_reload=auto_reload,
         )
