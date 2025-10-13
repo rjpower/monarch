@@ -121,9 +121,7 @@ class HostMesh(MeshTrait):
         self._region = region
         self._stream_logs = stream_logs
         self._is_fake_in_process = is_fake_in_process
-        self._code_sync_proc_mesh: "ProcMesh" = (
-            _code_sync_proc_mesh if _code_sync_proc_mesh else self.spawn_procs()
-        )
+        self._code_sync_proc_mesh: Optional["ProcMesh"] = _code_sync_proc_mesh
 
     @classmethod
     def allocate_nonblocking(
@@ -145,7 +143,7 @@ class HostMesh(MeshTrait):
                 bootstrap_cmd if bootstrap_cmd else _bootstrap_cmd(),
             )
 
-        return cls(
+        hm = cls(
             PythonTask.from_coroutine(task()).spawn(),
             extent.region,
             alloc.stream_logs,
@@ -153,6 +151,9 @@ class HostMesh(MeshTrait):
             None,
             None,
         )
+
+        hm._code_sync_proc_mesh = hm.spawn_procs()
+        return hm
 
     def spawn_procs(
         self,
@@ -221,8 +222,6 @@ class HostMesh(MeshTrait):
             else self._initialized_host_mesh.sliced(shape.region)
         )
 
-        code_sync_proc_mesh = self._code_sync_proc_mesh._new_with_shape(shape)
-
         async def task() -> HyHostMesh:
             return (
                 initialized_hm
@@ -236,7 +235,7 @@ class HostMesh(MeshTrait):
             self.stream_logs,
             self.is_fake_in_process,
             initialized_hm,
-            code_sync_proc_mesh,
+            None,
         )
 
     @property
@@ -254,7 +253,7 @@ class HostMesh(MeshTrait):
         region: Region,
         stream_logs: bool,
         is_fake_in_process: bool,
-        code_sync_proc_mesh: "ProcMesh",
+        code_sync_proc_mesh: Optional["ProcMesh"],
     ) -> "HostMesh":
         async def task() -> HyHostMesh:
             return hy_host_mesh
@@ -282,6 +281,7 @@ class HostMesh(MeshTrait):
         return self._is_fake_in_process
 
     def __eq__(self, other: "HostMesh") -> bool:
+        # Should we include code sync proc mesh?
         return (
             self._initialized_mesh() == other._initialized_mesh()
             and self._region == other._region
@@ -332,7 +332,7 @@ class HostMesh(MeshTrait):
             )
         else:
             raise RuntimeError(
-                "cannot call sync_workspace on a host mesh that was sent over an actor endpoint"
+                "cannot call sync_workspace on a sliced host mesh or one that was sent over an actor endpoint"
             )
 
 
