@@ -27,7 +27,6 @@ from monarch import (
     RemoteException as OldRemoteException,
     Stream,
 )
-from monarch._src.actor.v1 import enabled as v1_enabled
 
 from monarch._testing import BackendType, TestingContext
 from monarch.builtins.log import log_remote
@@ -58,11 +57,6 @@ from monarch.worker._testing_function import (
 )
 from monarch_supervisor.logging import fix_exception_lines
 from torch.distributed import ReduceOp
-
-
-pytestmark = pytest.mark.skipif(
-    v1_enabled, reason="ENABLE ASAP ONCE V1 TENSOR ENGINE LANDS"
-)
 
 
 RemoteException = (NewRemoteException, OldRemoteException)

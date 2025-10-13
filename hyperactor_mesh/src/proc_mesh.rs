@@ -175,6 +175,18 @@ pub fn global_root_client() -> &'static Instance<()> {
             .instance("client")
             .expect("root instance create");
 
+        let (supervision_tx, mut supervision_rx) = client.open_port();
+        client_proc.set_supervision_coordinator(supervision_tx).unwrap();
+
+        // TODO: Come up with a better way to handle supervision events from actors spawned
+        // on the root client proc. Unfortunately, for now, detached instances can't handle
+        // supervision events, and its proc would just crash if it received one.
+        tokio::spawn(async move {
+            while let Ok(event) = supervision_rx.recv().await {
+                tracing::error!("root client received superivision event from child actor: {}", event);
+            }
+        });
+
         // Bind the global root client's undeliverable port and
         // forward any undeliverable messages to the currently active
         // supervision sink.
@@ -992,7 +1004,9 @@ impl<D: Deref<Target = ProcMesh> + Send + Sync + 'static> SharedSpawnable for D 
                     ranks,
                 ))
             }
-            ProcMeshKind::V1(proc_mesh) => todo!(),
+            ProcMeshKind::V1(proc_mesh) => Ok(RootActorMesh::from(
+                proc_mesh.spawn_service(cx, actor_name, params).await?,
+            )),
         }
     }
 }
