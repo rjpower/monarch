@@ -154,6 +154,7 @@ __all__ = [
     "remote",
     "RemoteProcessGroup",
     "function_resolvers",
+    "Extent",
     "Future",
     "RemoteException",
     "Shape",
