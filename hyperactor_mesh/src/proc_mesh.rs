@@ -993,7 +993,7 @@ impl<D: Deref<Target = ProcMesh> + Send + Sync + 'static> SharedSpawnable for D 
                     ranks,
                 ))
             }
-            ProcMeshKind::V1(proc_mesh) => Ok(RootActorMesh::from(
+            ProcMeshKind::V1(_proc_mesh) => Ok(RootActorMesh::from(
                 proc_mesh.spawn_service(cx, actor_name, params).await?,
             )),
         }
