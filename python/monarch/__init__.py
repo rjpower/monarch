@@ -37,7 +37,7 @@ except ImportError:
 if TYPE_CHECKING:
     from monarch import timer
     from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
-    from monarch._src.actor.shape import NDSlice, Shape
+    from monarch._src.actor.shape import Extent, NDSlice, Shape
     from monarch.common._coalescing import coalescing
 
     from monarch.common.device_mesh import (
