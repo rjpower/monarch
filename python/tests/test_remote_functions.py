@@ -332,14 +332,17 @@ class TestRemoteFunctions(RemoteFunctionsTestBase):
                 _ = fetch_shard(a).result(timeout=40)
 
     def test_set_device_inside_udf_fails_with_explanation(self, backend_type):
-        if backend_type != BackendType.RS:
+        if backend_type == BackendType.PY:
             pytest.skip("Python support not planned for this test")
         with self.local_device_mesh(2, 2, backend_type):
             t = set_device_udf(2)
             try:
                 inspect(t)
             except RemoteException as e:
-                backtrace = "\n".join([frame.name for frame in e.worker_frames])
+                if isinstance(e, NewRemoteException):
+                    backtrace = e.worker_error_string
+                else:
+                    backtrace = "\n".join([frame.name for frame in e.worker_frames])
                 assert "are available to monarch worker" in backtrace
 
     def test_simple_tensors(self, backend_type):

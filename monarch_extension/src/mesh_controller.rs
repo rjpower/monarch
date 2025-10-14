@@ -230,6 +230,7 @@ impl _Controller {
         };
         let message: WorkerMessage = convert(message)?;
         self.controller_handle
+            .blocking_lock()
             .send(ClientToControllerMessage::Send { slices, message })
             .map_err(to_py_error)
     }
@@ -885,11 +886,7 @@ impl Handler<ClientToControllerMessage> for MeshControllerActor {
             ClientToControllerMessage::Send { slices, message } => {
                 let workers = self.workers();
                 let sel = workers.shape().slice().reify_slices(slices)?;
-                if let Some(workers) = workers.v1() {
-                    workers.cast_for_tensor_engine_only_do_not_use(this, sel, message)?;
-                } else {
-                    workers.cast(this, sel, message)?;
-                }
+                workers.cast(this, sel, message)?;
             }
             ClientToControllerMessage::Node {
                 seq,

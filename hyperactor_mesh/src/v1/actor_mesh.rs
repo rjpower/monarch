@@ -157,7 +157,7 @@ impl<A: Referable> ActorMeshRef<A> {
     /// This should *only* be used for temporary support for selections in the tensor
     /// engine. If you use this for anything else, you will be fired (you too, OSS
     /// contributor).
-    pub fn cast_for_tensor_engine_only_do_not_use<M>(
+    pub(crate) fn cast_for_tensor_engine_only_do_not_use<M>(
         &self,
         cx: &impl context::Actor,
         sel: Selection,

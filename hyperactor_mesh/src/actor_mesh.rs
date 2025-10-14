@@ -207,14 +207,8 @@ pub trait ActorMesh: Mesh<Id = ActorMeshId> {
         M: Castable + RemoteMessage + Clone,
     {
         if let Some(v1) = self.v1() {
-            if !selection::structurally_equal(&selection, &sel!(*)) {
-                return Err(CastError::SelectionNotSupported(format!(
-                    "ActorMesh::cast: selection {} not supported; for v1 meshes supports only universal selection",
-                    selection
-                )));
-            }
             return v1
-                .cast(cx, message)
+                .cast_for_tensor_engine_only_do_not_use(cx, selection, message)
                 .map_err(anyhow::Error::from)
                 .map_err(CastError::from);
         }

@@ -149,6 +149,17 @@ def _initialize_env(worker_point: Point, proc_id: str) -> None:
         # workaround for set_manual_seed somehow not working if cuda is not initialized\
         if torch.cuda.is_available():
             torch.cuda.init()
+
+        def check_set_device(device):
+            import os
+
+            if str(device) not in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(","):
+                raise ValueError(
+                    f"Only devices {os.environ.get('CUDA_VISIBLE_DEVICES', 'None')} are available to monarch worker, "
+                    f"but torch.cuda.set_device({device}) was called"
+                )
+
+        torch.cuda.set_device = check_set_device
     except Exception:
         traceback.print_exc()
         raise
