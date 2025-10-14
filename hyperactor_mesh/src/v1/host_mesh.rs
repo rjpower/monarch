@@ -7,6 +7,7 @@
  */
 
 use hyperactor::accum::ReducerOpts;
+use hyperactor::attrs::Attrs;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
@@ -40,6 +41,7 @@ use serde::Serialize;
 use crate::alloc::Alloc;
 use crate::bootstrap::BootstrapCommand;
 use crate::resource;
+use crate::resource::ApplyConfigSnapshot;
 use crate::resource::CreateOrUpdateClient;
 use crate::resource::GetRankStatus;
 use crate::resource::GetRankStatusClient;
@@ -283,16 +285,19 @@ impl HostMesh {
             hosts.push(host_ref);
         }
 
+        let current_ref = HostMeshRef::new(extent.clone().into(), hosts.clone()).unwrap();
+        current_ref.apply_config_snapshot(cx, config::global::attrs())?;
+
         let proc_mesh_ref = proc_mesh.clone();
         Ok(Self {
             name,
-            extent: extent.clone(),
+            extent,
             allocation: HostMeshAllocation::ProcMesh {
                 proc_mesh,
                 proc_mesh_ref,
-                hosts: hosts.clone(),
+                hosts,
             },
-            current_ref: HostMeshRef::new(extent.into(), hosts).unwrap(),
+            current_ref,
         })
     }
 
@@ -608,6 +613,24 @@ impl HostMeshRef {
         }
 
         ProcMesh::create_owned_unchecked(cx, mesh_name, extent, self.clone(), procs).await
+    }
+
+    fn apply_config_snapshot(&self, cx: &impl context::Actor, config: Attrs) -> v1::Result<()> {
+        for host in self.ranks.iter() {
+            host.mesh_agent()
+                .send(cx, ApplyConfigSnapshot::new(config.clone()))
+                .map_err(|e| {
+                    v1::Error::HostMeshAgentConfigurationError(
+                        host.mesh_agent().actor_id().clone(),
+                        format!(
+                            "failed to send config snapshot to host mesh agent {}: {}",
+                            host.mesh_agent().actor_id(),
+                            e
+                        ),
+                    )
+                })?;
+        }
+        Ok(())
     }
 }
 
