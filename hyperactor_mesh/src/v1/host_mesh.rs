@@ -40,6 +40,7 @@ use serde::Serialize;
 
 use crate::alloc::Alloc;
 use crate::bootstrap::BootstrapCommand;
+use crate::proc_mesh::global_root_client;
 use crate::resource;
 use crate::resource::ApplyConfigSnapshot;
 use crate::resource::CreateOrUpdateClient;
@@ -314,6 +315,10 @@ impl HostMesh {
 
         let current_ref = HostMeshRef::new(region.clone(), hosts.clone())
             .expect("region/hosts cardinality must match");
+
+        current_ref
+            .apply_config_snapshot(global_root_client(), config::global::attrs())
+            .unwrap();
 
         Self {
             name,
