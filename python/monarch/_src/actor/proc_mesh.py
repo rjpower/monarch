@@ -75,6 +75,7 @@ from monarch._src.actor.v1.proc_mesh import (
     _get_controller_controller as _get_controller_controller_v1,
     get_active_proc_meshes as get_active_proc_meshes_v1,
     get_or_spawn_controller as get_or_spawn_controller_v1,
+    HyProcMesh as HyProcMeshV1,
     ProcMesh as ProcMeshV1,
 )
 from monarch.tools.config.environment import CondaEnvironment
@@ -592,6 +593,7 @@ class ProcMeshV0(MeshTrait):
 
         assert self._code_sync_client is not None
         await self._code_sync_client.sync_workspaces(
+            instance=context().actor_instance._as_rust(),
             workspaces=list(workspaces.values()),
             auto_reload=auto_reload,
         )
@@ -906,9 +908,11 @@ if v1_enabled or TYPE_CHECKING:
     _get_controller_controller = _get_controller_controller_v1
     get_active_proc_meshes = get_active_proc_meshes_v1
     _ControllerController = _ControllerControllerV1
+    HyProcMesh = HyProcMeshV1
 else:
     ProcMesh = ProcMeshV0
     get_or_spawn_controller = get_or_spawn_controller_v0
     _get_controller_controller = _get_controller_controller_v0
     get_active_proc_meshes = get_active_proc_meshes_v0
     _ControllerController = _ControllerControllerV0
+    HyProcMesh = HyProcMeshV0
