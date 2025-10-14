@@ -83,6 +83,7 @@ _public_api = {
     "no_mesh": ("monarch.common.device_mesh", "no_mesh"),
     "RemoteProcessGroup": ("monarch.common.device_mesh", "RemoteProcessGroup"),
     "function_resolvers": ("monarch.common.function", "resolvers"),
+    "Extent": ("monarch._src.actor.shape", "Extent"),
     "Future": ("monarch.common.future", "Future"),
     "RemoteException": ("monarch.common.invocation", "RemoteException"),
     "Shape": ("monarch._src.actor.shape", "Shape"),
