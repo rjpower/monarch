@@ -69,6 +69,7 @@ def _torch_storage(obj):
 
 
 class _Pickler(cloudpickle.Pickler):
+    _torch_initialized = False
     _dispatch_table = {}
 
     dispatch_table = ChainMap(_dispatch_table, cloudpickle.Pickler.dispatch_table)
@@ -83,7 +84,7 @@ class _Pickler(cloudpickle.Pickler):
     @classmethod
     def _init_torch_dispatch(cls):
         # already initialized
-        if cls._dispatch_table:
+        if cls._torch_initialized:
             return
         torch = maybe_torch()
         if torch is not None:
@@ -94,6 +95,7 @@ class _Pickler(cloudpickle.Pickler):
                 scan += 1
             for key in keys:
                 cls._dispatch_table[key] = _torch_storage
+            cls._torch_initialized = True
 
     def persistent_id(self, obj):
         if not self._filter(obj):
