@@ -92,5 +92,3 @@ def unflatten(data: FrozenBuffer | bytes, values: Iterable[Any]) -> Any:
             stack.enter_context(torch.utils._python_dispatch._disable_current_modes())
         up = _Unpickler(data, values)
         return up.load()
-
-
