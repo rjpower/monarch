@@ -11,6 +11,7 @@ import io
 import os
 import pickle
 import sys
+from collections import ChainMap
 from contextlib import ExitStack
 from typing import Any, Callable, Iterable, List, Tuple
 
@@ -48,12 +49,51 @@ def _function_getstate(func):
 cloudpickle.cloudpickle._function_getstate = _function_getstate
 
 
+def _load_from_bytes(b):
+    import torch  # if we haven't loaded it
+
+    # we have to now
+    return torch.load(
+        io.BytesIO(b) if isinstance(b, bytes) else b,
+        map_location="cpu",
+        weights_only=False,
+    )
+
+
+def _torch_storage(obj):
+    import torch  # we only get here if torch is already imported
+
+    b = io.BytesIO()
+    torch.save(obj, b, _use_new_zipfile_serialization=False)
+    return (_load_from_bytes, (b.getvalue(),))
+
+
 class _Pickler(cloudpickle.Pickler):
+    _dispatch_table = {}
+
+    dispatch_table = ChainMap(_dispatch_table, cloudpickle.Pickler.dispatch_table)
+
     def __init__(self, filter, f: Buffer | io.BytesIO):
         self.f = f
         super().__init__(self.f)
         self._filter = filter
         self._saved = []
+        _Pickler._init_torch_dispatch()
+
+    @classmethod
+    def _init_torch_dispatch(cls):
+        # already initialized
+        if cls._dispatch_table:
+            return
+        torch = maybe_torch()
+        if torch is not None:
+            keys = [torch.storage.UntypedStorage, torch.storage.TypedStorage]
+            scan = 0
+            while scan < len(keys):
+                keys.extend(keys[scan].__subclasses__())
+                scan += 1
+            for key in keys:
+                cls._dispatch_table[key] = _torch_storage
 
     def persistent_id(self, obj):
         if not self._filter(obj):
