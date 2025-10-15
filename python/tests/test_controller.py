@@ -153,7 +153,7 @@ class TestController:
             on_gpu_local = fetch_shard(on_gpu).result()
             on_cpu_local = fetch_shard(on_cpu).result()
 
-        assert on_gpu_local.device == torch.device("cpu")
+        assert on_gpu_local.device.type == "cuda" if backend_type == "mesh" else "cpu"
         assert on_cpu_local.device == torch.device("cpu")
 
     def test_dim1_mesh(self, backend_type):

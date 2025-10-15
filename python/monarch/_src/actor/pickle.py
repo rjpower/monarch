@@ -11,7 +11,7 @@ import io
 import os
 import pickle
 import sys
-from contextlib import contextmanager, ExitStack
+from contextlib import ExitStack
 from typing import Any, Callable, Iterable, List, Tuple
 
 import cloudpickle
@@ -20,10 +20,7 @@ from monarch._rust_bindings.monarch_hyperactor.buffers import Buffer, FrozenBuff
 
 def maybe_torch():
     """
-    XXX: there is a minor bug if we are sending a gpu tensor to a host that hasn't loaded
-    torch yet: the patch to load the tensor on the cpu will not have been applied and it
-    will end up on the gpu. The right fix is to switch cpu loading to the save side,
-    or to delete the custom behavior entirely.
+    Returns the torch module if it has been loaded, otherwise None.
     """
     return sys.modules.get("torch")
 
@@ -92,25 +89,8 @@ def unflatten(data: FrozenBuffer | bytes, values: Iterable[Any]) -> Any:
     with ExitStack() as stack:
         torch = maybe_torch()
         if torch is not None:
-            stack.enter_context(load_tensors_on_cpu())
             stack.enter_context(torch.utils._python_dispatch._disable_current_modes())
         up = _Unpickler(data, values)
         return up.load()
 
 
-@contextmanager
-def load_tensors_on_cpu():
-    # Ensure that any tensors load from CPU via monkeypatching how Storages are
-    # loaded.
-    import torch
-
-    old = torch.storage._load_from_bytes
-    try:
-        torch.storage._load_from_bytes = lambda b: torch.load(
-            io.BytesIO(b) if isinstance(b, bytes) else b,
-            map_location="cpu",
-            weights_only=False,
-        )
-        yield
-    finally:
-        torch.storage._load_from_bytes = old
