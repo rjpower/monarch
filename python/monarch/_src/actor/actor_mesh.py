@@ -209,9 +209,34 @@ _context: contextvars.ContextVar[Context] = contextvars.ContextVar(
     "monarch.actor_mesh._context"
 )
 
+T = TypeVar("T")
 
-_root_proc_mesh: Optional["ProcMesh"] = None
-_root_proc_mesh_lock = threading.Lock()
+
+class _Lazy(Generic[T]):
+    def __init__(self, init: Callable[[], T]) -> None:
+        self._lock = threading.Lock()
+        self._val: Optional[T] = None
+        self._init = init
+
+    def get(self) -> T:
+        with self._lock:
+            if not self._val:
+                self._val = self._init()
+            return self._val
+
+
+def _init_root_proc_mesh() -> "ProcMesh":
+    from monarch._src.actor.host_mesh import fake_in_process_host
+
+    return fake_in_process_host()._spawn_nonblocking(
+        name="root_client_proc_mesh",
+        per_host=Extent([], []),
+        setup=None,
+        _attach_controller_controller=False,  # can't attach the controller controller because it doesn't exist yet
+    )
+
+
+_root_proc_mesh: _Lazy["ProcMesh"] = _Lazy(_init_root_proc_mesh)
 
 
 def context() -> Context:
@@ -231,17 +256,7 @@ def context() -> Context:
 
             c.actor_instance.proc_mesh._host_mesh = create_local_host_mesh()  # type: ignore
         else:
-            with _root_proc_mesh_lock:
-                global _root_proc_mesh
-                if _root_proc_mesh is None:
-                    _root_proc_mesh = create_local_host_mesh()._spawn_nonblocking(
-                        name="root_client_proc_mesh",
-                        per_host=Extent([], []),
-                        setup=None,
-                        _attach_controller_controller=False,  # can't attach the controller controller because it doesn't exist yet
-                    )
-
-            c.actor_instance.proc_mesh = _root_proc_mesh
+            c.actor_instance.proc_mesh = _root_proc_mesh.get()
             c.actor_instance._controller_controller = _get_controller_controller()[1]
     return c
 

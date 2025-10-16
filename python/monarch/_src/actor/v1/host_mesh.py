@@ -6,7 +6,7 @@
 
 # pyre-strict
 
-from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
@@ -19,7 +19,7 @@ from monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh import (
     ProcMesh as HyProcMesh,
 )
 
-from monarch._src.actor.actor_mesh import context
+from monarch._src.actor.actor_mesh import _Lazy, context
 from monarch._src.actor.allocator import (
     AllocateMixin,
     AllocHandle,
@@ -31,10 +31,6 @@ from monarch._src.actor.proc_mesh import _get_bootstrap_args
 from monarch._src.actor.shape import MeshTrait, NDSlice, Shape
 from monarch._src.actor.v1.proc_mesh import ProcMesh
 from monarch.tools.config.workspace import Workspace
-
-
-if TYPE_CHECKING:
-    from monarch._src.actor.proc_mesh import _LazyProcMesh
 
 
 def _bootstrap_cmd() -> BootstrapCommand:
@@ -108,8 +104,9 @@ class HostMesh(MeshTrait):
         hy_host_mesh: Shared[HyHostMesh],
         region: Region,
         stream_logs: bool,
+        is_fake_in_process: bool,
         _initialized_hy_host_mesh: Optional[HyHostMesh],
-        _code_sync_proc_mesh: Optional["_LazyProcMesh"],
+        _code_sync_proc_mesh: Optional["_Lazy[ProcMesh]"],
     ) -> None:
         self._initialized_host_mesh = _initialized_hy_host_mesh
         if not self._initialized_host_mesh:
@@ -123,7 +120,8 @@ class HostMesh(MeshTrait):
         self._hy_host_mesh = hy_host_mesh
         self._region = region
         self._stream_logs = stream_logs
-        self._code_sync_proc_mesh: Optional["_LazyProcMesh"] = _code_sync_proc_mesh
+        self._is_fake_in_process = is_fake_in_process
+        self._code_sync_proc_mesh: Optional["_Lazy[ProcMesh]"] = _code_sync_proc_mesh
 
     @classmethod
     def allocate_nonblocking(
@@ -154,13 +152,12 @@ class HostMesh(MeshTrait):
             PythonTask.from_coroutine(task()).spawn(),
             extent.region,
             alloc.stream_logs,
+            isinstance(allocator, LocalAllocator),
             None,
             None,
         )
 
-        from monarch._src.actor.proc_mesh import _LazyProcMesh
-
-        hm._code_sync_proc_mesh = _LazyProcMesh(lambda: hm.spawn_procs())
+        hm._code_sync_proc_mesh = _Lazy(lambda: hm.spawn_procs())
         return hm
 
     def spawn_procs(
@@ -241,6 +238,7 @@ class HostMesh(MeshTrait):
             PythonTask.from_coroutine(task()).spawn(),
             shape.region,
             self.stream_logs,
+            self.is_fake_in_process,
             initialized_hm,
             None,
         )
@@ -259,6 +257,7 @@ class HostMesh(MeshTrait):
         hy_host_mesh: HyHostMesh,
         region: Region,
         stream_logs: bool,
+        is_fake_in_process: bool,
     ) -> "HostMesh":
         async def task() -> HyHostMesh:
             return hy_host_mesh
@@ -267,6 +266,7 @@ class HostMesh(MeshTrait):
             PythonTask.from_coroutine(task()).spawn(),
             region,
             stream_logs,
+            is_fake_in_process,
             hy_host_mesh,
             None,
         )
@@ -276,7 +276,12 @@ class HostMesh(MeshTrait):
             self._initialized_mesh(),
             self._region,
             self.stream_logs,
+            self.is_fake_in_process,
         )
+
+    @property
+    def is_fake_in_process(self) -> bool:
+        return self._is_fake_in_process
 
     def __eq__(self, other: "HostMesh") -> bool:
         # Should we include code sync proc mesh?
@@ -284,6 +289,7 @@ class HostMesh(MeshTrait):
             self._initialized_mesh() == other._initialized_mesh()
             and self._region == other._region
             and self.stream_logs == other.stream_logs
+            and self.is_fake_in_process == other.is_fake_in_process
         )
 
     def _initialized_mesh(self) -> HyHostMesh:
@@ -371,3 +377,8 @@ def host_mesh_from_alloc(
     name: str, extent: Extent, allocator: AllocateMixin, constraints: AllocConstraints
 ) -> HostMesh:
     return HostMesh.allocate_nonblocking(name, extent, allocator, constraints)
+
+
+_this_host_for_fake_in_process_host: _Lazy["HostMesh"] = _Lazy(
+    lambda: create_local_host_mesh()
+)

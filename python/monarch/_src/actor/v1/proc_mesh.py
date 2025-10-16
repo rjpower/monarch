@@ -11,7 +11,6 @@ import importlib
 import json
 import logging
 import os
-import threading
 import warnings
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -39,7 +38,7 @@ from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Region, Shap
 from monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh import (
     ProcMesh as HyProcMesh,
 )
-from monarch._src.actor.actor_mesh import _Actor, Actor, ActorMesh, context
+from monarch._src.actor.actor_mesh import _Actor, _Lazy, Actor, ActorMesh, context
 from monarch._src.actor.allocator import AllocHandle, SimAllocator
 from monarch._src.actor.code_sync import (
     CodeSyncMeshClient,
@@ -144,7 +143,14 @@ class ProcMesh(MeshTrait):
             raise NotImplementedError(
                 "`ProcMesh.host_mesh` is not yet supported for non-singleton proc meshes."
             )
-        return self._host(0)
+        elif self._host_mesh.is_fake_in_process:
+            from monarch._src.actor.v1.host_mesh import (
+                _this_host_for_fake_in_process_host,
+            )
+
+            return _this_host_for_fake_in_process_host.get()
+        else:
+            return self._host(0)
 
     @property
     def _ndslice(self) -> Slice:
@@ -614,26 +620,20 @@ class _ControllerController(Actor):
         return cast(TActor, self._controllers[name])
 
 
-_cc_init = threading.Lock()
-_controller_controller: Optional["_ControllerController"] = None
-
-
-# Lazy init so that the controller_controller and proc do not produce logs when they aren't used.
+# Lazy init so that the controller_controller and does not produce logs when it isn't used.
 # Checking for the controller (when it does not already exist in the MonarchContext) needs a lock,
 # otherwise two initializing procs will both try to init resulting in duplicates. The critical
 # region is not blocking: it spawns a separate task to do the init, assigns the
 # Shared[_ControllerController] from that task to the global and releases the lock.
-def _get_controller_controller() -> "Tuple[ProcMesh, _ControllerController]":
-    global _controller_controller
-    with _cc_init:
-        if _controller_controller is None:
-            _controller_controller = context().actor_instance.proc_mesh.spawn(
-                "controller_controller", _ControllerController
-            )
-    assert _controller_controller is not None
-    return context().actor_instance.proc_mesh, cast(
-        _ControllerController, _controller_controller
+_controller_controller: _Lazy[_ControllerController] = _Lazy(
+    lambda: context().actor_instance.proc_mesh.spawn(
+        "controller_controller", _ControllerController
     )
+)
+
+
+def _get_controller_controller() -> "Tuple[ProcMesh, _ControllerController]":
+    return context().actor_instance.proc_mesh, _controller_controller.get()
 
 
 def get_or_spawn_controller(
@@ -779,16 +779,3 @@ def sim_proc_mesh(
         AllocConstraints(),
     )
     return host_mesh.spawn_procs(per_host={"gpus": gpus})
-
-
-class _LazyProcMesh:
-    def __init__(self, init: Callable[[], ProcMesh]) -> None:
-        self._lock = threading.Lock()
-        self._mesh: Optional[ProcMesh] = None
-        self._init = init
-
-    def get(self) -> ProcMesh:
-        with self._lock:
-            if not self._mesh:
-                self._mesh = self._init()
-            return self._mesh
