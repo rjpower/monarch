@@ -144,12 +144,7 @@ class ProcMesh(MeshTrait):
             raise NotImplementedError(
                 "`ProcMesh.host_mesh` is not yet supported for non-singleton proc meshes."
             )
-        elif self._host_mesh.is_fake_in_process:
-            from monarch._src.actor.v1.host_mesh import create_local_host_mesh
-
-            return create_local_host_mesh()
-        else:
-            return self._host(0)
+        return self._host(0)
 
     @property
     def _ndslice(self) -> Slice:
@@ -234,16 +229,7 @@ class ProcMesh(MeshTrait):
 
         if _attach_controller_controller:
             instance = context().actor_instance
-            cc = instance._controller_controller
-            if (
-                cc is not None
-                and cast(ActorMesh[_ControllerController], cc)._class
-                is not _ControllerController
-            ):
-                # This can happen in the client process
-                pm._controller_controller = _get_controller_controller()[1]
-            else:
-                pm._controller_controller = instance._controller_controller  # type: ignore
+            pm._controller_controller = instance._controller_controller
             instance._add_child(pm)
 
         async def task(
@@ -613,6 +599,7 @@ class _ControllerController(Actor):
     @endpoint
     def get_or_spawn(
         self,
+        self_ref: "_ControllerController",  # This is actually an ActorMesh[_ControllerController]
         name: str,
         Class: Type[TActor],
         *args: Any,
@@ -622,13 +609,12 @@ class _ControllerController(Actor):
             from monarch._src.actor.v1.host_mesh import this_proc
 
             proc = this_proc()
-            proc._controller_controller = _get_controller_controller()[1]
+            proc._controller_controller = self_ref
             self._controllers[name] = proc.spawn(name, Class, *args, **kwargs)
         return cast(TActor, self._controllers[name])
 
 
 _cc_init = threading.Lock()
-_cc_proc_mesh: Optional["ProcMesh"] = None
 _controller_controller: Optional["_ControllerController"] = None
 
 
@@ -638,22 +624,16 @@ _controller_controller: Optional["_ControllerController"] = None
 # region is not blocking: it spawns a separate task to do the init, assigns the
 # Shared[_ControllerController] from that task to the global and releases the lock.
 def _get_controller_controller() -> "Tuple[ProcMesh, _ControllerController]":
-    global _controller_controller, _cc_proc_mesh
+    global _controller_controller
     with _cc_init:
         if _controller_controller is None:
-            from monarch._src.actor.v1.host_mesh import fake_in_process_host
-
-            _cc_proc_mesh = fake_in_process_host()._spawn_nonblocking(
-                name="controller_controller_proc",
-                per_host=Extent([], []),
-                setup=None,
-                _attach_controller_controller=False,
-            )
-            _controller_controller = _cc_proc_mesh.spawn(
+            _controller_controller = context().actor_instance.proc_mesh.spawn(
                 "controller_controller", _ControllerController
             )
-    assert _cc_proc_mesh is not None and _controller_controller is not None
-    return _cc_proc_mesh, _controller_controller
+    assert _controller_controller is not None
+    return context().actor_instance.proc_mesh, cast(
+        _ControllerController, _controller_controller
+    )
 
 
 def get_or_spawn_controller(
@@ -673,7 +653,7 @@ def get_or_spawn_controller(
         A Future that resolves to a reference to the actor.
     """
     cc = context().actor_instance._controller_controller
-    return cc.get_or_spawn.call_one(name, Class, *args, **kwargs)
+    return cc.get_or_spawn.call_one(cc, name, Class, *args, **kwargs)
 
 
 def proc_mesh(
@@ -799,3 +779,16 @@ def sim_proc_mesh(
         AllocConstraints(),
     )
     return host_mesh.spawn_procs(per_host={"gpus": gpus})
+
+
+class _LazyProcMesh:
+    def __init__(self, init: Callable[[], ProcMesh]) -> None:
+        self._lock = threading.Lock()
+        self._mesh: Optional[ProcMesh] = None
+        self._init = init
+
+    def get(self) -> ProcMesh:
+        with self._lock:
+            if not self._mesh:
+                self._mesh = self._init()
+            return self._mesh

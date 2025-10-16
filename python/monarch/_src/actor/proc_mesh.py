@@ -70,9 +70,10 @@ from monarch._src.actor.future import Future
 from monarch._src.actor.logging import LoggingManager
 from monarch._src.actor.shape import MeshTrait
 from monarch._src.actor.v1 import enabled as v1_enabled
-from monarch._src.actor.v1.proc_mesh import (
+from monarch._src.actor.v1.proc_mesh import (  # noqa
     _ControllerController as _ControllerControllerV1,
     _get_controller_controller as _get_controller_controller_v1,
+    _LazyProcMesh,  # noqa
     get_active_proc_meshes as get_active_proc_meshes_v1,
     get_or_spawn_controller as get_or_spawn_controller_v1,
     HyProcMesh as HyProcMeshV1,

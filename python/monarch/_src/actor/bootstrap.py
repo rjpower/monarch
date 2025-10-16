@@ -22,6 +22,7 @@ from monarch._rust_bindings.monarch_hyperactor.v1.host_mesh import (
 
 from monarch._src.actor.future import _Unawaited, Future
 from monarch._src.actor.host_mesh import HostMesh
+from monarch._src.actor.proc_mesh import _LazyProcMesh
 
 PrivateKey = Union[bytes, Path, None]
 CA = Union[bytes, Path, Literal["trust_all_connections"]]
@@ -117,9 +118,8 @@ def attach_to_workers(
         host_mesh.spawn(),
         extent.region,
         stream_logs=True,
-        is_fake_in_process=False,
         _initialized_hy_host_mesh=None,
         _code_sync_proc_mesh=None,
     )
-    hm._code_sync_proc_mesh = hm.spawn_procs()
+    hm._code_sync_proc_mesh = _LazyProcMesh(lambda: hm.spawn_procs())
     return hm

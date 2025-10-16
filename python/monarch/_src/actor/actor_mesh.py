@@ -210,6 +210,10 @@ _context: contextvars.ContextVar[Context] = contextvars.ContextVar(
 )
 
 
+_root_proc_mesh: Optional["ProcMesh"] = None
+_root_proc_mesh_lock = threading.Lock()
+
+
 def context() -> Context:
     c = _context.get(None)
     if c is None:
@@ -227,8 +231,18 @@ def context() -> Context:
 
             c.actor_instance.proc_mesh._host_mesh = create_local_host_mesh()  # type: ignore
         else:
+            with _root_proc_mesh_lock:
+                global _root_proc_mesh
+                if _root_proc_mesh is None:
+                    _root_proc_mesh = create_local_host_mesh()._spawn_nonblocking(
+                        name="root_client_proc_mesh",
+                        per_host=Extent([], []),
+                        setup=None,
+                        _attach_controller_controller=False,  # can't attach the controller controller because it doesn't exist yet
+                    )
+
+            c.actor_instance.proc_mesh = _root_proc_mesh
             c.actor_instance._controller_controller = _get_controller_controller()[1]
-            c.actor_instance.proc_mesh = create_local_host_mesh().spawn_procs()
     return c
 
 
