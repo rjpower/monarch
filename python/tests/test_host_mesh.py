@@ -178,7 +178,9 @@ def test_this_host_on_client_can_spawn_actual_os_processes() -> None:
 
 @pytest.mark.timeout(60)
 def test_controllers_have_same_pid_as_client() -> None:
-    pid_controller = get_or_spawn_controller("pid", PidActor).get()
+    pid_controller = get_or_spawn_controller(
+        "pid_test_controllers_have_same_pid_as_client", PidActor
+    ).get()
     assert pid_controller.get_pid.call_one().get() == os.getpid()
 
 
@@ -190,8 +192,12 @@ class PidActorController(Actor):
 
 @pytest.mark.timeout(60)
 def test_this_host_on_controllers_can_spawn_actual_os_processes() -> None:
-    pid_controller_0 = get_or_spawn_controller("pid_0", PidActorController).get()
-    pid_controller_1 = get_or_spawn_controller("pid_1", PidActorController).get()
+    pid_controller_0 = get_or_spawn_controller(
+        "pid_test_this_host_on_controllers_0", PidActorController
+    ).get()
+    pid_controller_1 = get_or_spawn_controller(
+        "pid_test_this_host_on_controllers_1", PidActorController
+    ).get()
     pid_0 = pid_controller_0.spawn_pid_actor.call_one().get()
     pid_1 = pid_controller_1.spawn_pid_actor.call_one().get()
     pid_0_values = list(pid_0.get_pid.call().get().values())
