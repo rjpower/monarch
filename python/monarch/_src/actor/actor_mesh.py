@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
     from monarch._rust_bindings.monarch_hyperactor.actor_mesh import ActorMeshProtocol
     from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiverBase
+    from monarch._src.actor.host_mesh import HostMesh
     from monarch._src.actor.proc_mesh import _ControllerController, ProcMesh
 from monarch._src.actor.telemetry import get_monarch_tracer
 
@@ -224,6 +225,20 @@ class _Lazy(Generic[T]):
                 self._val = self._init()
             return self._val
 
+    def try_get(self) -> Optional[T]:
+        return self._val
+
+
+def _init_this_host_for_fake_in_process_host() -> "HostMesh":
+    from monarch._src.actor.host_mesh import create_local_host_mesh
+
+    return create_local_host_mesh()
+
+
+_this_host_for_fake_in_process_host: _Lazy["HostMesh"] = _Lazy(
+    _init_this_host_for_fake_in_process_host
+)
+
 
 def _init_root_proc_mesh() -> "ProcMesh":
     from monarch._src.actor.host_mesh import fake_in_process_host
@@ -257,6 +272,14 @@ def context() -> Context:
             c.actor_instance.proc_mesh._host_mesh = create_local_host_mesh()  # type: ignore
         else:
             c.actor_instance.proc_mesh = _root_proc_mesh.get()
+
+            # This needs to be initialized when the root client context is initialized.
+            # Otherwise, it will be initialized inside an actor endpoint running inside
+            # a fake in-process host. That will fail with an "unroutable mesh" error,
+            # because the hyperactor Proc being used to spawn the local host mesh
+            # won't have the correct type of forwarder.
+            _this_host_for_fake_in_process_host.get()
+
             c.actor_instance._controller_controller = _get_controller_controller()[1]
     return c
 

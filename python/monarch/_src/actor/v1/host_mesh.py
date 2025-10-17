@@ -377,8 +377,3 @@ def host_mesh_from_alloc(
     name: str, extent: Extent, allocator: AllocateMixin, constraints: AllocConstraints
 ) -> HostMesh:
     return HostMesh.allocate_nonblocking(name, extent, allocator, constraints)
-
-
-_this_host_for_fake_in_process_host: _Lazy["HostMesh"] = _Lazy(
-    lambda: create_local_host_mesh()
-)
