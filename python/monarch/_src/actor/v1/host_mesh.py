@@ -152,7 +152,7 @@ class HostMesh(MeshTrait):
             None,
         )
 
-        hm._code_sync_proc_mesh = _Lazy(lambda: hm.spawn_procs())
+        hm._code_sync_proc_mesh = _Lazy(lambda: hm.spawn_procs(name="code_sync"))
         return hm
 
     def spawn_procs(

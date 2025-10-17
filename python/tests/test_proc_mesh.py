@@ -268,7 +268,9 @@ class PidActorController(Actor):
 
 @pytest.mark.timeout(60)
 def test_this_proc_in_controller_spawns_actor_in_client_os_process() -> None:
-    pid_controller = get_or_spawn_controller("pid", PidActorController).get()
+    pid_controller = get_or_spawn_controller(
+        "pid_test_this_proc_in_controller", PidActorController
+    ).get()
     assert (
         pid_controller.spawn_pid_actor_with_this_proc.call_one()
         .get()
@@ -280,7 +282,9 @@ def test_this_proc_in_controller_spawns_actor_in_client_os_process() -> None:
 
 @pytest.mark.timeout(60)
 def test_context_proc_mesh_in_controller_spawns_actor_in_client_os_process() -> None:
-    pid_controller = get_or_spawn_controller("pid", PidActorController).get()
+    pid_controller = get_or_spawn_controller(
+        "pid_test_context_proc_mesh_in_controller", PidActorController
+    ).get()
     assert (
         pid_controller.spawn_pid_actor_with_proc_mesh.call_one()
         .get()
