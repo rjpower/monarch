@@ -461,7 +461,7 @@ pub fn set(source: Source, attrs: Attrs) {
             Source::ClientOverride => Layer::ClientOverride(attrs),
         });
     }
-    g.ordered.sort_by_key(|l| priority(layer_source(l))); // TestOverride < Runtime < Env < File
+    g.ordered.sort_by_key(|l| priority(layer_source(l))); // TestOverride < Runtime < Env < File < ClientOverride
 }
 
 /// Remove the configuration layer for the given [`Source`], if
@@ -1160,5 +1160,14 @@ mod tests {
         std::mem::drop(guard_a);
         assert_eq!(get(MESSAGE_DELIVERY_TIMEOUT), Duration::from_secs(30));
         assert!(std::env::var("HYPERACTOR_MESSAGE_DELIVERY_TIMEOUT").is_err());
+    }
+
+    #[test]
+    fn test_priority_order() {
+        use Source::*;
+        assert!(priority(TestOverride) < priority(Runtime));
+        assert!(priority(Runtime) < priority(Env));
+        assert!(priority(Env) < priority(File));
+        assert!(priority(File) < priority(ClientOverride));
     }
 }

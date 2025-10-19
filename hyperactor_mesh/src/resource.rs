@@ -40,6 +40,7 @@ use ndslice::ViewExt;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::bootstrap;
 use crate::v1::Name;
 use crate::v1::StatusOverlay;
 
@@ -84,6 +85,24 @@ impl Status {
             self,
             Status::Stopping | Status::Stopped | Status::Failed(_) | Status::Timeout(_)
         )
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        matches!(self, Status::Initializing | Status::Running)
+    }
+}
+
+impl From<bootstrap::ProcStatus> for Status {
+    fn from(status: bootstrap::ProcStatus) -> Self {
+        use bootstrap::ProcStatus;
+        match status {
+            ProcStatus::Starting => Status::Initializing,
+            ProcStatus::Running { .. } | ProcStatus::Ready { .. } => Status::Running,
+            ProcStatus::Stopping { .. } => Status::Stopping,
+            ProcStatus::Stopped { .. } => Status::Stopped,
+            ProcStatus::Failed { reason } => Status::Failed(reason),
+            ProcStatus::Killed { .. } => Status::Failed(format!("{}", status)),
+        }
     }
 }
 
@@ -534,7 +553,7 @@ impl<T> FromIterator<(Range<usize>, T)> for RankedValues<T> {
 }
 
 /// Spec for a host mesh agent to use when spawning a new proc.
-#[derive(Clone, Debug, Serialize, Deserialize, Named)]
+#[derive(Clone, Debug, Serialize, Deserialize, Named, Default)]
 pub(crate) struct ProcSpec {
     /// Config values to set on the spawned proc's global config,
     /// at the `ClientOverride` layer.
@@ -542,11 +561,6 @@ pub(crate) struct ProcSpec {
 }
 
 impl ProcSpec {
-    pub(crate) fn default() -> Self {
-        Self {
-            client_config_override: Attrs::new(),
-        }
-    }
 
     pub(crate) fn new(client_config_override: Attrs) -> Self {
         Self {
