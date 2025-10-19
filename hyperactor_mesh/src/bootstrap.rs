@@ -1415,9 +1415,6 @@ pub struct BootstrapProcManager {
     /// exclusively in the [`Drop`] impl to send `SIGKILL` without
     /// needing async context.
     pid_table: Arc<std::sync::Mutex<HashMap<ProcId, u32>>>,
-    /// Config snapshot that will be used to set the global config
-    /// of processes spawned by this manager.
-    config: Option<Attrs>,
 }
 
 impl Drop for BootstrapProcManager {
@@ -1472,7 +1469,6 @@ impl BootstrapProcManager {
             command,
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            config: None,
         }
     }
 
@@ -1591,9 +1587,21 @@ impl BootstrapProcManager {
     }
 }
 
+/// The configuration used for bootstrapped procs.
+pub struct BootstrapProcConfig {
+    /// The proc's create rank.
+    pub create_rank: usize,
+
+    /// Config values to set on the spawned proc's global config,
+    /// at the `ClientOverride` layer.
+    pub client_config_override: Attrs,
+}
+
 #[async_trait]
 impl ProcManager for BootstrapProcManager {
     type Handle = BootstrapProcHandle;
+
+    type Config = BootstrapProcConfig;
 
     /// Return the [`ChannelTransport`] used by this proc manager.
     ///
@@ -1635,6 +1643,7 @@ impl ProcManager for BootstrapProcManager {
         &self,
         proc_id: ProcId,
         backend_addr: ChannelAddr,
+        config: BootstrapProcConfig,
     ) -> Result<Self::Handle, HostError> {
         let (callback_addr, mut callback_rx) =
             channel::serve(ChannelAddr::any(ChannelTransport::Unix))?;
@@ -1643,7 +1652,7 @@ impl ProcManager for BootstrapProcManager {
             proc_id: proc_id.clone(),
             backend_addr,
             callback_addr,
-            config: self.config.clone(),
+            config: Some(config.client_config_override),
         };
         let mut cmd = Command::new(&self.command.program);
         if let Some(arg0) = &self.command.arg0 {
@@ -1682,8 +1691,9 @@ impl ProcManager for BootstrapProcManager {
 
         // Writers: tee to local (stdout/stderr or file) + send over
         // channel
-        let (out_writer, err_writer) = create_log_writers(0, log_channel.clone(), pid)
-            .unwrap_or_else(|_| (Box::new(tokio::io::stdout()), Box::new(tokio::io::stderr())));
+        let (out_writer, err_writer) =
+            create_log_writers(config.create_rank, log_channel.clone(), pid)
+                .unwrap_or_else(|_| (Box::new(tokio::io::stdout()), Box::new(tokio::io::stderr())));
 
         let mut stdout_tailer: Option<LogTailer> = None;
         let mut stderr_tailer: Option<LogTailer> = None;
@@ -1746,10 +1756,6 @@ impl ProcManager for BootstrapProcManager {
 
         // Callers do `handle.read().await` for mesh readiness.
         Ok(handle)
-    }
-
-    fn set_config(&mut self, config: Attrs) {
-        self.config = Some(config);
     }
 }
 
@@ -2049,6 +2055,7 @@ mod tests {
     use hyperactor::WorldId;
     use hyperactor::channel::ChannelAddr;
     use hyperactor::channel::ChannelTransport;
+    use hyperactor::channel::TcpMode;
     use hyperactor::clock::RealClock;
     use hyperactor::context::Mailbox as _;
     use hyperactor::host::ProcHandle;
@@ -2079,7 +2086,7 @@ mod tests {
             Bootstrap::default(),
             Bootstrap::Proc {
                 proc_id: id!(foo[0]),
-                backend_addr: ChannelAddr::any(ChannelTransport::Tcp),
+                backend_addr: ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname)),
                 callback_addr: ChannelAddr::any(ChannelTransport::Unix),
                 config: None,
             },
@@ -3149,7 +3156,14 @@ mod tests {
         let mgr = BootstrapProcManager::new(BootstrapCommand::test());
         let (proc_id, backend_addr) = make_proc_id_and_backend_addr(&instance, "t_term").await;
         let handle = mgr
-            .spawn(proc_id.clone(), backend_addr.clone())
+            .spawn(
+                proc_id.clone(),
+                backend_addr.clone(),
+                BootstrapProcConfig {
+                    create_rank: 0,
+                    client_config_override: Attrs::new(),
+                },
+            )
             .await
             .expect("spawn bootstrap child");
 
@@ -3209,7 +3223,14 @@ mod tests {
 
         // Launch the child bootstrap process.
         let handle = mgr
-            .spawn(proc_id.clone(), backend_addr.clone())
+            .spawn(
+                proc_id.clone(),
+                backend_addr.clone(),
+                BootstrapProcConfig {
+                    create_rank: 0,
+                    client_config_override: Attrs::new(),
+                },
+            )
             .await
             .expect("spawn bootstrap child");
 

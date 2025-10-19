@@ -6,7 +6,7 @@
 
 # pyre-strict
 
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Literal, Optional, Tuple
 
 from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
@@ -19,7 +19,7 @@ from monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh import (
     ProcMesh as HyProcMesh,
 )
 
-from monarch._src.actor.actor_mesh import context
+from monarch._src.actor.actor_mesh import _Lazy, context
 from monarch._src.actor.allocator import (
     AllocateMixin,
     AllocHandle,
@@ -30,6 +30,7 @@ from monarch._src.actor.future import Future
 from monarch._src.actor.proc_mesh import _get_bootstrap_args
 from monarch._src.actor.shape import MeshTrait, NDSlice, Shape
 from monarch._src.actor.v1.proc_mesh import ProcMesh
+from monarch.tools.config.workspace import Workspace
 
 
 def _bootstrap_cmd() -> BootstrapCommand:
@@ -72,7 +73,7 @@ def create_local_host_mesh(
     Args:
         name: The name of the host mesh.
         extent: Optional extent describing the shape of the host mesh.
-                If not provided, `Extent(labels=["hosts"], sizes=[1])` is used.
+                If not provided, `Extent(labels=[], sizes=[])` is used.
                 Other extents allow for local host meshes where each "host" is
                 actually just a local process.
 
@@ -86,7 +87,7 @@ def create_local_host_mesh(
 
     return HostMesh.allocate_nonblocking(
         "local_host",
-        extent if extent is not None else Extent(labels=["hosts"], sizes=[1]),
+        extent if extent is not None else Extent([], []),
         ProcessAllocator(cmd, args, bootstrap_env),
         bootstrap_cmd=_bootstrap_cmd(),
     )
@@ -105,6 +106,7 @@ class HostMesh(MeshTrait):
         stream_logs: bool,
         is_fake_in_process: bool,
         _initialized_hy_host_mesh: Optional[HyHostMesh],
+        _code_sync_proc_mesh: Optional["_Lazy[ProcMesh]"],
     ) -> None:
         self._initialized_host_mesh = _initialized_hy_host_mesh
         if not self._initialized_host_mesh:
@@ -119,6 +121,7 @@ class HostMesh(MeshTrait):
         self._region = region
         self._stream_logs = stream_logs
         self._is_fake_in_process = is_fake_in_process
+        self._code_sync_proc_mesh: Optional["_Lazy[ProcMesh]"] = _code_sync_proc_mesh
 
     @classmethod
     def allocate_nonblocking(
@@ -137,16 +140,20 @@ class HostMesh(MeshTrait):
                 context().actor_instance._as_rust(),
                 await alloc._hy_alloc,
                 name,
-                bootstrap_cmd if bootstrap_cmd else _bootstrap_cmd(),
+                bootstrap_cmd,
             )
 
-        return cls(
+        hm = cls(
             PythonTask.from_coroutine(task()).spawn(),
             extent.region,
             alloc.stream_logs,
             isinstance(allocator, LocalAllocator),
             None,
+            None,
         )
+
+        hm._code_sync_proc_mesh = _Lazy(lambda: hm.spawn_procs(name="code_sync"))
+        return hm
 
     def spawn_procs(
         self,
@@ -228,6 +235,7 @@ class HostMesh(MeshTrait):
             self.stream_logs,
             self.is_fake_in_process,
             initialized_hm,
+            None,
         )
 
     @property
@@ -255,6 +263,7 @@ class HostMesh(MeshTrait):
             stream_logs,
             is_fake_in_process,
             hy_host_mesh,
+            None,
         )
 
     def __reduce_ex__(self, protocol: ...) -> Tuple[Any, Tuple[Any, ...]]:
@@ -270,6 +279,7 @@ class HostMesh(MeshTrait):
         return self._is_fake_in_process
 
     def __eq__(self, other: "HostMesh") -> bool:
+        # Should we include code sync proc mesh?
         return (
             self._initialized_mesh() == other._initialized_mesh()
             and self._region == other._region
@@ -300,6 +310,44 @@ class HostMesh(MeshTrait):
 
         return Future(coro=task())
 
+    async def sync_workspace(
+        self,
+        workspace: Workspace,
+        conda: bool = False,
+        auto_reload: bool = False,
+    ) -> None:
+        """
+        Sync local code changes to the remote hosts.
+
+        Args:
+            workspace: The workspace to sync.
+            conda: If True, also sync the currently activated conda env.
+            auto_reload: If True, automatically reload the workspace on changes.
+        """
+        if self._code_sync_proc_mesh:
+            await self._code_sync_proc_mesh.get()._sync_workspace(
+                workspace, conda, auto_reload
+            )
+        else:
+            raise RuntimeError(
+                "cannot call sync_workspace on a sliced host mesh or one that was sent over an actor endpoint"
+            )
+
+    @property
+    def initialized(self) -> Future[Literal[True]]:
+        """
+        Future completes with 'True' when the `HostMesh` has initialized.
+        Because `HostMesh` are remote objects, there is no guarentee that the `HostMesh` is
+        still usable after this completes, only that at some point in the past it was usable.
+        """
+        hm: Shared[HyHostMesh] = self._hy_host_mesh
+
+        async def task() -> Literal[True]:
+            await hm
+            return True
+
+        return Future(coro=task())
+
 
 def fake_in_process_host() -> "HostMesh":
     """
@@ -310,7 +358,7 @@ def fake_in_process_host() -> "HostMesh":
     """
     return HostMesh.allocate_nonblocking(
         "fake_host",
-        Extent(labels=["hosts"], sizes=[1]),
+        Extent([], []),
         LocalAllocator(),
         bootstrap_cmd=_bootstrap_cmd(),
     )

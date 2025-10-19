@@ -203,6 +203,7 @@ impl<M: ProcManager> Host<M> {
     pub async fn spawn(
         &mut self,
         name: String,
+        config: M::Config,
     ) -> Result<(ProcId, ActorRef<ManagerAgent<M>>), HostError> {
         if self.procs.contains_key(&name) {
             return Err(HostError::ProcExists(name));
@@ -211,7 +212,7 @@ impl<M: ProcManager> Host<M> {
         let proc_id = ProcId::Direct(self.frontend_addr.clone(), name.clone());
         let handle = self
             .manager
-            .spawn(proc_id.clone(), self.backend_addr.clone())
+            .spawn(proc_id.clone(), self.backend_addr.clone(), config)
             .await?;
 
         // Await readiness (config-driven; 0s disables timeout).
@@ -547,6 +548,9 @@ pub trait ProcManager {
     /// Concrete handle type this manager returns.
     type Handle: ProcHandle;
 
+    /// Additional configuration for the proc, supported by this manager.
+    type Config = ();
+
     /// The preferred transport for this ProcManager.
     /// In practice this will be [`ChannelTransport::Local`]
     /// for testing, and [`ChannelTransport::Unix`] for external
@@ -564,13 +568,8 @@ pub trait ProcManager {
         &self,
         proc_id: ProcId,
         forwarder_addr: ChannelAddr,
+        config: Self::Config,
     ) -> Result<Self::Handle, HostError>;
-
-    /// Set the config that this manager should use for
-    /// bootstrapping new procs. The attributes will be applied
-    /// at the ClientOverride layer of each new proc's global
-    /// config.
-    fn set_config(&mut self, config: Attrs);
 }
 
 /// Type alias for the agent actor managed by a given [`ProcManager`].
@@ -800,6 +799,7 @@ where
         &self,
         proc_id: ProcId,
         forwarder_addr: ChannelAddr,
+        _config: (),
     ) -> Result<Self::Handle, HostError> {
         let transport = forwarder_addr.transport();
         let proc = Proc::new(
@@ -822,11 +822,6 @@ where
             agent_ref: agent_handle.bind(),
             procs: Arc::clone(&self.procs),
         })
-    }
-
-    fn set_config(&mut self, _config: Attrs) {
-        // No-op: the local proc already shares a config with the
-        // process in which it runs.
     }
 }
 
@@ -980,6 +975,7 @@ where
         &self,
         proc_id: ProcId,
         forwarder_addr: ChannelAddr,
+        _config: (),
     ) -> Result<Self::Handle, HostError> {
         let (callback_addr, mut callback_rx) =
             channel::serve(ChannelAddr::any(ChannelTransport::Unix))?;
@@ -1028,12 +1024,6 @@ where
             addr: proc_addr,
             agent_ref,
         })
-    }
-
-    fn set_config(&mut self, _config: Attrs) {
-        // No-op for now. This proc manager is only used in testing
-        // and there isn't currently a way to set the config for
-        // spawned processes.
     }
 }
 
@@ -1162,14 +1152,14 @@ mod tests {
                 .await
                 .unwrap();
 
-        let (proc_id1, _ref) = host.spawn("proc1".to_string()).await.unwrap();
+        let (proc_id1, _ref) = host.spawn("proc1".to_string(), ()).await.unwrap();
         assert_eq!(
             proc_id1,
             ProcId::Direct(host.addr().clone(), "proc1".to_string())
         );
         assert!(procs.lock().await.contains_key(&proc_id1));
 
-        let (proc_id2, _ref) = host.spawn("proc2".to_string()).await.unwrap();
+        let (proc_id2, _ref) = host.spawn("proc2".to_string(), ()).await.unwrap();
         assert!(procs.lock().await.contains_key(&proc_id2));
 
         let proc1 = procs.lock().await.get(&proc_id1).unwrap().clone();
@@ -1233,13 +1223,13 @@ mod tests {
 
         // (1) Spawn and check invariants.
         assert!(matches!(host.addr().transport(), ChannelTransport::Unix));
-        let (proc1, echo1) = host.spawn("proc1".to_string()).await.unwrap();
-        let (proc2, echo2) = host.spawn("proc2".to_string()).await.unwrap();
+        let (proc1, echo1) = host.spawn("proc1".to_string(), ()).await.unwrap();
+        let (proc2, echo2) = host.spawn("proc2".to_string(), ()).await.unwrap();
         assert_eq!(echo1.actor_id().proc_id(), &proc1);
         assert_eq!(echo2.actor_id().proc_id(), &proc2);
 
         // (2) Duplicate name rejection.
-        let dup = host.spawn("proc1".to_string()).await;
+        let dup = host.spawn("proc1".to_string(), ()).await;
         assert!(matches!(dup, Err(HostError::ProcExists(_))));
 
         // (3) Create a standalone client proc and verify echo1 agent responds.
@@ -1429,6 +1419,7 @@ mod tests {
             &self,
             proc_id: ProcId,
             forwarder_addr: ChannelAddr,
+            _config: (),
         ) -> Result<Self::Handle, HostError> {
             let agent = ActorRef::<()>::attest(proc_id.actor_id("agent", 0));
             Ok(TestHandle {
@@ -1440,8 +1431,6 @@ mod tests {
                 omit_agent: self.omit_agent,
             })
         }
-
-        fn set_config(&mut self, _config: Attrs) {}
     }
 
     #[tokio::test]
@@ -1459,7 +1448,7 @@ mod tests {
         .await
         .unwrap();
 
-        let err = host.spawn("t".into()).await.expect_err("must time out");
+        let err = host.spawn("t".into(), ()).await.expect_err("must time out");
         assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
     }
 
@@ -1478,7 +1467,7 @@ mod tests {
         .await
         .unwrap();
 
-        let (pid, agent) = host.spawn("ok".into()).await.expect("must succeed");
+        let (pid, agent) = host.spawn("ok".into(), ()).await.expect("must succeed");
         assert_eq!(agent.actor_id().proc_id(), &pid);
         assert!(host.procs.contains_key("ok"));
     }
@@ -1492,7 +1481,7 @@ mod tests {
         .await
         .unwrap();
 
-        let err = host.spawn("p".into()).await.expect_err("must fail");
+        let err = host.spawn("p".into(), ()).await.expect_err("must fail");
         assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
     }
 
@@ -1505,7 +1494,7 @@ mod tests {
         .await
         .unwrap();
 
-        let err = host.spawn("p".into()).await.expect_err("must fail");
+        let err = host.spawn("p".into(), ()).await.expect_err("must fail");
         assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
     }
 
@@ -1518,7 +1507,10 @@ mod tests {
         .await
         .unwrap();
 
-        let err = host.spawn("no-addr".into()).await.expect_err("must fail");
+        let err = host
+            .spawn("no-addr".into(), ())
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
     }
 
@@ -1531,7 +1523,10 @@ mod tests {
         .await
         .unwrap();
 
-        let err = host.spawn("no-agent".into()).await.expect_err("must fail");
+        let err = host
+            .spawn("no-agent".into(), ())
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
     }
 }

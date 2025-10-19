@@ -79,6 +79,7 @@ use crate::reference::ProcMeshId;
 use crate::router;
 use crate::shortuuid::ShortUuid;
 use crate::v1;
+use crate::v1::Name;
 
 pub mod mesh_agent;
 
@@ -377,8 +378,10 @@ impl ProcMesh {
         );
 
         // Ensure that the router is served so that agents may reach us.
-        let (router_channel_addr, router_rx) = channel::serve(ChannelAddr::any(alloc.transport()))
-            .map_err(|err| AllocatorError::Other(err.into()))?;
+        let (router_channel_addr, router_rx) = alloc
+            .client_router_addr()
+            .serve_with_config()
+            .map_err(AllocatorError::Other)?;
         router.serve(router_rx);
         tracing::info!("router channel started listening on addr: {router_channel_addr}");
 
@@ -706,7 +709,11 @@ impl ProcMesh {
 
     /// Send stop actors message to all mesh agents for a specific mesh name
     #[hyperactor::observe_result("ProcMesh")]
-    pub async fn stop_actor_by_name(&self, mesh_name: &str) -> Result<(), anyhow::Error> {
+    pub async fn stop_actor_by_name(
+        &self,
+        cx: &impl context::Actor,
+        mesh_name: &str,
+    ) -> Result<(), anyhow::Error> {
         match &self.inner {
             ProcMeshKind::V0 { client, .. } => {
                 let timeout =
@@ -742,8 +749,11 @@ impl ProcMesh {
                 }
                 Ok(())
             }
-            ProcMeshKind::V1(_proc_mesh) => {
-                anyhow::bail!("kill actor by name unsupported for v1::ProcMesh")
+            ProcMeshKind::V1(proc_mesh) => {
+                proc_mesh
+                    .stop_actor_by_name(cx, Name::new_reserved(mesh_name))
+                    .await?;
+                Ok(())
             }
         }
     }

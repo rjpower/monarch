@@ -29,15 +29,16 @@ use hyperactor::channel::ChannelTransport;
 use hyperactor::host::Host;
 use hyperactor::host::HostError;
 use hyperactor::host::LocalProcManager;
-use hyperactor::host::ProcManager;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::bootstrap;
 use crate::bootstrap::BootstrapCommand;
+use crate::bootstrap::BootstrapProcConfig;
 use crate::bootstrap::BootstrapProcManager;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
+use crate::resource::ProcSpec;
 use crate::v1::Name;
 
 type ProcManagerSpawnFuture =
@@ -74,10 +75,9 @@ impl HostAgentMode {
 /// through the resource behaviors defined in [`crate::resource`].
 #[hyperactor::export(
     handlers=[
-        resource::CreateOrUpdate<()>,
+        resource::CreateOrUpdate<ProcSpec>,
         resource::GetState<ProcState>,
         resource::GetRankStatus,
-        resource::ApplyConfigSnapshot,
         ShutdownHost
     ]
 )]
@@ -108,12 +108,12 @@ impl Actor for HostMeshAgent {
 }
 
 #[async_trait]
-impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
+impl Handler<resource::CreateOrUpdate<ProcSpec>> for HostMeshAgent {
     #[tracing::instrument("HostMeshAgent::CreateOrUpdate", level = "info", skip_all, fields(name=%create_or_update.name))]
     async fn handle(
         &mut self,
         _cx: &Context<Self>,
-        create_or_update: resource::CreateOrUpdate<()>,
+        create_or_update: resource::CreateOrUpdate<ProcSpec>,
     ) -> anyhow::Result<()> {
         if self.created.contains_key(&create_or_update.name) {
             // Already created: there is no update.
@@ -123,10 +123,21 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
         let host = self.host.as_mut().expect("host present");
         let created = match host {
             HostAgentMode::Process(host) => {
-                host.spawn(create_or_update.name.clone().to_string()).await
+                host.spawn(
+                    create_or_update.name.clone().to_string(),
+                    BootstrapProcConfig {
+                        create_rank: create_or_update.rank.unwrap(),
+                        client_config_override: create_or_update
+                            .spec
+                            .client_config_override
+                            .clone(),
+                    },
+                )
+                .await
             }
             HostAgentMode::Local(host) => {
-                host.spawn(create_or_update.name.clone().to_string()).await
+                host.spawn(create_or_update.name.clone().to_string(), ())
+                    .await
             }
         };
 
@@ -149,20 +160,22 @@ impl Handler<resource::GetRankStatus> for HostMeshAgent {
         cx: &Context<Self>,
         get_rank_status: resource::GetRankStatus,
     ) -> anyhow::Result<()> {
-        let Some(created) = self.created.get(&get_rank_status.name) else {
-            // TODO: how can we get the host's rank here? we should model its absence explicitly.
-            get_rank_status
-                .reply
-                .send(cx, (usize::MAX, resource::Status::NotExist).into())?;
-            return Ok(());
+        use crate::resource::Status;
+        use crate::v1::StatusOverlay;
+
+        let (rank, status) = match self.created.get(&get_rank_status.name) {
+            Some((rank, Ok(_))) => (*rank, Status::Running),
+            Some((rank, Err(e))) => (*rank, Status::Failed(e.to_string())),
+            None => (usize::MAX, Status::NotExist),
         };
 
-        let rank_status = match created {
-            (rank, Ok(_)) => (*rank, resource::Status::Running),
-            (rank, Err(e)) => (*rank, resource::Status::Failed(e.to_string())),
+        let overlay = if rank == usize::MAX {
+            StatusOverlay::new()
+        } else {
+            StatusOverlay::try_from_runs(vec![(rank..(rank + 1), status)])
+                .expect("valid single-run overlay")
         };
-        get_rank_status.reply.send(cx, rank_status.into())?;
-
+        get_rank_status.reply.send(cx, overlay)?;
         Ok(())
     }
 }
@@ -256,29 +269,6 @@ impl Handler<resource::GetState<ProcState>> for HostMeshAgent {
         };
 
         get_state.reply.send(cx, state)?;
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl Handler<resource::ApplyConfigSnapshot> for HostMeshAgent {
-    async fn handle(
-        &mut self,
-        _cx: &Context<Self>,
-        apply_config_snapshot: resource::ApplyConfigSnapshot,
-    ) -> anyhow::Result<()> {
-        let manager = self
-            .host
-            .as_mut()
-            .expect("host")
-            .as_process_mut()
-            .map(Host::manager_mut);
-
-        match manager {
-            Some(manager) => manager.set_config(apply_config_snapshot.config()),
-            None => (),
-        }
-
         Ok(())
     }
 }
@@ -399,7 +389,12 @@ mod tests {
         // First, create the proc, then query its state:
 
         host_agent
-            .create_or_update(&client, name.clone(), resource::Rank::new(0), ())
+            .create_or_update(
+                &client,
+                name.clone(),
+                resource::Rank::new(0),
+                ProcSpec::default(),
+            )
             .await
             .unwrap();
         assert_matches!(

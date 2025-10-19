@@ -8,16 +8,19 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use hyperactor::Actor;
+use hyperactor::ActorHandle;
 use hyperactor::ActorRef;
-use hyperactor::Instance;
-use hyperactor::PortRef;
 use hyperactor::RemoteMessage;
+use hyperactor::actor::ActorStatus;
 use hyperactor::actor::Referable;
 use hyperactor::actor::RemotableActor;
 use hyperactor::clock::Clock;
 use hyperactor::clock::RealClock;
+use hyperactor::context;
 use hyperactor::supervision::ActorSupervisionEvent;
 use hyperactor_mesh::dashmap::DashMap;
 use hyperactor_mesh::proc_mesh::mesh_agent::ActorState;
@@ -43,21 +46,33 @@ use pyo3::types::PyBytes;
 use crate::actor::PythonActor;
 use crate::actor::PythonMessage;
 use crate::actor_mesh::ActorMeshProtocol;
+use crate::actor_mesh::PyActorSupervisionEvent;
 use crate::actor_mesh::PythonActorMesh;
+use crate::context::ContextInstance;
 use crate::context::PyInstance;
 use crate::instance_dispatch;
 use crate::proc::PyActorId;
 use crate::pytokio::PyPythonTask;
 use crate::pytokio::PyShared;
-use crate::runtime::get_tokio_runtime;
 use crate::shape::PyRegion;
 use crate::supervision::SupervisionError;
+use crate::supervision::SupervisionFailureMessage;
 use crate::supervision::Unhealthy;
 
-#[derive(Debug)]
 struct RootHealthState {
     unhealthy_event: std::sync::Mutex<Unhealthy<ActorSupervisionEvent>>,
     crashed_ranks: DashMap<usize, ActorSupervisionEvent>,
+    monitor: OnceLock<PyResult<Mutex<PyShared>>>,
+}
+
+impl std::fmt::Debug for RootHealthState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RootHealthState")
+            .field("unhealthy_event", &self.unhealthy_event)
+            .field("crashed_ranks", &self.crashed_ranks)
+            .field("monitor", &"OnceLock(..)")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +105,7 @@ impl PythonActorMeshImpl {
         let health_state = Arc::new(RootHealthState {
             unhealthy_event: std::sync::Mutex::new(Unhealthy::SoFarSoGood),
             crashed_ranks: DashMap::new(),
+            monitor: OnceLock::new(),
         });
         PythonActorMeshImpl::Owned(PyActorMesh(inner, health_state))
     }
@@ -99,6 +115,7 @@ impl PythonActorMeshImpl {
         let health_state = Arc::new(RootHealthState {
             unhealthy_event: std::sync::Mutex::new(Unhealthy::SoFarSoGood),
             crashed_ranks: DashMap::new(),
+            monitor: OnceLock::new(),
         });
         PythonActorMeshImpl::Ref(PyActorMeshRef(inner, health_state))
     }
@@ -118,6 +135,87 @@ impl PythonActorMeshImpl {
     }
 }
 
+fn send_state_change(
+    point: Point,
+    old_state: Option<resource::State<ActorState>>,
+    new_state: resource::State<ActorState>,
+    owner: &Option<ActorHandle<PythonActor>>,
+    health_state: &Arc<RootHealthState>,
+) -> Option<PyErr> {
+    tracing::debug!(
+        "PythonActorMeshImpl: received state change event: point={:?}, old_state={:?}, new_state={:?}",
+        point,
+        old_state,
+        new_state
+    );
+    let (rank, actor_id, events) = match new_state.state {
+        Some(inner) => (
+            inner.create_rank,
+            Some(inner.actor_id),
+            inner.supervision_events.clone(),
+        ),
+        None => (0, None, vec![]),
+    };
+    let events = match new_state.status {
+        // If the actor was killed, it might not have a Failed status
+        // or supervision events, and it can't tell us which rank
+        // it was.
+        resource::Status::NotExist | resource::Status::Stopped => {
+            if !events.is_empty() {
+                events
+            } else {
+                vec![ActorSupervisionEvent::new(
+                    actor_id.expect("actor_id is None"),
+                    ActorStatus::Stopped,
+                    None,
+                    None,
+                )]
+            }
+        }
+        resource::Status::Failed(_) => events,
+        // All other states are successful.
+        _ => vec![],
+    };
+    // Wait for next event if the change in state produced no supervision events.
+    if events.is_empty() {
+        return None;
+    }
+    let event = events[0].clone();
+    let event_actor_id = event.actor_id.clone();
+    tracing::info!(
+        "Detected supervision event on monitored actor: actor={}, event={:?}",
+        event_actor_id,
+        event
+    );
+    // Send a notification to the owning actor of this mesh, if there is one.
+    // FIXME: This should probably not be sent by a MeshRef, because there
+    // may be more than one MeshRef monitoring the same underlying actors.
+    // Then the owning actor could receive duplicate messages.
+    if let Some(owner) = owner {
+        owner
+            .send(SupervisionFailureMessage {
+                rank,
+                event: event.clone(),
+            })
+            .expect("send failed");
+    }
+    let mut inner_unhealthy_event = health_state
+        .unhealthy_event
+        .lock()
+        .expect("unhealthy_event lock poisoned");
+    health_state.crashed_ranks.insert(rank, event.clone());
+    *inner_unhealthy_event = Unhealthy::Crashed(event.clone());
+    let py_event = PyActorSupervisionEvent::from(event);
+    let pyerr = PyErr::new::<SupervisionError, _>(format!(
+        "Actor {} exited because of the following reason: {}",
+        event_actor_id,
+        py_event
+            .__repr__()
+            .expect("repr failed on PyActorSupervisionEvent")
+    ));
+    Some(pyerr)
+}
+
 /// Returns a watchable receiver for actor states.
 ///
 /// The receiver will be notified when any actor in this mesh changes state,
@@ -128,67 +226,54 @@ impl PythonActorMeshImpl {
 /// slicing.
 ///
 /// * time_between_tasks controls how frequently to poll.
-#[allow(dead_code)]
-pub fn actor_states_monitor<A, C>(
+async fn actor_states_monitor<A>(
+    cx: &impl context::Actor,
     mesh: ActorMeshRef<A>,
-    cx: Instance<C>,
-    sender: PortRef<(
-        Point,
-        Option<resource::State<ActorState>>,
-        resource::State<ActorState>,
-    )>,
+    owner: Option<ActorHandle<PythonActor>>,
+    health_state: Arc<RootHealthState>,
     time_between_checks: tokio::time::Duration,
-) -> tokio::task::JoinHandle<()>
+) -> Result<PyErr, PyErr>
 where
     A: Actor + RemotableActor + Referable,
-    C: Actor + RemotableActor + std::fmt::Debug,
     A::Params: RemoteMessage,
-    C::Params: RemoteMessage,
 {
     // This implementation polls every "time_between_checks" duration, checking
     // for changes in the actor states. It can be improved in two ways:
     // 1. Use accumulation, to get *any* actor with a change in state, not *all*
     //    actors.
     // 2. Use a push-based mode instead of polling.
-    get_tokio_runtime().spawn(async move {
-        let mut existing_states: HashMap<Point, resource::State<ActorState>> = HashMap::new();
-        let send = |point,
-                    old_state: Option<resource::State<ActorState>>,
-                    new_state: resource::State<ActorState>| {
-            sender
-                .send(&cx, (point, old_state.clone(), new_state.clone()))
-                .expect("Unsuccessful send of ActorStateChangeMessage to sender");
-        };
-        loop {
-            // Wait in between checking to avoid using too much network.
-            RealClock.sleep(time_between_checks).await;
-            match mesh.actor_states(&cx).await {
-                Ok(events) => {
-                    // This returned point is the created rank, *not* the rank of
-                    // the possibly sliced input mesh.
-                    for (point, state) in events.iter() {
-                        let entry = existing_states.entry(point.clone()).or_insert_with(|| {
-                            // If this actor is new, send a message to the owner.
-                            send(point.clone(), None, state.clone());
-                            state.clone()
-                        });
-                        if entry.status != state.status {
-                            send(point.clone(), Some(entry.clone()), state.clone());
-                            *entry = state;
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "error in task accessing actor_states on {:?}: {:?}",
-                        mesh,
-                        e
-                    );
-                    break;
-                }
-            };
+    let mut existing_states: HashMap<Point, resource::State<ActorState>> = HashMap::new();
+    loop {
+        // Wait in between checking to avoid using too much network.
+        RealClock.sleep(time_between_checks).await;
+        let events = mesh.actor_states(cx).await.map_err(|e| {
+            PyErr::new::<SupervisionError, _>(format!("Unable to query for actor states: {:?}", e))
+        })?;
+        // This returned point is the created rank, *not* the rank of
+        // the possibly sliced input mesh.
+        for (point, state) in events.iter() {
+            let mut err = None;
+            let entry = existing_states.entry(point.clone()).or_insert_with(|| {
+                // If this actor is new, send a message to the owner.
+                err = send_state_change(point.clone(), None, state.clone(), &owner, &health_state);
+                state.clone()
+            });
+            if entry.status != state.status {
+                err = send_state_change(
+                    point.clone(),
+                    Some(entry.clone()),
+                    state.clone(),
+                    &owner,
+                    &health_state,
+                );
+                *entry = state;
+            }
+            // If there is a supervision error created, return and exit this loop.
+            if let Some(e) = err {
+                return Ok(e);
+            }
         }
-    })
+    }
 }
 
 impl ActorMeshProtocol for PythonActorMeshImpl {
@@ -242,8 +327,56 @@ impl ActorMeshProtocol for PythonActorMeshImpl {
     }
 
     fn supervision_event(&self, instance: &PyInstance) -> PyResult<Option<PyShared>> {
-        // TODO: Fix performance issue with many actor_states_monitor being spawned.
-        Ok(None)
+        // Have to hold the GIL to clone a python object.
+        let instance = Python::with_gil(|_py| instance.clone());
+        let mesh = self.mesh_ref();
+        let health_state = self.health_state().clone();
+        // We use a OnceLock so there's a shared monitor for all endpoints on
+        // the same mesh ref. Note that slices do not share this monitor, nor do
+        // they share the health state. This is fine because requerying a slice
+        // of a mesh will still return any failed state.
+        let monitor = self.health_state().monitor.get_or_init(move || {
+            let task = PyPythonTask::new(async move {
+                // 3 seconds is chosen to not penalize short-lived successful calls,
+                // while still able to catch issues before they look like a hang or timeout.
+                let time_between_checks = tokio::time::Duration::from_secs(3);
+                match instance.context_instance() {
+                    ContextInstance::Client(cx_instance) => {
+                        actor_states_monitor(
+                            cx_instance,
+                            mesh,
+                            None,
+                            health_state,
+                            time_between_checks,
+                        )
+                        .await
+                    }
+                    ContextInstance::PythonActor(cx_instance) => {
+                        actor_states_monitor(
+                            cx_instance,
+                            mesh,
+                            // This is not always the owning actor, it is the
+                            // current actor. It may be different if this ref
+                            // is sent to another machine.
+                            Some(cx_instance.handle()),
+                            health_state,
+                            time_between_checks,
+                        )
+                        .await
+                    }
+                }
+            })
+            .map(|mut x| x.spawn_abortable())??;
+            Ok(Mutex::new(task))
+        });
+        let mut monitor = monitor
+            .as_ref()
+            .map_err(|err| Python::with_gil(|py| err.clone_ref(py)))?
+            .lock()
+            .map_err(|err| {
+                PyRuntimeError::new_err(format!("failed to acquire monitor lock: {:?}", err))
+            })?;
+        monitor.task()?.spawn_abortable().map(Some)
     }
 
     fn new_with_region(&self, region: &PyRegion) -> PyResult<Box<dyn ActorMeshProtocol>> {
@@ -254,10 +387,22 @@ impl ActorMeshProtocol for PythonActorMeshImpl {
         )))
     }
 
-    fn stop<'py>(&self) -> PyResult<PyPythonTask> {
-        Err(PyErr::new::<PyNotImplementedError, _>(
-            "stop is not implemented yet for v1::PythonActorMeshImpl",
-        ))
+    fn stop(&self, instance: &PyInstance) -> PyResult<PyPythonTask> {
+        let (slf, instance) = Python::with_gil(|_py| (self.clone(), instance.clone()));
+        match slf {
+            PythonActorMeshImpl::Owned(mesh) => PyPythonTask::new(async move {
+                instance_dispatch!(instance, |cx_instance| {
+                    mesh.0
+                        .stop(cx_instance)
+                        .await
+                        .map_err(|err| PyValueError::new_err(err.to_string()))?
+                });
+                Ok(())
+            }),
+            PythonActorMeshImpl::Ref(_) => Err(PyErr::new::<PyNotImplementedError, _>(
+                "Cannot call stop on an ActorMeshRef, requires an owned ActorMesh",
+            )),
+        }
     }
 
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
@@ -309,6 +454,13 @@ impl ActorMeshProtocol for ActorMeshRef<PythonActor> {
         ))
     }
 
+    /// Stop the actor mesh asynchronously.
+    fn stop(&self, _instance: &PyInstance) -> PyResult<PyPythonTask> {
+        Err(PyErr::new::<PyNotImplementedError, _>(
+            "This cannot be used on ActorMeshRef, only on owned ActorMesh",
+        ))
+    }
+
     fn new_with_region(&self, region: &PyRegion) -> PyResult<Box<dyn ActorMeshProtocol>> {
         let sliced = self.sliced(region.as_inner().clone());
         Ok(Box::new(sliced))
@@ -334,6 +486,10 @@ impl PythonActorMeshImpl {
             .get(rank)
             .map(|r| ActorRef::into_actor_id(r.clone()))
             .map(PyActorId::from))
+    }
+
+    fn __repr__(&self) -> String {
+        format!("PythonActorMeshImpl({:?})", self.mesh_ref())
     }
 }
 

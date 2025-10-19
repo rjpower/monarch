@@ -76,7 +76,10 @@ from monarch._src.actor.v1.proc_mesh import (
     get_active_proc_meshes as get_active_proc_meshes_v1,
     get_or_spawn_controller as get_or_spawn_controller_v1,
     HyProcMesh as HyProcMeshV1,
+    local_proc_mesh as local_proc_mesh_v1,
+    proc_mesh as proc_mesh_v1,
     ProcMesh as ProcMeshV1,
+    sim_proc_mesh as sim_proc_mesh_v1,
 )
 from monarch.tools.config.environment import CondaEnvironment
 from monarch.tools.config.workspace import Workspace
@@ -208,6 +211,16 @@ class ProcMeshV0(MeshTrait):
         shape: Shape,
         _device_mesh: Optional["DeviceMesh"] = None,
     ) -> None:
+        warnings.warn(
+            (
+                "DEPRECATION WARNING: using a deprecated version of ProcMesh. This is going be removed imminently. "
+                "Make sure you aren't running with `MONARCH_V0_WORKAROUND_DO_NOT_USE=1` to get the new version of "
+                "ProcMesh."
+            ),
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         self._proc_mesh = hy_proc_mesh
         global _proc_mesh_lock, _proc_mesh_key
         with _proc_mesh_lock:
@@ -593,6 +606,7 @@ class ProcMeshV0(MeshTrait):
 
         assert self._code_sync_client is not None
         await self._code_sync_client.sync_workspaces(
+            instance=context().actor_instance._as_rust(),
             workspaces=list(workspaces.values()),
             auto_reload=auto_reload,
         )
@@ -680,7 +694,7 @@ class ProcMeshV0(MeshTrait):
         return maybe_proc_mesh
 
 
-def local_proc_mesh(*, gpus: Optional[int] = None, hosts: int = 1) -> ProcMeshV0:
+def local_proc_mesh_v0(*, gpus: Optional[int] = None, hosts: int = 1) -> ProcMeshV0:
     """
     Create a local process mesh for testing and development.
 
@@ -711,7 +725,7 @@ def local_proc_mesh(*, gpus: Optional[int] = None, hosts: int = 1) -> ProcMeshV0
     )
 
 
-def sim_proc_mesh(
+def sim_proc_mesh_v0(
     *,
     gpus: int = 1,
     hosts: int = 1,
@@ -785,7 +799,7 @@ def _proc_mesh_from_allocator(
     return ProcMeshV0.from_alloc(alloc, setup, _attach_controller_controller)
 
 
-def proc_mesh(
+def proc_mesh_v0(
     *,
     gpus: Optional[int] = None,
     hosts: int = 1,
@@ -908,6 +922,9 @@ if v1_enabled or TYPE_CHECKING:
     get_active_proc_meshes = get_active_proc_meshes_v1
     _ControllerController = _ControllerControllerV1
     HyProcMesh = HyProcMeshV1
+    proc_mesh = proc_mesh_v1
+    local_proc_mesh = local_proc_mesh_v1
+    sim_proc_mesh = sim_proc_mesh_v1
 else:
     ProcMesh = ProcMeshV0
     get_or_spawn_controller = get_or_spawn_controller_v0
@@ -915,3 +932,6 @@ else:
     get_active_proc_meshes = get_active_proc_meshes_v0
     _ControllerController = _ControllerControllerV0
     HyProcMesh = HyProcMeshV0
+    proc_mesh = proc_mesh_v0
+    local_proc_mesh = local_proc_mesh_v0
+    sim_proc_mesh = sim_proc_mesh_v0
