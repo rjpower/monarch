@@ -182,11 +182,6 @@ impl<M: ProcManager> Host<M> {
         &self.manager
     }
 
-    /// The mutable underlying proc manager.
-    pub fn manager_mut(&mut self) -> &mut M {
-        &mut self.manager
-    }
-
     /// The address which accepts messages destined for this host.
     pub fn addr(&self) -> &ChannelAddr {
         &self.frontend_addr
