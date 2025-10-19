@@ -33,12 +33,32 @@ use serde::Deserialize;
 use serde::Serialize;
 pub use value_mesh::ValueMesh;
 
+/// A mesh of per-rank lifecycle statuses.
+///
+/// `StatusMesh` is `ValueMesh<Status>` and supports dense or
+/// compressed encodings. Updates are applied via sparse overlays with
+/// **last-writer-wins** semantics (see
+/// [`ValueMesh::merge_from_overlay`]). The mesh's `Region` defines
+/// the rank space; all updates must match that region.
+pub type StatusMesh = ValueMesh<Status>;
+
+/// A sparse set of `(Range<usize>, Status)` updates for a
+/// [`StatusMesh`].
+///
+/// `StatusOverlay` carries **normalized** runs (sorted,
+/// non-overlapping, and coalesced). Applying an overlay to a
+/// `StatusMesh` uses **right-wins** semantics on overlap and
+/// preserves first-appearance order in the compressed table.
+/// Construct via `ValueOverlay::try_from_runs` after normalizing.
+pub type StatusOverlay = value_mesh::ValueOverlay<Status>;
+
 use crate::resource;
 use crate::resource::RankedValues;
 use crate::resource::Status;
 use crate::shortuuid::ShortUuid;
 use crate::v1::host_mesh::HostMeshAgent;
 use crate::v1::host_mesh::HostMeshRefParseError;
+use crate::v1::host_mesh::mesh_agent::ProcState;
 
 /// Errors that occur during mesh operations.
 #[derive(Debug, EnumAsInner, thiserror::Error)]
@@ -91,12 +111,13 @@ pub enum Error {
     #[error("error configuring host mesh agent {0}: {1}")]
     HostMeshAgentConfigurationError(ActorId, String),
 
-    #[error("error creating {proc_name} (host rank {host_rank}) on host mesh agent {mesh_agent}")]
+    #[error(
+        "error creating proc (host rank {host_rank}) on host mesh agent {mesh_agent}, state: {state}"
+    )]
     ProcCreationError {
-        proc_name: Name,
-        mesh_agent: ActorRef<HostMeshAgent>,
+        state: resource::State<ProcState>,
         host_rank: usize,
-        status: resource::Status,
+        mesh_agent: ActorRef<HostMeshAgent>,
     },
 
     #[error(
@@ -110,6 +131,12 @@ pub enum Error {
         RankedValues::invert(&*.statuses)
     )]
     ActorSpawnError { statuses: RankedValues<Status> },
+
+    #[error(
+        "error stopping actor mesh: statuses: {}",
+        RankedValues::invert(statuses)
+    )]
+    ActorStopError { statuses: RankedValues<Status> },
 
     #[error("error: {0} does not exist")]
     NotExist(Name),

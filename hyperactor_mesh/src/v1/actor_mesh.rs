@@ -78,6 +78,19 @@ impl<A: Referable> ActorMesh<A> {
     pub(crate) fn detach(self) -> ActorMeshRef<A> {
         self.current_ref
     }
+
+    /// Stop actors on this mesh across all procs.
+    pub async fn stop(&self, cx: &impl context::Actor) -> v1::Result<()> {
+        self.proc_mesh()
+            .stop_actor_by_name(cx, self.name.clone())
+            .await
+    }
+}
+
+impl<A: Referable> fmt::Display for ActorMesh<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.current_ref)
+    }
 }
 
 impl<A: Referable> Deref for ActorMesh<A> {
@@ -343,6 +356,15 @@ impl<A: Referable> Clone for ActorMeshRef<A> {
         }
     }
 }
+
+impl<A: Referable> fmt::Display for ActorMeshRef<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}@{}", self.name, A::typename(), self.proc_mesh)
+    }
+}
+
+// proc_mesh: ProcMeshRef,
+// name: Name,
 
 impl<A: Referable> PartialEq for ActorMeshRef<A> {
     fn eq(&self, other: &Self) -> bool {

@@ -6,21 +6,39 @@
 
 # pyre-unsafe
 
+import os
+import threading
+import time
 from typing import cast
+from unittest.mock import MagicMock, patch
 
 import cloudpickle
+import monarch._src.actor.host_mesh
 
 import pytest
+from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask
 from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Shape, Slice
-from monarch._src.actor.actor_mesh import Actor, ActorMesh, context, ValueMesh
+from monarch._src.actor.actor_mesh import (
+    _root_proc_mesh,
+    Actor,
+    ActorMesh,
+    context,
+    ValueMesh,
+)
+from monarch._src.actor.allocator import LocalAllocator, ProcessAllocator
 from monarch._src.actor.endpoint import endpoint
-from monarch._src.actor.host_mesh import create_local_host_mesh, this_host
-from monarch._src.actor.proc_mesh import ProcMesh
-from monarch._src.actor.v1 import enabled as v1_enabled
-
-
-pytestmark = pytest.mark.skipif(not v1_enabled, reason="v1 not enabled")
+from monarch._src.actor.host_mesh import (
+    create_local_host_mesh,
+    HostMesh,
+    this_host,
+    this_proc,
+)
+from monarch._src.actor.proc_mesh import (
+    _get_bootstrap_args,
+    get_or_spawn_controller,
+    ProcMesh,
+)
 
 
 _proc_rank = -1
@@ -162,3 +180,144 @@ async def test_pickle_initialized_proc_mesh_in_tokio_thread() -> None:
         cloudpickle.dumps(proc.slice(gpus=0, hosts=0))
 
     PythonTask.from_coroutine(task()).block_on()
+
+
+@pytest.mark.timeout(60)
+async def test_deprecated_proc_mesh_from_alloc_mock() -> None:
+    num_hosts = 2
+    num_gpus = 8
+
+    def test_setup() -> None:
+        import os
+
+        os.environ["TEST_VAR"] = "test_value"
+
+    constraints = AllocConstraints(match_labels={"test_label": "test_value"})
+    allocator = LocalAllocator()
+    spec = AllocSpec(
+        constraints,
+        hosts=num_hosts,
+        gpus=num_gpus,
+    )
+
+    with patch.object(HostMesh, "allocate_nonblocking") as mock_host_alloc:
+        mock_host_mesh = MagicMock()
+        mock_host_mesh.spawn_procs = MagicMock()
+        mock_host_alloc.return_value = mock_host_mesh
+
+        alloc_handle = allocator.allocate(spec)
+        ProcMesh.from_alloc(alloc_handle, test_setup)
+
+        mock_host_alloc.assert_called_once()
+        (name, extent, allocator, constraints) = mock_host_alloc.call_args.args
+
+        assert name == "host_mesh_from_alloc"
+        assert extent == Extent(["hosts", "gpus"], [num_hosts, num_gpus])
+        assert isinstance(allocator, LocalAllocator)
+        assert constraints.match_labels == {"test_label": "test_value"}
+
+        mock_host_mesh.spawn_procs.assert_called_once_with(bootstrap=test_setup)
+
+
+@pytest.mark.timeout(60)
+def test_deprecated_proc_mesh_from_alloc_multi_actor() -> None:
+    allocator = ProcessAllocator(*_get_bootstrap_args())
+    spec = AllocSpec(AllocConstraints(), replicas=2, hosts=2, gpus=3)
+    alloc_handle = allocator.allocate(spec)
+    proc_mesh = ProcMesh.from_alloc(alloc_handle)
+
+    actor = proc_mesh.spawn("test_actor", TestActor, 42)
+
+    proc_ranks = actor.get_proc_rank.call().get()
+    assert proc_ranks.extent.labels == ["replicas", "hosts", "gpus"]
+    assert proc_ranks.extent.sizes == [2, 2, 3]
+    for i, (point, rank) in enumerate(proc_ranks.items()):
+        assert rank == i
+        assert point.rank == i
+
+
+class PidActor(Actor):
+    @endpoint
+    def get_pid(self) -> int:
+        return os.getpid()
+
+
+@pytest.mark.timeout(60)
+def test_this_proc_on_root_client_spawns_actor_in_client_os_process() -> None:
+    proc = this_proc()
+    actor = proc.spawn("pid_actor", PidActor)
+    assert actor.get_pid.call_one().get() == os.getpid()
+
+
+@pytest.mark.timeout(60)
+def test_proc_mesh_on_root_client_spawns_actor_in_client_os_process() -> None:
+    proc = this_proc()
+    actor = proc.spawn("pid_actor", PidActor)
+    assert actor.get_pid.call_one().get() == os.getpid()
+
+
+class PidActorController(Actor):
+    @endpoint
+    def spawn_pid_actor_with_this_proc(self) -> PidActor:
+        return this_proc().spawn("pid", PidActor)
+
+    @endpoint
+    def spawn_pid_actor_with_proc_mesh(self) -> PidActor:
+        return context().actor_instance.proc_mesh.spawn("pid", PidActor)
+
+
+@pytest.mark.timeout(60)
+def test_this_proc_in_controller_spawns_actor_in_client_os_process() -> None:
+    pid_controller = get_or_spawn_controller(
+        "pid_test_this_proc_in_controller", PidActorController
+    ).get()
+    assert (
+        pid_controller.spawn_pid_actor_with_this_proc.call_one()
+        .get()
+        .get_pid.call_one()
+        .get()
+        == os.getpid()
+    )
+
+
+@pytest.mark.timeout(60)
+def test_context_proc_mesh_in_controller_spawns_actor_in_client_os_process() -> None:
+    pid_controller = get_or_spawn_controller(
+        "pid_test_context_proc_mesh_in_controller", PidActorController
+    ).get()
+    assert (
+        pid_controller.spawn_pid_actor_with_proc_mesh.call_one()
+        .get()
+        .get_pid.call_one()
+        .get()
+        == os.getpid()
+    )
+
+
+@pytest.mark.timeout(60)
+def test_root_client_does_not_leak_proc_meshes() -> None:
+    orig_get_root_proc_mesh = _root_proc_mesh.get
+    with patch.object(_root_proc_mesh, "get") as mock_get_root_proc_mesh, patch.object(
+        monarch._src.actor.host_mesh, "fake_in_process_host"
+    ) as mock_fake_in_process_host:
+        mock_get_root_proc_mesh.side_effect = orig_get_root_proc_mesh
+
+        def sync_sleep_then_context():
+            time.sleep(0.1)
+            context()
+
+        threads = []
+        for _ in range(100):
+            t = threading.Thread(target=sync_sleep_then_context)
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        assert mock_get_root_proc_mesh.call_count == 100
+        # If this test is run in isolation, the local host mesh will
+        # be created once. But if it runs with other tests, the host mesh
+        # will have already been initialized and the function never gets
+        # called.
+        assert mock_fake_in_process_host.call_count in (0, 1)

@@ -15,6 +15,7 @@ setup_conda_environment() {
     echo "Setting up conda environment with Python ${python_version}..."
     conda create -n venv python="${python_version}" -y
     conda activate venv
+    export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:$LD_LIBRARY_PATH"
     export PATH=/opt/rh/devtoolset-10/root/usr/bin/:$PATH
     python -m pip install --upgrade pip
 }
@@ -154,13 +155,22 @@ setup_test_environment() {
     install_python_test_dependencies
 }
 
-# Run test groups with 0 for the v0 API and 1 for the v1 API
+# Run Python test groups for Monarch.
+# Usage: run_test_groups <enable_actor_error_test: 0|1>
+#
+# Arguments:
+#   enable_actor_error_test:
+#       0 → skip python/tests/test_actor_error.py
+#       1 → include python/tests/test_actor_error.py
+#
+# Tests are executed in 10 sequential groups with process cleanup
+# between runs.
 run_test_groups() {
   set +e
-  local enable_v1="$1"
-  # Validate argument
-  if [[ "$enable_v1" != "0" && "$enable_v1" != "1" ]]; then
-    echo "Usage: run_test_groups <enable_v1: 0|1>"
+  local enable_actor_error_test="${2:-0}"
+  # Validate argument enable_actor_error_test
+  if [[ "$enable_actor_error_test" != "0" && "$enable_actor_error_test" != "1" ]]; then
+    echo "Usage: run_test_groups <enable_actor_error_test: 0|1>"
     return 2
   fi
   local FAILED_GROUPS=()
@@ -171,28 +181,26 @@ run_test_groups() {
     pkill -9 python || true
     pkill -9 pytest || true
     sleep 2
-    # Conditionally set environment variable for pytest
-    if [[ "$enable_v1" == "1" ]]; then
-      MONARCH_HOST_MESH_V1_REMOVE_ME_BEFORE_RELEASE=1 \
-      LC_ALL=C pytest python/tests/ -s -v -m "not oss_skip" \
-        --ignore-glob="**/meta/**" \
-        --ignore=python/tests/test_actor_error.py \
-        --dist=no \
-        --group=$GROUP \
-        --splits=10
+    if [[ "$enable_actor_error_test" == "1" ]]; then
+        LC_ALL=C pytest python/tests/ -s -v -m "not oss_skip" \
+            --ignore-glob="**/meta/**" \
+            --dist=no \
+            --group="$GROUP" \
+            --splits=10
     else
-      LC_ALL=C pytest python/tests/ -s -v -m "not oss_skip" \
-        --ignore-glob="**/meta/**" \
-        --dist=no \
-        --group=$GROUP \
-        --splits=10
+        LC_ALL=C pytest python/tests/ -s -v -m "not oss_skip" \
+            --ignore-glob="**/meta/**" \
+            --dist=no \
+            --ignore=python/tests/test_actor_error.py \
+            --group="$GROUP" \
+            --splits=10
     fi
     # Check result and record failures
     if [[ $? -eq 0 ]]; then
-      echo "✓ Test group $GROUP completed successfully"
+        echo "✓ Test group $GROUP completed successfully"
     else
-      FAILED_GROUPS+=($GROUP)
-      echo "✗ Test group $GROUP failed with exit code $?"
+        FAILED_GROUPS+=($GROUP)
+        echo "✗ Test group $GROUP failed with exit code $?"
     fi
   done
   # Final cleanup after all groups

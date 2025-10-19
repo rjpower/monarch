@@ -14,6 +14,8 @@ use hyperactor::config;
 use hyperactor::config::CONFIG;
 use hyperactor::config::ConfigAttr;
 use hyperactor::declare_attrs;
+use tokio::time::timeout;
+
 pub mod mesh_agent;
 
 use std::collections::HashSet;
@@ -43,6 +45,7 @@ use crate::resource;
 use crate::resource::CreateOrUpdateClient;
 use crate::resource::GetRankStatus;
 use crate::resource::GetRankStatusClient;
+use crate::resource::GetStateClient;
 use crate::resource::RankedValues;
 use crate::resource::Status;
 use crate::v1;
@@ -285,14 +288,14 @@ impl HostMesh {
 
         let proc_mesh_ref = proc_mesh.clone();
         Ok(Self {
-            name,
+            name: name.clone(),
             extent: extent.clone(),
             allocation: HostMeshAllocation::ProcMesh {
                 proc_mesh,
                 proc_mesh_ref,
                 hosts: hosts.clone(),
             },
-            current_ref: HostMeshRef::new(extent.into(), hosts).unwrap(),
+            current_ref: HostMeshRef::new(name, extent.into(), hosts).unwrap(),
         })
     }
 
@@ -302,16 +305,15 @@ impl HostMesh {
     /// returns an owned `HostMesh` that assumes lifecycle
     /// responsibility for those hosts (i.e., will shut them down on
     /// Drop).
-    pub fn take(name: impl Into<Name>, mesh: HostMeshRef) -> Self {
-        let name = name.into();
+    pub fn take(mesh: HostMeshRef) -> Self {
         let region = mesh.region().clone();
         let hosts: Vec<HostRef> = mesh.values().collect();
 
-        let current_ref = HostMeshRef::new(region.clone(), hosts.clone())
+        let current_ref = HostMeshRef::new(mesh.name.clone(), region.clone(), hosts.clone())
             .expect("region/hosts cardinality must match");
 
         Self {
-            name,
+            name: mesh.name,
             extent: region.extent().clone(),
             allocation: HostMeshAllocation::Owned { hosts },
             current_ref,
@@ -479,6 +481,7 @@ impl Drop for HostMesh {
 /// `HostMeshRef` may fail because the hosts are no longer running.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Named, Serialize, Deserialize)]
 pub struct HostMeshRef {
+    name: Name,
     region: Region,
     ranks: Arc<Vec<HostRef>>,
 }
@@ -486,7 +489,7 @@ pub struct HostMeshRef {
 impl HostMeshRef {
     /// Create a new (raw) HostMeshRef from the provided region and associated
     /// ranks, which must match in cardinality.
-    fn new(region: Region, ranks: Vec<HostRef>) -> v1::Result<Self> {
+    fn new(name: Name, region: Region, ranks: Vec<HostRef>) -> v1::Result<Self> {
         if region.num_ranks() != ranks.len() {
             return Err(v1::Error::InvalidRankCardinality {
                 expected: region.num_ranks(),
@@ -494,6 +497,7 @@ impl HostMeshRef {
             });
         }
         Ok(Self {
+            name,
             region,
             ranks: Arc::new(ranks),
         })
@@ -501,8 +505,9 @@ impl HostMeshRef {
 
     /// Create a new HostMeshRef from an arbitrary set of hosts. This is meant to
     /// enable extrinsic bootstrapping.
-    pub fn from_hosts(hosts: Vec<ChannelAddr>) -> Self {
+    pub fn from_hosts(name: Name, hosts: Vec<ChannelAddr>) -> Self {
         Self {
+            name,
             region: extent!(hosts = hosts.len()).into(),
             ranks: Arc::new(hosts.into_iter().map(HostRef).collect()),
         }
@@ -537,25 +542,51 @@ impl HostMeshRef {
             .concat(&per_host)
             .map_err(|err| v1::Error::ConfigurationError(err.into()))?;
 
+        let region: Region = extent.clone().into();
         let mesh_name = Name::new(name);
+
+        // Helper: legacy shim for error types that still require
+        // RankedValues<Status>. TODO(shayne-fletcher): Delete this
+        // shim once Error::ActorSpawnError carries a StatusMesh
+        // (ValueMesh<Status>) directly. At that point, use the mesh
+        // as-is and remove `mesh_to_rankedvalues_*` calls below.
+        fn mesh_to_rankedvalues_with_default(
+            mesh: &crate::v1::StatusMesh,
+            default_fill: Status,
+            len: usize,
+        ) -> RankedValues<Status> {
+            let mut out = RankedValues::from((0..len, default_fill));
+            for (i, s) in mesh.values().enumerate() {
+                if !matches!(s, Status::NotExist) {
+                    out.merge_from(RankedValues::from((i..i + 1, s.clone())));
+                }
+            }
+            out
+        }
+
         let mut procs = Vec::new();
-        let num_ranks = self.region().num_ranks() * per_host.num_ranks();
+        let num_ranks = region.num_ranks();
+        // Accumulator outputs full StatusMesh snapshots; seed with
+        // NotExist.
         let (port, rx) = cx.mailbox().open_accum_port_opts(
-            RankedValues::default(),
+            crate::v1::StatusMesh::from_single(region.clone(), Status::NotExist),
             Some(ReducerOpts {
                 max_update_interval: Some(Duration::from_millis(50)),
             }),
         );
 
-        // We CreateOrUpdate each proc, and then fence on getting statuses back.
-        // This is currently necessary because otherwise there is a race between
-        // the procs being created, and subsequent messages becoming unroutable
-        // (the agent actor manages the local muxer). We can solve this by allowing
-        // buffering in the host-level muxer.
+        // Create or update each proc, then fence on receiving status
+        // overlays. This prevents a race where procs become
+        // addressable before their local muxers are ready, which
+        // could make early messages unroutable. A future improvement
+        // would allow buffering in the host-level muxer to eliminate
+        // the need for this synchronization step.
+        let mut proc_names = Vec::new();
         for (host_rank, host) in self.ranks.iter().enumerate() {
             for per_host_rank in 0..per_host.num_ranks() {
                 let create_rank = per_host.num_ranks() * host_rank + per_host_rank;
                 let proc_name = Name::new(format!("{}_{}", name, per_host_rank));
+                proc_names.push(proc_name.clone());
                 host.mesh_agent()
                     .create_or_update(cx, proc_name.clone(), resource::Rank::new(create_rank), ())
                     .await
@@ -585,29 +616,67 @@ impl HostMeshRef {
 
         let start_time = RealClock.now();
 
-        match GetRankStatus::wait(rx, num_ranks, config::global::get(PROC_SPAWN_MAX_IDLE)).await {
+        // Wait on accumulated StatusMesh snapshots until complete or
+        // timeout.
+        match GetRankStatus::wait(
+            rx,
+            num_ranks,
+            config::global::get(PROC_SPAWN_MAX_IDLE),
+            region.clone(), // fallback mesh if nothing arrives
+        )
+        .await
+        {
             Ok(statuses) => {
-                if let Some((rank, status)) = statuses.first_terminating() {
+                // If any rank is terminating, surface a
+                // ProcCreationError pointing at that rank.
+                if let Some((rank, status)) = statuses
+                    .values()
+                    .enumerate()
+                    .find(|(_, s)| s.is_terminating())
+                {
+                    let proc_name = &proc_names[rank];
+                    let host_rank = rank / per_host.num_ranks();
+                    let mesh_agent = self.ranks[host_rank].mesh_agent();
+                    let state = match timeout(
+                        config::global::get(PROC_SPAWN_MAX_IDLE),
+                        mesh_agent.get_state(cx, proc_name.clone()),
+                    )
+                    .await
+                    {
+                        Ok(Ok(state)) => state,
+                        _ => resource::State {
+                            name: proc_name.clone(),
+                            status,
+                            state: None,
+                        },
+                    };
+
                     let proc_name = Name::new(format!("{}-{}", name, rank % per_host.num_ranks()));
                     return Err(v1::Error::ProcCreationError {
-                        proc_name,
-                        mesh_agent: self.ranks[rank].mesh_agent(),
-                        host_rank: rank / per_host.num_ranks(),
-                        status: status.clone(),
+                        state,
+                        host_rank,
+                        mesh_agent,
                     });
                 }
             }
             Err(complete) => {
-                // Fill the remaining statuses with a timeout error.
-                let mut statuses =
-                    RankedValues::from((0..num_ranks, Status::Timeout(start_time.elapsed())));
-                statuses.merge_from(complete);
-
-                return Err(v1::Error::ProcSpawnError { statuses });
+                // Fill remaining ranks with a timeout status via the
+                // legacy shim.
+                let legacy = mesh_to_rankedvalues_with_default(
+                    &complete,
+                    Status::Timeout(start_time.elapsed()),
+                    num_ranks,
+                );
+                return Err(v1::Error::ProcSpawnError { statuses: legacy });
             }
         }
 
         ProcMesh::create_owned_unchecked(cx, mesh_name, extent, self.clone(), procs).await
+    }
+
+    /// The name of the referenced host mesh.
+    pub fn name(&self) -> &Name {
+        &self.name
     }
 }
 
@@ -630,12 +699,13 @@ impl view::RankedSliceable for HostMeshRef {
             .remap(&region)
             .unwrap()
             .map(|index| self.get(index).unwrap().clone());
-        Self::new(region, ranks.collect()).unwrap()
+        Self::new(self.name.clone(), region, ranks.collect()).unwrap()
     }
 }
 
 impl std::fmt::Display for HostMeshRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:", self.name)?;
         for (rank, host) in self.ranks.iter().enumerate() {
             if rank > 0 {
                 write!(f, ",")?;
@@ -655,6 +725,12 @@ pub enum HostMeshRefParseError {
     #[error("invalid host mesh ref: missing region")]
     MissingRegion,
 
+    #[error("invalid host mesh ref: missing name")]
+    MissingName,
+
+    #[error(transparent)]
+    InvalidName(#[from] v1::NameParseError),
+
     #[error(transparent)]
     InvalidHostMeshRef(#[from] Box<v1::Error>),
 
@@ -672,7 +748,13 @@ impl FromStr for HostMeshRef {
     type Err = HostMeshRefParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (hosts, region) = s
+        let (name, rest) = s
+            .split_once(':')
+            .ok_or(HostMeshRefParseError::MissingName)?;
+
+        let name = Name::from_str(name)?;
+
+        let (hosts, region) = rest
             .split_once('@')
             .ok_or(HostMeshRefParseError::MissingRegion)?;
         let hosts = hosts
@@ -681,7 +763,7 @@ impl FromStr for HostMeshRef {
             .map(|host| host.parse::<HostRef>())
             .collect::<Result<Vec<_>, _>>()?;
         let region = region.parse()?;
-        Ok(HostMeshRef::new(region, hosts)?)
+        Ok(HostMeshRef::new(name, region, hosts)?)
     }
 }
 
@@ -706,18 +788,19 @@ mod tests {
 
     #[test]
     fn test_host_mesh_subset() {
-        let hosts: HostMeshRef = "local:1,local:2,local:3,local:4@replica=2/2,host=2/1"
+        let hosts: HostMeshRef = "test:local:1,local:2,local:3,local:4@replica=2/2,host=2/1"
             .parse()
             .unwrap();
         assert_eq!(
             hosts.range("replica", 1).unwrap().to_string(),
-            "local:3,local:4@2+replica=1/2,host=2/1"
+            "test:local:3,local:4@2+replica=1/2,host=2/1"
         );
     }
 
     #[test]
     fn test_host_mesh_ref_parse_roundtrip() {
         let host_mesh_ref = HostMeshRef::new(
+            Name::new("test"),
             extent!(replica = 2, host = 2).into(),
             vec![
                 "tcp:127.0.0.1:123".parse().unwrap(),
@@ -867,7 +950,7 @@ mod tests {
         }
 
         let instance = testing::instance().await;
-        let host_mesh = HostMeshRef::from_hosts(hosts);
+        let host_mesh = HostMeshRef::from_hosts(Name::new("test"), hosts);
 
         let proc_mesh = host_mesh
             .spawn(&testing::instance().await, "test", Extent::unity())
@@ -881,7 +964,7 @@ mod tests {
 
         testactor::assert_mesh_shape(actor_mesh).await;
 
-        HostMesh::take(Name::new("extrinsic"), host_mesh)
+        HostMesh::take(host_mesh)
             .shutdown(&instance)
             .await
             .expect("hosts shutdown");
@@ -906,7 +989,7 @@ mod tests {
             cmd.kill_on_drop(true);
             children.push(cmd.spawn().unwrap());
         }
-        let host_mesh = HostMeshRef::from_hosts(hosts);
+        let host_mesh = HostMeshRef::from_hosts(Name::new("test"), hosts);
 
         let instance = testing::instance().await;
 
@@ -915,7 +998,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_matches!(
-            err, v1::Error::ProcCreationError { status: resource::Status::Failed(msg), .. }
+            err, v1::Error::ProcCreationError { state: resource::State { status: resource::Status::Failed(msg), ..}, .. }
             if msg.contains("failed to configure process: Terminal(Stopped { exit_code: 1")
         );
     }
@@ -949,7 +1032,7 @@ mod tests {
             cmd.kill_on_drop(true);
             children.push(cmd.spawn().unwrap());
         }
-        let host_mesh = HostMeshRef::from_hosts(hosts);
+        let host_mesh = HostMeshRef::from_hosts(Name::new("test"), hosts);
 
         let instance = testing::instance().await;
 

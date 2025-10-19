@@ -26,7 +26,9 @@ from monarch._rust_bindings.monarch_hyperactor.alloc import (  # @manual=//monar
     AllocSpec,
 )
 from monarch._rust_bindings.monarch_hyperactor.shape import Extent, Region, Slice
+from monarch._src.actor.allocator import LocalAllocator
 from monarch._src.actor.proc_mesh import _get_bootstrap_args, ProcessAllocator
+
 
 if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
@@ -42,10 +44,6 @@ from monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh import (
     ProcMesh as ProcMeshV1,
 )
 from monarch._src.actor.actor_mesh import Context, context, Instance
-from monarch._src.actor.v1 import enabled as v1_enabled
-
-
-pytestmark = pytest.mark.skipif(not v1_enabled, reason="v0 tested even when v1 enabled")
 
 
 def run_on_tokio(
@@ -60,7 +58,7 @@ def run_on_tokio(
 
 async def alloc() -> Alloc:
     spec = AllocSpec(AllocConstraints(), replicas=3, hosts=8, gpus=8)
-    allocator = monarch.LocalAllocator()
+    allocator = LocalAllocator()
     return await allocator.allocate_nonblocking(spec)
 
 

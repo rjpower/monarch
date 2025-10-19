@@ -34,6 +34,7 @@ use serde::Serialize;
 
 use crate::bootstrap;
 use crate::bootstrap::BootstrapCommand;
+use crate::bootstrap::BootstrapProcConfig;
 use crate::bootstrap::BootstrapProcManager;
 use crate::proc_mesh::mesh_agent::ProcMeshAgent;
 use crate::resource;
@@ -121,10 +122,17 @@ impl Handler<resource::CreateOrUpdate<()>> for HostMeshAgent {
         let host = self.host.as_mut().expect("host present");
         let created = match host {
             HostAgentMode::Process(host) => {
-                host.spawn(create_or_update.name.clone().to_string()).await
+                host.spawn(
+                    create_or_update.name.clone().to_string(),
+                    BootstrapProcConfig {
+                        create_rank: create_or_update.rank.unwrap(),
+                    },
+                )
+                .await
             }
             HostAgentMode::Local(host) => {
-                host.spawn(create_or_update.name.clone().to_string()).await
+                host.spawn(create_or_update.name.clone().to_string(), ())
+                    .await
             }
         };
 
@@ -147,20 +155,22 @@ impl Handler<resource::GetRankStatus> for HostMeshAgent {
         cx: &Context<Self>,
         get_rank_status: resource::GetRankStatus,
     ) -> anyhow::Result<()> {
-        let Some(created) = self.created.get(&get_rank_status.name) else {
-            // TODO: how can we get the host's rank here? we should model its absence explicitly.
-            get_rank_status
-                .reply
-                .send(cx, (usize::MAX, resource::Status::NotExist).into())?;
-            return Ok(());
+        use crate::resource::Status;
+        use crate::v1::StatusOverlay;
+
+        let (rank, status) = match self.created.get(&get_rank_status.name) {
+            Some((rank, Ok(_))) => (*rank, Status::Running),
+            Some((rank, Err(e))) => (*rank, Status::Failed(e.to_string())),
+            None => (usize::MAX, Status::NotExist),
         };
 
-        let rank_status = match created {
-            (rank, Ok(_)) => (*rank, resource::Status::Running),
-            (rank, Err(e)) => (*rank, resource::Status::Failed(e.to_string())),
+        let overlay = if rank == usize::MAX {
+            StatusOverlay::new()
+        } else {
+            StatusOverlay::try_from_runs(vec![(rank..(rank + 1), status)])
+                .expect("valid single-run overlay")
         };
-        get_rank_status.reply.send(cx, rank_status.into())?;
-
+        get_rank_status.reply.send(cx, overlay)?;
         Ok(())
     }
 }

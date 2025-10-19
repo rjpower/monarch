@@ -9,18 +9,13 @@ import time
 from typing import Callable
 
 import pytest
-from monarch import Future, RemoteException
 from monarch._rust_bindings.monarch_hyperactor.proc import (  # @manual=//monarch/monarch_extension:monarch_extension
     ActorId,
 )
-from monarch._src.actor.v1 import enabled as v1_enabled
 from monarch.common import future
 from monarch.common.client import Client
-
-
-pytestmark: pytest.MarkDecorator = pytest.mark.skipif(
-    not v1_enabled, reason="no v0/v1 dependency, so only run with v1"
-)
+from monarch.common.future import Future
+from monarch.common.invocation import RemoteException
 
 
 class TestFuture:
@@ -88,7 +83,9 @@ class TestFuture:
             fs = [Future(client) for _ in range(4)]
 
             # To avoid closure binding gotcha.
-            def set_at_time(f: Future, time: int) -> tuple[int, Callable[[], None]]:
+            def set_at_time(
+                f: Future[int], time: int
+            ) -> tuple[int, Callable[[], None]]:
                 return (time, lambda: f._set_result(time))
 
             the_messages = [set_at_time(f, time) for time, f in enumerate(fs)]
