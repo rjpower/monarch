@@ -87,9 +87,14 @@ class Counter(Actor):
     async def value(self) -> int:
         return self.v
 
+
+class SyncCounter(Actor):
+    def __init__(self, c):
+        self.c = c
+
     @endpoint
     def value_sync_endpoint(self) -> int:
-        return self.v
+        return self.c.value.choose().get()
 
 
 class Indirect(Actor):
@@ -112,7 +117,8 @@ async def test_choose():
 
     assert result == result2
 
-    result3 = await v.value_sync_endpoint.choose()
+    v2 = proc.spawn("sync_counter", SyncCounter, v)
+    result3 = v2.value_sync_endpoint.choose().get()
     assert_type(result, int)
     assert result2 == result3
 
