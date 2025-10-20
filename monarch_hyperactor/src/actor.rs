@@ -20,12 +20,17 @@ use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::OncePortHandle;
+use hyperactor::ProcId;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::Undeliverable;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;
 use hyperactor::message::Unbind;
+use hyperactor::reference::WorldId;
+use hyperactor_mesh::actor_mesh::CAST_ACTOR_MESH_ID;
+use hyperactor_mesh::comm::multicast::CAST_ORIGINATING_SENDER;
 use hyperactor_mesh::comm::multicast::CastInfo;
+use hyperactor_mesh::reference::ActorMeshId;
 use monarch_types::PickledPyObject;
 use monarch_types::SerializablePyErr;
 use pyo3::IntoPyObjectExt;
@@ -493,6 +498,47 @@ impl PythonActor {
     }
 }
 
+/// An undeliverable might have its sender address set as the comm actor instead
+/// of the original sender. Update it based on the headers present in the message
+/// so it matches the sender.
+fn update_undeliverable_envelope_for_casting(
+    mut envelope: Undeliverable<MessageEnvelope>,
+) -> Undeliverable<MessageEnvelope> {
+    let old_actor = envelope.0.sender().clone();
+    // v1 casting
+    if let Some(actor_id) = envelope.0.headers().get(CAST_ORIGINATING_SENDER).cloned() {
+        tracing::debug!(
+            actor_id = %old_actor,
+            "PythonActor::handle_undeliverable_message: remapped comm-actor id to id from CAST_ORIGINATING_SENDER {}", actor_id
+        );
+        envelope.0.update_sender(actor_id);
+    // v0 casting
+    } else if let Some(actor_mesh_id) = envelope.0.headers().get(CAST_ACTOR_MESH_ID) {
+        match actor_mesh_id {
+            ActorMeshId::V0(proc_mesh_id, actor_name) => {
+                let actor_id = ActorId(
+                    ProcId::Ranked(WorldId(proc_mesh_id.0.clone()), 0),
+                    actor_name.clone(),
+                    0,
+                );
+                tracing::debug!(
+                    actor_id = %old_actor,
+                    "PythonActor::handle_undeliverable_message: remapped comm-actor id to mesh id from CAST_ACTOR_MESH_ID {}", actor_id
+                );
+                envelope.0.update_sender(actor_id);
+            }
+            ActorMeshId::V1(_) => {
+                tracing::debug!(
+                    "PythonActor::handle_undeliverable_message: headers present but V1 ActorMeshId; leaving actor_id unchanged"
+                );
+            }
+        }
+    } else {
+        // Do nothing, it wasn't from a comm actor.
+    }
+    envelope
+}
+
 #[async_trait]
 impl Actor for PythonActor {
     type Params = PickledPyObject;
@@ -537,9 +583,21 @@ impl Actor for PythonActor {
     async fn handle_undeliverable_message(
         &mut self,
         ins: &Instance<Self>,
-        envelope: Undeliverable<MessageEnvelope>,
+        mut envelope: Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
-        assert_eq!(envelope.0.sender(), ins.self_id());
+        if envelope.0.sender() != ins.self_id() {
+            // This can happen if the sender is comm. Update the envelope.
+            envelope = update_undeliverable_envelope_for_casting(envelope);
+        }
+        assert_eq!(
+            envelope.0.sender(),
+            ins.self_id(),
+            "undeliverable message was returned to the wrong actor. \
+            Return address = {}, src actor = {}, dest actor port = {}",
+            envelope.0.sender(),
+            ins.self_id(),
+            envelope.0.dest()
+        );
 
         let cx = Context::new(ins, envelope.0.headers().clone());
 
@@ -908,8 +966,15 @@ mod tests {
     use hyperactor::message::ErasedUnbound;
     use hyperactor::message::Unbound;
     use hyperactor::reference::UnboundPort;
+    use hyperactor_mesh::resource::Status;
+    use hyperactor_mesh::resource::{self};
+    use hyperactor_mesh::v1::Error as MeshError;
+    use hyperactor_mesh::v1::Name;
+    use hyperactor_mesh::v1::host_mesh::mesh_agent::ProcState;
+    use pyo3::PyTypeInfo;
 
     use super::*;
+    use crate::actor::to_py_error;
 
     #[test]
     fn test_python_message_bind_unbind() {
@@ -966,5 +1031,40 @@ mod tests {
             let unbound = Unbound::try_from_message(no_port_message.clone()).unwrap();
             assert_eq!(no_port_message, unbound.bind().unwrap());
         }
+    }
+
+    #[test]
+    fn to_py_error_preserves_proc_creation_message() {
+        // State<ProcState> w/ `state.is_none()`
+        let state: resource::State<ProcState> = resource::State {
+            name: Name::new("my_proc"),
+            status: Status::Failed("boom".into()),
+            state: None,
+        };
+
+        // A ProcCreationError
+        let err = MeshError::ProcCreationError {
+            host_rank: 0,
+            mesh_agent: hyperactor::ActorRef::attest(id!(hello[0].actor[0])),
+            state,
+        };
+
+        let rust_msg = err.to_string();
+        let pyerr = to_py_error(err);
+
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert!(pyerr.get_type(py).is(&PyValueError::type_object(py)));
+            let py_msg = pyerr.value(py).to_string();
+
+            // 1) Bridge preserves the exact message
+            assert_eq!(py_msg, rust_msg);
+            // 2) Contains the structured state and failure status
+            assert!(py_msg.contains(", state: "));
+            assert!(py_msg.contains("\"status\":{\"Failed\":\"boom\"}"));
+            // 3) Starts with the expected prefix
+            let expected_prefix = "error creating proc (host rank 0) on host mesh agent hello[0].actor[0]<hyperactor_mesh::v1::host_mesh::mesh_agent::HostMeshAgent>";
+            assert!(py_msg.starts_with(expected_prefix));
+        });
     }
 }
