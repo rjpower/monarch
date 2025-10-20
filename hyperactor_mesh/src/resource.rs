@@ -561,7 +561,6 @@ pub(crate) struct ProcSpec {
 }
 
 impl ProcSpec {
-
     pub(crate) fn new(client_config_override: Attrs) -> Self {
         Self {
             client_config_override,
