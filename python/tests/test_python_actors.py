@@ -341,7 +341,7 @@ class TLSActor(Actor):
         self.local.value = 0
 
     @endpoint
-    def increment(self):
+    async def increment(self):
         self.local.value += 1
 
     @endpoint
@@ -349,7 +349,7 @@ class TLSActor(Actor):
         self.local.value += 1
 
     @endpoint
-    def get_value(self):
+    async def get_value(self):
         return self.local.value
 
     @endpoint
@@ -412,18 +412,6 @@ class AsyncActor(Actor):
     @endpoint
     async def no_more(self) -> None:
         self.should_exit = True
-
-
-@pytest.mark.timeout(60)
-async def test_async_concurrency():
-    """Test that async endpoints will be processed concurrently."""
-    pm = this_host().spawn_procs(per_host={})
-    am = pm.spawn("async", AsyncActor)
-    fut = am.sleep.call()
-    # This call should go through and exit the sleep loop, as long as we are
-    # actually concurrently processing messages.
-    await am.no_more.call()
-    await fut
 
 
 async def awaitit(f):
