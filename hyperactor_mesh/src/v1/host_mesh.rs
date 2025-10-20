@@ -14,7 +14,7 @@ use hyperactor::config;
 use hyperactor::config::CONFIG;
 use hyperactor::config::ConfigAttr;
 use hyperactor::declare_attrs;
-use tokio::time::timeout;
+use ndslice::view::CollectMeshExt;
 
 pub mod mesh_agent;
 
@@ -46,14 +46,18 @@ use crate::resource::CreateOrUpdateClient;
 use crate::resource::GetRankStatus;
 use crate::resource::GetRankStatusClient;
 use crate::resource::GetStateClient;
+use crate::resource::ProcSpec;
 use crate::resource::RankedValues;
 use crate::resource::Status;
 use crate::v1;
 use crate::v1::Name;
 use crate::v1::ProcMesh;
 use crate::v1::ProcMeshRef;
+use crate::v1::StatusMesh;
+use crate::v1::ValueMesh;
 pub use crate::v1::host_mesh::mesh_agent::HostMeshAgent;
 use crate::v1::host_mesh::mesh_agent::HostMeshAgentProcMeshTrampoline;
+use crate::v1::host_mesh::mesh_agent::ProcState;
 use crate::v1::host_mesh::mesh_agent::ShutdownHostClient;
 use crate::v1::proc_mesh::ProcRef;
 
@@ -65,6 +69,20 @@ declare_attrs! {
         py_name: None,
     })
     pub attr PROC_SPAWN_MAX_IDLE: Duration = Duration::from_secs(30);
+
+    /// The maximum idle time between updates while stopping proc
+    /// meshes.
+    @meta(CONFIG = ConfigAttr {
+        env_name: Some("HYPERACTOR_MESH_PROC_STOP_MAX_IDLE".to_string()),
+        py_name: None,
+    })
+    pub attr PROC_STOP_MAX_IDLE: Duration = Duration::from_secs(30);
+
+    @meta(CONFIG = ConfigAttr {
+        env_name: Some("HYPERACTOR_MESH_GET_PROC_STATE_MAX_IDLE".to_string()),
+        py_name: None,
+    })
+    pub attr GET_PROC_STATE_MAX_IDLE: Duration = Duration::from_secs(60);
 }
 
 /// A reference to a single host.
@@ -461,6 +479,25 @@ impl Drop for HostMesh {
     }
 }
 
+/// Helper: legacy shim for error types that still require
+/// RankedValues<Status>. TODO(shayne-fletcher): Delete this
+/// shim once Error::ActorSpawnError carries a StatusMesh
+/// (ValueMesh<Status>) directly. At that point, use the mesh
+/// as-is and remove `mesh_to_rankedvalues_*` calls below.
+pub(crate) fn mesh_to_rankedvalues_with_default(
+    mesh: &StatusMesh,
+    default: Status,
+    len: usize,
+) -> RankedValues<Status> {
+    let mut out = RankedValues::from((0..len, default));
+    for (i, s) in mesh.values().enumerate() {
+        if !matches!(s, Status::NotExist) {
+            out.merge_from(RankedValues::from((i..i + 1, s.clone())));
+        }
+    }
+    out
+}
+
 /// A non-owning reference to a mesh of hosts.
 ///
 /// Logically, this is a data structure that contains a set of ranked
@@ -545,25 +582,6 @@ impl HostMeshRef {
         let region: Region = extent.clone().into();
         let mesh_name = Name::new(name);
 
-        // Helper: legacy shim for error types that still require
-        // RankedValues<Status>. TODO(shayne-fletcher): Delete this
-        // shim once Error::ActorSpawnError carries a StatusMesh
-        // (ValueMesh<Status>) directly. At that point, use the mesh
-        // as-is and remove `mesh_to_rankedvalues_*` calls below.
-        fn mesh_to_rankedvalues_with_default(
-            mesh: &crate::v1::StatusMesh,
-            default_fill: Status,
-            len: usize,
-        ) -> RankedValues<Status> {
-            let mut out = RankedValues::from((0..len, default_fill));
-            for (i, s) in mesh.values().enumerate() {
-                if !matches!(s, Status::NotExist) {
-                    out.merge_from(RankedValues::from((i..i + 1, s.clone())));
-                }
-            }
-            out
-        }
-
         let mut procs = Vec::new();
         let num_ranks = region.num_ranks();
         // Accumulator outputs full StatusMesh snapshots; seed with
@@ -582,13 +600,19 @@ impl HostMeshRef {
         // would allow buffering in the host-level muxer to eliminate
         // the need for this synchronization step.
         let mut proc_names = Vec::new();
+        let client_config_override = config::global::attrs();
         for (host_rank, host) in self.ranks.iter().enumerate() {
             for per_host_rank in 0..per_host.num_ranks() {
                 let create_rank = per_host.num_ranks() * host_rank + per_host_rank;
                 let proc_name = Name::new(format!("{}_{}", name, per_host_rank));
                 proc_names.push(proc_name.clone());
                 host.mesh_agent()
-                    .create_or_update(cx, proc_name.clone(), resource::Rank::new(create_rank), ())
+                    .create_or_update(
+                        cx,
+                        proc_name.clone(),
+                        resource::Rank::new(create_rank),
+                        ProcSpec::new(client_config_override.clone()),
+                    )
                     .await
                     .map_err(|e| {
                         v1::Error::HostMeshAgentConfigurationError(
@@ -637,11 +661,12 @@ impl HostMeshRef {
                     let proc_name = &proc_names[rank];
                     let host_rank = rank / per_host.num_ranks();
                     let mesh_agent = self.ranks[host_rank].mesh_agent();
-                    let state = match timeout(
-                        config::global::get(PROC_SPAWN_MAX_IDLE),
-                        mesh_agent.get_state(cx, proc_name.clone()),
-                    )
-                    .await
+                    let state = match RealClock
+                        .timeout(
+                            config::global::get(PROC_SPAWN_MAX_IDLE),
+                            mesh_agent.get_state(cx, proc_name.clone()),
+                        )
+                        .await
                     {
                         Ok(Ok(state)) => state,
                         _ => resource::State {
@@ -651,7 +676,6 @@ impl HostMeshRef {
                         },
                     };
 
-                    let proc_name = Name::new(format!("{}-{}", name, rank % per_host.num_ranks()));
                     return Err(v1::Error::ProcCreationError {
                         state,
                         host_rank,
@@ -677,6 +701,190 @@ impl HostMeshRef {
     /// The name of the referenced host mesh.
     pub fn name(&self) -> &Name {
         &self.name
+    }
+
+    pub(crate) async fn stop_proc_mesh(
+        &self,
+        cx: &impl hyperactor::context::Actor,
+        procs: impl IntoIterator<Item = ProcId>,
+        region: Region,
+    ) -> anyhow::Result<()> {
+        // Accumulator outputs full StatusMesh snapshots; seed with
+        // NotExist.
+        let (tx, rx) = cx.mailbox().open_accum_port_opts(
+            crate::v1::StatusMesh::from_single(region.clone(), Status::NotExist),
+            Some(ReducerOpts {
+                max_update_interval: Some(Duration::from_millis(50)),
+            }),
+        );
+        let mut num_ranks = 0;
+        let mut proc_names = Vec::new();
+        for proc_id in procs.into_iter() {
+            num_ranks += 1;
+            let Some((addr, proc_name)) = proc_id.as_direct() else {
+                return Err(anyhow::anyhow!(
+                    "host mesh proc {} must be direct addressed",
+                    proc_id,
+                ));
+            };
+            // The name stored in HostMeshAgent is not the same as the
+            // one stored in the ProcMesh. We instead take each proc id
+            // and map it to that particular agent.
+            let proc_name = proc_name.parse::<Name>()?;
+            proc_names.push(proc_name.clone());
+
+            // Note that we don't send 1 message per host agent, we send 1 message
+            // per proc.
+            let host = HostRef(addr.clone());
+            host.mesh_agent().send(
+                cx,
+                resource::Stop {
+                    name: proc_name,
+                    reply: tx.bind(),
+                },
+            )?;
+        }
+        tracing::info!(
+            "Sending Stop to host mesh {} for {:?} procs",
+            self.name,
+            proc_names
+        );
+
+        let start_time = RealClock.now();
+
+        match GetRankStatus::wait(
+            rx,
+            num_ranks,
+            config::global::get(PROC_STOP_MAX_IDLE),
+            region,
+        )
+        .await
+        {
+            Ok(statuses) => {
+                let failed = statuses.values().any(|s| {
+                    matches!(
+                        s,
+                        resource::Status::Failed(_) | resource::Status::Timeout(_)
+                    )
+                });
+                if failed {
+                    return Err(anyhow::anyhow!(
+                        "failed to terminate proc mesh: {:?}",
+                        statuses,
+                    ));
+                }
+            }
+            Err(complete) => {
+                // Fill remaining ranks with a timeout status via the
+                // legacy shim.
+                let legacy = mesh_to_rankedvalues_with_default(
+                    &complete,
+                    Status::Timeout(start_time.elapsed()),
+                    num_ranks,
+                );
+                return Err(anyhow::anyhow!(
+                    "failed to terminate proc mesh: {:?}",
+                    legacy
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the state of all procs with Name in this host mesh.
+    /// The procs iterator must be in rank order.
+    pub(crate) async fn proc_states(
+        &self,
+        cx: &impl context::Actor,
+        procs: impl IntoIterator<Item = ProcId>,
+        region: Region,
+    ) -> v1::Result<ValueMesh<resource::State<ProcState>>> {
+        let (tx, mut rx) = cx.mailbox().open_port();
+
+        let mut num_ranks = 0;
+        let procs: Vec<ProcId> = procs.into_iter().collect();
+        let mut proc_names = Vec::new();
+        for proc_id in procs.iter() {
+            num_ranks += 1;
+            let Some((addr, proc_name)) = proc_id.as_direct() else {
+                return Err(v1::Error::ConfigurationError(anyhow::anyhow!(
+                    "host mesh proc {} must be direct addressed",
+                    proc_id,
+                )));
+            };
+
+            // Note that we don't send 1 message per host agent, we send 1 message
+            // per proc.
+            let host = HostRef(addr.clone());
+            let proc_name = proc_name.parse::<Name>()?;
+            proc_names.push(proc_name.clone());
+            host.mesh_agent()
+                .send(
+                    cx,
+                    resource::GetState {
+                        name: proc_name,
+                        reply: tx.bind(),
+                    },
+                )
+                .map_err(|e| {
+                    v1::Error::CallError(host.mesh_agent().actor_id().clone(), e.into())
+                })?;
+        }
+
+        let mut states = Vec::with_capacity(num_ranks);
+        let timeout = config::global::get(GET_PROC_STATE_MAX_IDLE);
+        for _ in 0..num_ranks {
+            // The agent runs on the same process as the running actor, so if some
+            // fatal event caused the process to crash (e.g. OOM, signal, process exit),
+            // the agent will be unresponsive.
+            // We handle this by setting a timeout on the recv, and if we don't get a
+            // message we assume the agent is dead and return a failed state.
+            let state = RealClock.timeout(timeout, rx.recv()).await;
+            if let Ok(state) = state {
+                // Handle non-timeout receiver error.
+                let state = state?;
+                match state.state {
+                    Some(ref inner) => {
+                        states.push((inner.create_rank, state));
+                    }
+                    None => {
+                        return Err(v1::Error::NotExist(state.name));
+                    }
+                }
+            } else {
+                // Timeout error, stop reading from the receiver and send back what we have so far,
+                // padding with failed states.
+                tracing::warn!("Timeout waiting for response from host mesh agent for proc_states");
+                let all_ranks = (0..num_ranks).collect::<HashSet<_>>();
+                let completed_ranks = states.iter().map(|(rank, _)| *rank).collect::<HashSet<_>>();
+                let mut leftover_ranks = all_ranks.difference(&completed_ranks).collect::<Vec<_>>();
+                assert_eq!(leftover_ranks.len(), num_ranks - states.len());
+                while states.len() < num_ranks {
+                    let rank = *leftover_ranks
+                        .pop()
+                        .expect("leftover ranks should not be empty");
+                    states.push((
+                        // We populate with any ranks leftover at the time of the timeout.
+                        rank,
+                        resource::State {
+                            name: proc_names[rank].clone(),
+                            status: resource::Status::Timeout(timeout),
+                            state: None,
+                        },
+                    ));
+                }
+                break;
+            }
+        }
+        // Ensure that all ranks have replied. Note that if the mesh is sliced,
+        // not all create_ranks may be in the mesh.
+        // Sort by rank, so that the resulting mesh is ordered.
+        states.sort_by_key(|(rank, _)| *rank);
+        let vm = states
+            .into_iter()
+            .map(|(_, state)| state)
+            .collect_mesh::<ValueMesh<_>>(region)?;
+        Ok(vm)
     }
 }
 
@@ -773,6 +981,7 @@ mod tests {
     use std::collections::HashSet;
     use std::collections::VecDeque;
 
+    use hyperactor::attrs::Attrs;
     use hyperactor::context::Mailbox as _;
     use itertools::Itertools;
     use ndslice::ViewExt;
@@ -784,6 +993,8 @@ mod tests {
     use crate::resource::Status;
     use crate::v1::ActorMesh;
     use crate::v1::testactor;
+    use crate::v1::testactor::GetConfigAttrs;
+    use crate::v1::testactor::SetConfigAttrs;
     use crate::v1::testing;
 
     #[test]
@@ -1044,6 +1255,49 @@ mod tests {
         assert_matches!(
             &statuses.materialized_iter(2).cloned().collect::<Vec<_>>()[..],
             &[Status::Timeout(_), Status::Running]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_client_config_override() {
+        let config = hyperactor::config::global::lock();
+        let _guard1 = config.override_key(crate::bootstrap::MESH_BOOTSTRAP_ENABLE_PDEATHSIG, false);
+        let _guard2 =
+            config.override_key(config::HOST_SPAWN_READY_TIMEOUT, Duration::from_secs(120));
+        let _guard3 =
+            config.override_key(config::MESSAGE_DELIVERY_TIMEOUT, Duration::from_secs(60));
+
+        let instance = testing::instance().await;
+
+        let proc_meshes = testing::proc_meshes(instance, extent!(replicas = 2)).await;
+        let proc_mesh = proc_meshes.get(1).unwrap();
+
+        let actor_mesh: ActorMesh<testactor::TestActor> =
+            proc_mesh.spawn(instance, "test", &()).await.unwrap();
+
+        let mut attrs_override = Attrs::new();
+        attrs_override.set(config::HOST_SPAWN_READY_TIMEOUT, Duration::from_secs(180));
+        actor_mesh
+            .cast(
+                instance,
+                SetConfigAttrs(bincode::serialize(&attrs_override).unwrap()),
+            )
+            .unwrap();
+
+        let (tx, mut rx) = instance.open_port();
+        actor_mesh
+            .cast(instance, GetConfigAttrs(tx.bind()))
+            .unwrap();
+        let actual_attrs = rx.recv().await.unwrap();
+        let actual_attrs = bincode::deserialize::<Attrs>(&actual_attrs).unwrap();
+
+        assert_eq!(
+            *actual_attrs.get(config::HOST_SPAWN_READY_TIMEOUT).unwrap(),
+            Duration::from_secs(180)
+        );
+        assert_eq!(
+            *actual_attrs.get(config::MESSAGE_DELIVERY_TIMEOUT).unwrap(),
+            Duration::from_secs(60)
         );
     }
 }
