@@ -1537,7 +1537,7 @@ class SpawningActorFromEndpointActor(Actor):
         self._root = root
 
     @endpoint
-    def return_root(self):
+    async def return_root(self):
         return self._root
 
     @endpoint
