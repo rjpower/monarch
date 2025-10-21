@@ -804,7 +804,7 @@ class ErrorActorWithSupervise(ErrorActor):
         )
 
     @endpoint
-    def get_failures(self) -> list[str]:
+    async def get_failures(self) -> list[str]:
         # MeshFailure is not picklable, so we convert it to a string.
         return [str(f) for f in self.failures]
 
