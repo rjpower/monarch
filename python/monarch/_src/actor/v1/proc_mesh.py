@@ -292,7 +292,7 @@ class ProcMesh(MeshTrait):
         return self._spawn_nonblocking_on(self._proc_mesh, name, Class, *args, **kwargs)
 
     def to_table(self) -> str:
-        return self._maybe_device_mesh.to_table()
+        return self._device_mesh.to_table()
 
     def _spawn_nonblocking_on(
         self,
@@ -392,6 +392,7 @@ class ProcMesh(MeshTrait):
         instance = context().actor_instance._as_rust()
 
         async def _stop_nonblocking(instance: HyInstance) -> None:
+            await PythonTask.spawn_blocking(lambda: self._logging_manager.flush())
             await (await self._proc_mesh).stop_nonblocking(instance)
             self._stopped = True
 
