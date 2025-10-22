@@ -818,6 +818,16 @@ class ErrorActorWithSupervise(ErrorActor):
         )
 
     @endpoint
+    async def subworker_broadcast_fail(self) -> None:
+        self.mesh.check.broadcast()
+        # When not awaiting the result of an endpoint which experiences a
+        # failure, it should still propagate back to __supervise__.
+        self.mesh.fail_with_supervision_error.broadcast()
+        # Give time for the failure to occur before returning, so get_failures
+        # will have a non-empty result.
+        await asyncio.sleep(10)
+
+    @endpoint
     async def get_failures(self) -> list[str]:
         # MeshFailure is not picklable, so we convert it to a string.
         return [str(f) for f in self.failures]
