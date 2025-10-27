@@ -813,7 +813,7 @@ impl Handler<PythonMessage> for PythonActor {
         tokio::spawn(
             handle_async_endpoint_panic(
                 self.panic_sender.clone(),
-                PythonTask::new(future),
+                PythonTask::new(future)?,
                 receiver,
             )
             .instrument(
