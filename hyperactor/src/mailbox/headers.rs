@@ -39,6 +39,7 @@ pub fn set_send_timestamp(headers: &mut Attrs) {
 
 /// Set the send timestamp for latency tracking if timestamp not already set.
 pub fn set_rust_message_type<M>(headers: &mut Attrs) {
+    eprintln!("rust message type: {}", type_name::<M>());
     headers.set(RUST_MESSAGE_TYPE, type_name::<M>().to_string());
 }
 
