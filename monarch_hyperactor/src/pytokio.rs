@@ -384,7 +384,9 @@ impl PyPythonTask {
     fn spawn_blocking(f: PyObject) -> PyResult<PyShared> {
         let (tx, rx) = watch::channel(None);
         let traceback = current_traceback()?;
-        let traceback1 = traceback.clone();
+        let traceback1 = traceback
+            .as_ref()
+            .map_or_else(|| None, |t| Python::with_gil(|py| Some(t.clone_ref(py))));
         let handle = get_tokio_runtime().spawn_blocking(move || {
             let result = Python::with_gil(|py| f.call0(py));
             send_result(tx, result, traceback1);
