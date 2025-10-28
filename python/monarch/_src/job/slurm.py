@@ -13,6 +13,8 @@ import subprocess
 import sys
 from typing import Any, cast, Dict, FrozenSet, List, Optional, Sequence
 
+import clusterscope
+
 from monarch._rust_bindings.monarch_hyperactor.channel import ChannelTransport
 from monarch._rust_bindings.monarch_hyperactor.config import configure
 
@@ -133,6 +135,20 @@ class SlurmJob(JobTrait):
 
         if self._partition:
             sbatch_directives.append(f"#SBATCH --partition={self._partition}")
+
+        # add proportional cpu and memory args when not taking the full node
+        if not self._exclusive and self._partition and self._gpus_per_node:
+            gpus_per_task = self._gpus_per_node // self._ntasks_per_node
+            assert self._partition, "Partition must be set to get cpu and memory args"
+            slurm_args = clusterscope.job_gen_task_slurm(
+                partition=self._partition,
+                gpus_per_task=gpus_per_task,
+                tasks_per_node=self._ntasks_per_node,
+            )
+            sbatch_directives.append(
+                f"#SBATCH --cpus-per-task={slurm_args['cpus_per_task']}"
+            )
+            sbatch_directives.append(f"#SBATCH --mem={slurm_args['memory']}")
 
         # Add any additional slurm args as directives
         for arg in self._slurm_args:
