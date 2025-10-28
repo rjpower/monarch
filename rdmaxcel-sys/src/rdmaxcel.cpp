@@ -15,8 +15,11 @@
 #include <set>
 #include <unordered_map>
 
-// TODO: explicitly obtain from ibverbs config, for now assume 32
-const int SGE_MAX = 32;
+// MR size must be a multiple of 2MB
+const size_t MR_ALIGNMENT = 2ULL * 1024 * 1024;
+
+// Maximum size for a single MR: 4GB max,  need to be one page under.
+const size_t MAX_MR_SIZE = 4ULL * 1024 * 1024 * 1024 - MR_ALIGNMENT;
 
 // Structure to hold segment information
 struct SegmentInfo {
@@ -190,17 +193,14 @@ int bind_mrs(
 
   qpx->wr_flags = IBV_SEND_INLINE | IBV_SEND_SIGNALED;
   ibv_wr_start(qpx);
-  struct mlx5dv_mkey_conf_attr mkey_cattr = {};
-  mlx5dv_wr_mkey_configure(mqpx, seg.mkey, 2, &mkey_cattr);
-  mlx5dv_wr_set_mkey_access_flags(mqpx, access_flags);
-  mlx5dv_wr_set_mkey_layout_list(mqpx, mrs_cnt, sgl.data());
+  mlx5dv_wr_mr_list(mqpx, seg.mkey, access_flags, mrs_cnt, sgl.data());
   int ret = ibv_wr_complete(qpx);
 
   if (ret != 0) {
     return RDMAXCEL_WR_COMPLETE_FAILED;
   }
 
-  struct ibv_wc wc {};
+  struct ibv_wc wc{};
   while (ibv_poll_cq(qp->send_cq, 1, &wc) == 0) {
     // Continue polling until completion arrives
   }
@@ -266,6 +266,12 @@ int register_segments(struct ibv_pd* pd, struct ibv_qp* qp) {
   scan_existing_segments();
   std::lock_guard<std::mutex> lock(segmentsMutex);
 
+  struct ibv_device_attr dev_attr;
+  if (ibv_query_device(pd->context, &dev_attr)) {
+    return RDMAXCEL_QUERY_DEVICE_FAILED;
+  }
+  uint32_t max_sge = dev_attr.max_sge;
+
   int access_flags =
       IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ;
 
@@ -276,44 +282,55 @@ int register_segments(struct ibv_pd* pd, struct ibv_qp* qp) {
     if (seg.mr_size != seg.phys_size) {
       auto mr_start = seg.phys_address + seg.mr_size;
       auto mr_end = seg.phys_address + seg.phys_size;
-      auto mr_size = mr_end - mr_start;
+      auto remaining_size = mr_end - mr_start;
 
-      // TODO: resolve 4GiB limit
-      if (seg.phys_size > (1ULL << 32)) {
-        return RDMAXCEL_MKEY_REG_LIMIT;
+      // Register in chunks of MAX_MR_SIZE
+      size_t current_offset = 0;
+      while (current_offset < remaining_size) {
+        size_t chunk_size =
+            std::min(remaining_size - current_offset, MAX_MR_SIZE);
+        auto chunk_start = mr_start + current_offset;
+
+        // Validate that chunk_size is a multiple of 2MB
+        if (chunk_size % MR_ALIGNMENT != 0) {
+          return RDMAXCEL_MR_REGISTRATION_FAILED;
+        }
+
+        int fd = -1;
+        CUresult cu_result = cuMemGetHandleForAddressRange(
+            &fd,
+            static_cast<CUdeviceptr>(chunk_start),
+            chunk_size,
+            CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD,
+            0);
+
+        if (cu_result != CUDA_SUCCESS || fd < 0) {
+          return RDMAXCEL_DMABUF_HANDLE_FAILED; // Failed to get dmabuf handle
+        }
+
+        // Register the dmabuf with fd, address is always 0.
+        auto mr = ibv_reg_dmabuf_mr(pd, 0, chunk_size, 0, fd, access_flags);
+        close(fd);
+
+        if (!mr) {
+          return RDMAXCEL_MR_REG_FAILED; // MR registration failed
+        }
+
+        seg.mrs.push_back(mr);
+        current_offset += chunk_size;
+
+        // If we have too many MRs, compact them into a single MR
+        if (seg.mrs.size() > max_sge) {
+          // TODO: find a safe way to compact with low performance cost.
+          // return MAX_SGE error auto err = compact_mrs(pd, seg, access_flags);
+          // if (err != 0) {
+          //   return err;
+          // }
+          return RDMAXCEL_MKEY_REG_LIMIT;
+        }
       }
-      int fd = -1;
-      CUresult cu_result = cuMemGetHandleForAddressRange(
-          &fd,
-          static_cast<CUdeviceptr>(mr_start),
-          mr_size,
-          CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD,
-          0);
 
-      if (cu_result != CUDA_SUCCESS || fd < 0) {
-        return RDMAXCEL_DMABUF_HANDLE_FAILED; // Failed to get dmabuf handle
-      }
-
-      // Register the dmabuf with fd, address is always 0.
-      auto mr = ibv_reg_dmabuf_mr(pd, 0, mr_size, 0, fd, access_flags);
-      close(fd);
-
-      if (!mr) {
-        return RDMAXCEL_MR_REG_FAILED; // MR registration failed
-      }
-
-      seg.mrs.push_back(mr);
       seg.mr_size = seg.phys_size;
-
-      // If we have too many MRs, compact them into a single MR
-      if (seg.mrs.size() > SGE_MAX) {
-        // TODO: find a safe way to compact with low performance cost.
-        // return MAX_SGE error auto err = compact_mrs(pd, seg, access_flags);
-        // if (err != 0) {
-        //   return err;
-        // }
-        return RDMAXCEL_MKEY_REG_LIMIT;
-      }
 
       // Create vector of GPU addresses for bind_mrs
       auto err = bind_mrs(pd, qp, access_flags, seg);
@@ -325,34 +342,200 @@ int register_segments(struct ibv_pd* pd, struct ibv_qp* qp) {
   return 0; // Success
 }
 
+// Get PCI address from CUDA pointer
+int get_cuda_pci_address_from_ptr(
+    CUdeviceptr cuda_ptr,
+    char* pci_addr_out,
+    size_t pci_addr_size) {
+  if (!pci_addr_out || pci_addr_size < 16) {
+    return RDMAXCEL_INVALID_PARAMS;
+  }
+
+  int device_ordinal = -1;
+  CUresult err = cuPointerGetAttribute(
+      &device_ordinal, CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL, cuda_ptr);
+
+  if (err != CUDA_SUCCESS) {
+    return RDMAXCEL_CUDA_GET_ATTRIBUTE_FAILED;
+  }
+
+  CUdevice device;
+  err = cuDeviceGet(&device, device_ordinal);
+  if (err != CUDA_SUCCESS) {
+    return RDMAXCEL_CUDA_GET_DEVICE_FAILED;
+  }
+
+  int pci_bus_id = -1;
+  int pci_device_id = -1;
+  int pci_domain_id = -1;
+
+  // Get PCI bus ID
+  err =
+      cuDeviceGetAttribute(&pci_bus_id, CU_DEVICE_ATTRIBUTE_PCI_BUS_ID, device);
+  if (err != CUDA_SUCCESS) {
+    return RDMAXCEL_CUDA_GET_ATTRIBUTE_FAILED;
+  }
+
+  // Get PCI device ID
+  err = cuDeviceGetAttribute(
+      &pci_device_id, CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID, device);
+  if (err != CUDA_SUCCESS) {
+    return RDMAXCEL_CUDA_GET_ATTRIBUTE_FAILED;
+  }
+
+  // Get PCI domain ID
+  err = cuDeviceGetAttribute(
+      &pci_domain_id, CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID, device);
+  if (err != CUDA_SUCCESS) {
+    return RDMAXCEL_CUDA_GET_ATTRIBUTE_FAILED;
+  }
+
+  // Format PCI address as "domain:bus:device.0"
+  int written = snprintf(
+      pci_addr_out,
+      pci_addr_size,
+      "%04x:%02x:%02x.0",
+      pci_domain_id,
+      pci_bus_id,
+      pci_device_id);
+
+  if (written < 0 || written >= (int)pci_addr_size) {
+    return RDMAXCEL_BUFFER_TOO_SMALL;
+  }
+
+  return 0; // Success
+}
+
+// Deregister all segments and clean up
+int deregister_segments() {
+  std::lock_guard<std::mutex> lock(segmentsMutex);
+
+  for (auto& pair : activeSegments) {
+    SegmentInfo& seg = pair.second;
+
+    // Deregister all MRs for this segment
+    for (auto* mr : seg.mrs) {
+      if (mr) {
+        ibv_dereg_mr(mr);
+      }
+    }
+    seg.mrs.clear();
+
+    // Destroy mkey if it exists
+    if (seg.mkey) {
+      mlx5dv_destroy_mkey(seg.mkey);
+      seg.mkey = nullptr;
+    }
+
+    seg.mr_size = 0;
+  }
+
+  // Clear all segments
+  activeSegments.clear();
+
+  return 0; // Success
+}
+
+// Debug: Print comprehensive device attributes
+void rdmaxcel_print_device_info(struct ibv_context* context) {
+  if (!context) {
+    fprintf(stderr, "[RdmaXcel] Error: NULL context provided\n");
+    return;
+  }
+
+  struct ibv_device_attr dev_attr;
+  if (ibv_query_device(context, &dev_attr) != 0) {
+    fprintf(stderr, "[RdmaXcel] Error: Failed to query device attributes\n");
+    return;
+  }
+
+  fprintf(
+      stderr,
+      "\n[RdmaXcel] ==================== Device Attributes ====================\n");
+  fprintf(
+      stderr,
+      "[RdmaXcel] Firmware: %s, Vendor: 0x%x (Part ID: %u)\n",
+      dev_attr.fw_ver,
+      dev_attr.vendor_id,
+      dev_attr.vendor_part_id);
+  fprintf(
+      stderr,
+      "[RdmaXcel] Max MR size: %.2f GB, Page size cap: 0x%llx\n",
+      (double)dev_attr.max_mr_size / (1024.0 * 1024.0 * 1024.0),
+      (unsigned long long)dev_attr.page_size_cap);
+  fprintf(
+      stderr,
+      "[RdmaXcel] Queue Pairs: Max QP=%d, Max QP WR=%d, Max SGE=%d\n",
+      dev_attr.max_qp,
+      dev_attr.max_qp_wr,
+      dev_attr.max_sge);
+  fprintf(
+      stderr,
+      "[RdmaXcel] Completion Queues: Max CQ=%d, Max CQE=%d\n",
+      dev_attr.max_cq,
+      dev_attr.max_cqe);
+  fprintf(
+      stderr,
+      "[RdmaXcel] Memory: Max MR=%d, Max PD=%d\n",
+      dev_attr.max_mr,
+      dev_attr.max_pd);
+  fprintf(
+      stderr,
+      "[RdmaXcel] RDMA Ops: Max QP RD atom=%d, Max QP init RD atom=%d\n",
+      dev_attr.max_qp_rd_atom,
+      dev_attr.max_qp_init_rd_atom);
+  fprintf(
+      stderr,
+      "[RdmaXcel] Shared Receive: Max SRQ=%d, Max SRQ WR=%d, Max SRQ SGE=%d\n",
+      dev_attr.max_srq,
+      dev_attr.max_srq_wr,
+      dev_attr.max_srq_sge);
+  fprintf(
+      stderr,
+      "[RdmaXcel] Physical ports: %u, Max pkeys: %u\n",
+      dev_attr.phys_port_cnt,
+      dev_attr.max_pkeys);
+  fprintf(
+      stderr,
+      "[RdmaXcel] ==================================================================\n\n");
+}
+
 const char* rdmaxcel_error_string(int error_code) {
   switch (error_code) {
     case RDMAXCEL_SUCCESS:
-      return "Success";
+      return "[RdmaXcel] Success";
     case RDMAXCEL_INVALID_PARAMS:
-      return "Invalid parameters provided";
+      return "[RdmaXcel] Invalid parameters provided";
     case RDMAXCEL_MR_REGISTRATION_FAILED:
-      return "Memory region registration failed during compaction";
+      return "[RdmaXcel] Memory region registration failed during compaction";
     case RDMAXCEL_DMABUF_HANDLE_FAILED:
-      return "Failed to get dmabuf handle for CUDA memory region";
+      return "[RdmaXcel] Failed to get dmabuf handle for CUDA memory region";
     case RDMAXCEL_MR_REG_FAILED:
-      return "Memory region registration failed in register_segments";
+      return "[RdmaXcel] Memory region registration failed in register_segments";
     case RDMAXCEL_MEMORY_BINDING_FAILED:
-      return "Memory binding failed - hardware limit exceeded or MLX5 constraint";
+      return "[RdmaXcel] Memory binding failed - hardware limit exceeded or MLX5 constraint";
     case RDMAXCEL_QP_EX_FAILED:
-      return "Failed to get extended queue pair (ibv_qp_to_qp_ex)";
+      return "[RdmaXcel] Failed to get extended queue pair (ibv_qp_to_qp_ex)";
     case RDMAXCEL_MLX5DV_QP_EX_FAILED:
-      return "Failed to get MLX5DV extended queue pair (mlx5dv_qp_ex_from_ibv_qp_ex)";
+      return "[RdmaXcel] Failed to get MLX5DV extended queue pair (mlx5dv_qp_ex_from_ibv_qp_ex)";
     case RDMAXCEL_MKEY_CREATE_FAILED:
-      return "Failed to create MLX5 memory key (mlx5dv_create_mkey)";
+      return "[RdmaXcel] Failed to create MLX5 memory key (mlx5dv_create_mkey)";
     case RDMAXCEL_WR_COMPLETE_FAILED:
-      return "Work request completion failed (ibv_wr_complete)";
+      return "[RdmaXcel] Work request completion failed (ibv_wr_complete)";
     case RDMAXCEL_WC_STATUS_FAILED:
-      return "Work completion status failed - memory registration unsuccessful";
+      return "[RdmaXcel] Work completion status failed - memory registration unsuccessful";
     case RDMAXCEL_MKEY_REG_LIMIT:
-      return "mkey registration failed - segment size > 4 GiB or SGL max exceeded";
+      return "[RdmaXcel] mkey registration failed - segment size > 4 GiB or SGL max exceeded";
+    case RDMAXCEL_CUDA_GET_ATTRIBUTE_FAILED:
+      return "[RdmaXcel] Failed to get CUDA device attribute";
+    case RDMAXCEL_CUDA_GET_DEVICE_FAILED:
+      return "[RdmaXcel] Failed to get CUDA device handle";
+    case RDMAXCEL_BUFFER_TOO_SMALL:
+      return "[RdmaXcel] Output buffer too small";
+    case RDMAXCEL_QUERY_DEVICE_FAILED:
+      return "[RdmaXcel] Failed to query device attributes";
     default:
-      return "Unknown RDMAXCEL error code";
+      return "[RdmaXcel] Unknown error code";
   }
 }
 

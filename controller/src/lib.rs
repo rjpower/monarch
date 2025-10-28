@@ -634,7 +634,6 @@ mod tests {
     use hyperactor::clock::Clock;
     use hyperactor::clock::RealClock;
     use hyperactor::context::Mailbox as _;
-    use hyperactor::data::Named;
     use hyperactor::id;
     use hyperactor::mailbox::BoxedMailboxSender;
     use hyperactor::mailbox::DialMailboxRouter;
@@ -694,7 +693,7 @@ mod tests {
                 ControllerParams {
                     world_size: 1,
                     comm_actor_ref: comm_handle.bind(),
-                    worker_gang_ref: GangId(
+                    worker_gang_ref: GangRef::attest(GangId(
                         WorldId(
                             proc.proc_id()
                                 .world_name()
@@ -702,8 +701,7 @@ mod tests {
                                 .to_string(),
                         ),
                         "worker".to_string(),
-                    )
-                    .into(),
+                    )),
                     supervision_query_interval: Duration::from_secs(1),
                     worker_progress_check_interval: Duration::from_secs(3),
                     operation_timeout: Duration::from_secs(30),
@@ -887,7 +885,7 @@ mod tests {
                 ControllerParams {
                     world_size: 1,
                     comm_actor_ref: comm_handle.bind(),
-                    worker_gang_ref: GangId(
+                    worker_gang_ref: GangRef::attest(GangId(
                         WorldId(
                             proc.proc_id()
                                 .world_name()
@@ -895,8 +893,7 @@ mod tests {
                                 .to_string(),
                         ),
                         "worker".to_string(),
-                    )
-                    .into(),
+                    )),
                     supervision_query_interval: Duration::from_secs(100000),
                     worker_progress_check_interval: Duration::from_secs(1),
                     operation_timeout: Duration::from_secs(timeout_secs),
@@ -1015,7 +1012,7 @@ mod tests {
                 ControllerParams {
                     world_size: 1,
                     comm_actor_ref: comm_handle.bind(),
-                    worker_gang_ref: GangId(world_id, "worker".to_string()).into(),
+                    worker_gang_ref: GangRef::attest(GangId(world_id, "worker".to_string())),
                     supervision_query_interval: Duration::from_secs(100000),
                     worker_progress_check_interval: Duration::from_secs(1),
                     operation_timeout: Duration::from_secs(timeout_secs),
@@ -1129,8 +1126,7 @@ mod tests {
 
         // Build a supervisor.
         let sup_mail = system.attach().await.unwrap();
-        let (sup_tx, _sup_rx) = sup_mail.open_port::<ProcSupervisionMessage>();
-        sup_tx.bind_to(ProcSupervisionMessage::port());
+        let (_sup_tx, _sup_rx) = sup_mail.bind_actor_port::<ProcSupervisionMessage>();
         let sup_ref = ActorRef::<ProcSupervisor>::attest(sup_mail.self_id().clone());
 
         // Construct a system sender.
@@ -1203,11 +1199,10 @@ mod tests {
                 ControllerParams {
                     world_size: 2,
                     comm_actor_ref: proc_actor_0.comm_actor.bind(),
-                    worker_gang_ref: GangId(
+                    worker_gang_ref: GangRef::attest(GangId(
                         WorldId(world_id.name().to_string()),
                         "worker".to_string(),
-                    )
-                    .into(),
+                    )),
                     supervision_query_interval: Duration::from_secs(1),
                     worker_progress_check_interval: Duration::from_secs(3),
                     operation_timeout: Duration::from_secs(30),
@@ -1360,8 +1355,7 @@ mod tests {
 
         // Build a supervisor.
         let sup_mail = system.attach().await.unwrap();
-        let (sup_tx, _sup_rx) = sup_mail.open_port::<ProcSupervisionMessage>();
-        sup_tx.bind_to(ProcSupervisionMessage::port());
+        let (_sup_tx, _sup_rx) = sup_mail.bind_actor_port::<ProcSupervisionMessage>();
         let sup_ref = ActorRef::<ProcSupervisor>::attest(sup_mail.self_id().clone());
 
         // Construct a system sender.
@@ -1419,11 +1413,10 @@ mod tests {
                 ControllerParams {
                     world_size: 1,
                     comm_actor_ref: proc_actor_0.comm_actor.bind(),
-                    worker_gang_ref: GangId(
+                    worker_gang_ref: GangRef::attest(GangId(
                         WorldId(world_id.name().to_string()),
                         "worker".to_string(),
-                    )
-                    .into(),
+                    )),
                     supervision_query_interval: Duration::from_secs(1),
                     worker_progress_check_interval: Duration::from_secs(3),
                     operation_timeout: Duration::from_secs(30),
@@ -1540,7 +1533,7 @@ mod tests {
             ControllerParams {
                 world_size: 1,
                 comm_actor_ref: ActorRef::attest(controller_id.proc_id().actor_id("comm", 0)),
-                worker_gang_ref: GangId(
+                worker_gang_ref: GangRef::attest(GangId(
                     WorldId(
                         proc_id
                             .world_name()
@@ -1548,8 +1541,7 @@ mod tests {
                             .to_string(),
                     ),
                     "worker".to_string(),
-                )
-                .into(),
+                )),
                 supervision_query_interval: Duration::from_secs(1),
                 worker_progress_check_interval: Duration::from_secs(3),
                 operation_timeout: Duration::from_secs(30),
@@ -1581,7 +1573,7 @@ mod tests {
         // Set up a local actor.
         let local_proc_id = world_id.proc_id(rank);
         let (local_proc_addr, local_proc_rx) =
-            channel::serve(ChannelAddr::any(ChannelTransport::Local)).unwrap();
+            channel::serve(ChannelAddr::any(ChannelTransport::Local), "mock_proc_actor").unwrap();
         let local_proc_mbox = Mailbox::new_detached(
             local_proc_id.actor_id(format!("test_dummy_proc{}", idx).to_string(), 0),
         );
@@ -1634,7 +1626,7 @@ mod tests {
             ControllerParams {
                 world_size: 1,
                 comm_actor_ref: ActorRef::attest(controller_id.proc_id().actor_id("comm", 0)),
-                worker_gang_ref: GangId(
+                worker_gang_ref: GangRef::attest(GangId(
                     WorldId(
                         proc_id
                             .world_name()
@@ -1642,8 +1634,7 @@ mod tests {
                             .to_string(),
                     ),
                     "worker".to_string(),
-                )
-                .into(),
+                )),
                 supervision_query_interval: Duration::from_secs(100),
                 worker_progress_check_interval: Duration::from_secs(100),
                 operation_timeout: Duration::from_secs(1000),
@@ -1665,9 +1656,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (client_supervision_tx, mut client_supervision_rx) =
-            client_mailbox.open_port::<ClientMessage>();
-        client_supervision_tx.bind_to(ClientMessage::port());
+        let (_client_supervision_tx, mut client_supervision_rx) =
+            client_mailbox.bind_actor_port::<ClientMessage>();
 
         // mock a proc actor that doesn't update supervision state
         let (
@@ -1726,9 +1716,8 @@ mod tests {
         // Client actor.
         let mut system = System::new(server_handle.local_addr().clone());
         let client_mailbox = system.attach().await.unwrap();
-        let (client_supervision_tx, mut client_supervision_rx) =
-            client_mailbox.open_port::<ClientMessage>();
-        client_supervision_tx.bind_to(ClientMessage::port());
+        let (_client_supervision_tx, mut client_supervision_rx) =
+            client_mailbox.bind_actor_port::<ClientMessage>();
 
         // Bootstrap the controller
         let controller_id = id!(controller[0].root);
@@ -1740,7 +1729,7 @@ mod tests {
             ControllerParams {
                 world_size: 1,
                 comm_actor_ref: ActorRef::attest(controller_id.proc_id().actor_id("comm", 0)),
-                worker_gang_ref: GangId(
+                worker_gang_ref: GangRef::attest(GangId(
                     WorldId(
                         proc_id
                             .world_name()
@@ -1748,8 +1737,7 @@ mod tests {
                             .to_string(),
                     ),
                     "worker".to_string(),
-                )
-                .into(),
+                )),
                 supervision_query_interval: Duration::from_secs(1),
                 worker_progress_check_interval: Duration::from_secs(3),
                 operation_timeout: Duration::from_secs(30),
@@ -1865,9 +1853,8 @@ mod tests {
         // Client actor.
         let mut system = System::new(server_handle.local_addr().clone());
         let client_mailbox = system.attach().await.unwrap();
-        let (client_supervision_tx, mut client_supervision_rx) =
+        let (_client_supervision_tx, mut client_supervision_rx) =
             client_mailbox.open_port::<ClientMessage>();
-        client_supervision_tx.bind_to(ClientMessage::port());
 
         // Bootstrap the controller
         let controller_id = id!(controller[0].root);
@@ -1879,7 +1866,7 @@ mod tests {
             ControllerParams {
                 world_size: 1,
                 comm_actor_ref: ActorRef::attest(controller_id.proc_id().actor_id("comm", 0)),
-                worker_gang_ref: GangId(
+                worker_gang_ref: GangRef::attest(GangId(
                     WorldId(
                         proc_id
                             .world_name()
@@ -1887,8 +1874,7 @@ mod tests {
                             .to_string(),
                     ),
                     "worker".to_string(),
-                )
-                .into(),
+                )),
                 supervision_query_interval: Duration::from_secs(1),
                 worker_progress_check_interval: Duration::from_secs(3),
                 operation_timeout: Duration::from_secs(30),

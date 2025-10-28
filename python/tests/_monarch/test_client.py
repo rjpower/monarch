@@ -8,6 +8,8 @@
 
 from unittest import TestCase
 
+import pytest
+
 import torch
 from monarch._rust_bindings.monarch_extension import client
 

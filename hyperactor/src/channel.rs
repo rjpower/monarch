@@ -14,6 +14,7 @@
 use core::net::SocketAddr;
 use std::fmt;
 use std::net::IpAddr;
+use std::net::Ipv6Addr;
 #[cfg(target_os = "linux")]
 use std::os::linux::net::SocketAddrExt;
 use std::str::FromStr;
@@ -249,6 +250,26 @@ impl<M: RemoteMessage> Rx<M> for MpscRx<M> {
     strum::Display,
     strum::EnumString
 )]
+pub enum TcpMode {
+    /// Use localhost/loopback for the connection.
+    Localhost,
+    /// Use host domain name for the connection.
+    Hostname,
+}
+
+/// The hostname to use for TLS connections.
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::EnumIter,
+    strum::Display,
+    strum::EnumString
+)]
 pub enum TlsMode {
     /// Use IpV6 address for TLS connections.
     IpV6,
@@ -315,7 +336,7 @@ impl fmt::Display for MetaTlsAddr {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Named)]
 pub enum ChannelTransport {
     /// Transport over a TCP connection.
-    Tcp,
+    Tcp(TcpMode),
 
     /// Transport over a TCP connection with TLS support within Meta
     MetaTls(TlsMode),
@@ -333,7 +354,7 @@ pub enum ChannelTransport {
 impl fmt::Display for ChannelTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Tcp => write!(f, "tcp"),
+            Self::Tcp(mode) => write!(f, "tcp({:?})", mode),
             Self::MetaTls(mode) => write!(f, "metatls({:?})", mode),
             Self::Local => write!(f, "local"),
             Self::Sim(transport) => write!(f, "sim({})", transport),
@@ -358,7 +379,13 @@ impl FromStr for ChannelTransport {
         }
 
         match s {
-            "tcp" => Ok(ChannelTransport::Tcp),
+            // Default to TcpMode::Hostname, if the mode isn't set
+            "tcp" => Ok(ChannelTransport::Tcp(TcpMode::Hostname)),
+            s if s.starts_with("tcp(") => {
+                let inner = &s["tcp(".len()..s.len() - 1];
+                let mode = inner.parse()?;
+                Ok(ChannelTransport::Tcp(mode))
+            }
             "local" => Ok(ChannelTransport::Local),
             "unix" => Ok(ChannelTransport::Unix),
             s if s.starts_with("metatls(") && s.ends_with(")") => {
@@ -375,7 +402,9 @@ impl ChannelTransport {
     /// All known channel transports.
     pub fn all() -> [ChannelTransport; 3] {
         [
-            ChannelTransport::Tcp,
+            // TODO: @rusch add back once figuring out unspecified override for OSS CI
+            // ChannelTransport::Tcp(TcpMode::Localhost),
+            ChannelTransport::Tcp(TcpMode::Hostname),
             ChannelTransport::Local,
             ChannelTransport::Unix,
             // TODO add MetaTls (T208303369)
@@ -392,7 +421,7 @@ impl ChannelTransport {
     /// Returns true if this transport type represents a remote channel.
     pub fn is_remote(&self) -> bool {
         match self {
-            ChannelTransport::Tcp => true,
+            ChannelTransport::Tcp(_) => true,
             ChannelTransport::MetaTls(_) => true,
             ChannelTransport::Local => false,
             ChannelTransport::Sim(_) => false,
@@ -502,18 +531,23 @@ impl ChannelAddr {
     /// servers to "any" address.
     pub fn any(transport: ChannelTransport) -> Self {
         match transport {
-            ChannelTransport::Tcp => {
-                let ip = hostname::get()
-                    .ok()
-                    .and_then(|hostname| {
-                        // TODO: Avoid using DNS directly once we figure out a good extensibility story here
-                        hostname.to_str().and_then(|hostname_str| {
-                            dns_lookup::lookup_host(hostname_str)
-                                .ok()
-                                .and_then(|addresses| addresses.first().cloned())
-                        })
-                    })
-                    .unwrap_or_else(|| IpAddr::from_str("::1").unwrap());
+            ChannelTransport::Tcp(mode) => {
+                let ip = match mode {
+                    TcpMode::Localhost => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                    TcpMode::Hostname => {
+                        hostname::get()
+                            .ok()
+                            .and_then(|hostname| {
+                                // TODO: Avoid using DNS directly once we figure out a good extensibility story here
+                                hostname.to_str().and_then(|hostname_str| {
+                                    dns_lookup::lookup_host(hostname_str)
+                                        .ok()
+                                        .and_then(|addresses| addresses.first().cloned())
+                                })
+                            })
+                            .expect("failed to resolve hostname to ip address")
+                    }
+                };
                 Self::Tcp(SocketAddr::new(ip, 0))
             }
             ChannelTransport::MetaTls(mode) => {
@@ -542,7 +576,13 @@ impl ChannelAddr {
     /// The transport used by this address.
     pub fn transport(&self) -> ChannelTransport {
         match self {
-            Self::Tcp(_) => ChannelTransport::Tcp,
+            Self::Tcp(addr) => {
+                if addr.ip().is_loopback() {
+                    ChannelTransport::Tcp(TcpMode::Localhost)
+                } else {
+                    ChannelTransport::Tcp(TcpMode::Hostname)
+                }
+            }
             Self::MetaTls(addr) => match addr {
                 MetaTlsAddr::Host { hostname, .. } => match hostname.parse::<IpAddr>() {
                     Ok(IpAddr::V6(_)) => ChannelTransport::MetaTls(TlsMode::IpV6),
@@ -800,8 +840,8 @@ pub fn dial<M: RemoteMessage>(addr: ChannelAddr) -> Result<ChannelTx<M>, Channel
 #[crate::instrument]
 pub fn serve<M: RemoteMessage>(
     addr: ChannelAddr,
+    reason: &str,
 ) -> Result<(ChannelAddr, ChannelRx<M>), ChannelError> {
-    tracing::debug!(name = "serve", "serving channel address {}", addr);
     match addr {
         ChannelAddr::Tcp(addr) => {
             let (addr, rx) = net::tcp::serve::<M>(addr)?;
@@ -828,7 +868,15 @@ pub fn serve<M: RemoteMessage>(
             a
         ))),
     }
-    .map(|(addr, inner)| (addr, ChannelRx { inner }))
+    .map(|(addr, inner)| {
+        tracing::debug!(
+            name = "serve",
+            "serving channel address {} for {}",
+            addr,
+            reason
+        );
+        (addr, ChannelRx { inner })
+    })
 }
 
 /// Serve on the local address. The server is turned down
@@ -858,6 +906,7 @@ mod tests {
     use super::*;
     use crate::clock::Clock;
     use crate::clock::RealClock;
+    use crate::config;
 
     #[test]
     fn test_channel_addr() {
@@ -1002,7 +1051,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_connections() {
         for addr in ChannelTransport::all().map(ChannelAddr::any) {
-            let (listen_addr, mut rx) = crate::channel::serve::<u64>(addr).unwrap();
+            let (listen_addr, mut rx) = crate::channel::serve::<u64>(addr, "test").unwrap();
 
             let mut sends: JoinSet<()> = JoinSet::new();
             for message in 0u64..100u64 {
@@ -1041,7 +1090,7 @@ mod tests {
                 continue;
             }
 
-            let (listen_addr, rx) = crate::channel::serve::<u64>(addr).unwrap();
+            let (listen_addr, rx) = crate::channel::serve::<u64>(addr, "test").unwrap();
 
             let tx = dial::<u64>(listen_addr).unwrap();
             tx.try_post(123, oneshot::channel().0).unwrap();
@@ -1090,7 +1139,7 @@ mod tests {
     #[cfg_attr(not(feature = "fb"), ignore)]
     async fn test_dial_serve() {
         for addr in addrs() {
-            let (listen_addr, mut rx) = crate::channel::serve::<i32>(addr).unwrap();
+            let (listen_addr, mut rx) = crate::channel::serve::<i32>(addr, "test").unwrap();
             let tx = crate::channel::dial(listen_addr).unwrap();
             tx.try_post(123, oneshot::channel().0).unwrap();
             assert_eq!(rx.recv().await.unwrap(), 123);
@@ -1110,7 +1159,7 @@ mod tests {
         );
         let _guard2 = config.override_key(crate::config::MESSAGE_ACK_EVERY_N_MESSAGES, 1);
         for addr in addrs() {
-            let (listen_addr, mut rx) = crate::channel::serve::<i32>(addr).unwrap();
+            let (listen_addr, mut rx) = crate::channel::serve::<i32>(addr, "test").unwrap();
             let tx = crate::channel::dial(listen_addr).unwrap();
             tx.send(123).await.unwrap();
             assert_eq!(rx.recv().await.unwrap(), 123);

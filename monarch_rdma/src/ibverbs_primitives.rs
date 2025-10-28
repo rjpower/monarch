@@ -135,19 +135,19 @@ pub struct IbverbsConfig {
 }
 
 /// Default RDMA parameters below are based on common values from rdma-core examples
-/// (e.g. rc_pingpong). For high-performance or production use, consider tuning
-/// based on ibv_query_device() results and workload characteristics.
+/// For high-performance or production use, consider tuning
+/// based on ibv_query_device() results and workload characteristics
 impl Default for IbverbsConfig {
     fn default() -> Self {
         Self {
             device: RdmaDevice::default(),
-            cq_entries: 256,
+            cq_entries: 1024,
             port_num: 1,
             gid_index: 3,
-            max_send_wr: 128,
-            max_recv_wr: 128,
-            max_send_sge: 32,
-            max_recv_sge: 32,
+            max_send_wr: 512,
+            max_recv_wr: 512,
+            max_send_sge: 30,
+            max_recv_sge: 30,
             path_mtu: rdmaxcel_sys::IBV_MTU_4096,
             retry_cnt: 7,
             rnr_retry: 7,
@@ -159,6 +159,43 @@ impl Default for IbverbsConfig {
             psn: rand::random::<u32>() & 0xffffff,
             use_gpu_direct: false, // nv_peermem enabled for cuda
             hw_init_delay_ms: 2,
+        }
+    }
+}
+
+impl IbverbsConfig {
+    /// Create a new IbverbsConfig targeting a specific device
+    ///
+    /// Device targets use a unified "type:id" format:
+    /// - "cpu:N" -> finds RDMA device closest to NUMA node N
+    /// - "cuda:N" -> finds RDMA device closest to CUDA device N  
+    /// - "nic:mlx5_N" -> returns the specified NIC directly
+    ///
+    /// Shortcuts:
+    /// - "cpu" -> defaults to "cpu:0"
+    /// - "cuda" -> defaults to "cuda:0"
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - Target device specification
+    ///
+    /// # Returns
+    ///
+    /// * `IbverbsConfig` with resolved device, or default device if resolution fails
+    pub fn targeting(target: &str) -> Self {
+        // Normalize shortcuts
+        let normalized_target = match target {
+            "cpu" => "cpu:0",
+            "cuda" => "cuda:0",
+            _ => target,
+        };
+
+        let device = crate::device_selection::select_optimal_rdma_device(Some(normalized_target))
+            .unwrap_or_else(RdmaDevice::default);
+
+        Self {
+            device,
+            ..Default::default()
         }
     }
 }
@@ -315,10 +352,16 @@ impl RdmaDevice {
 
 impl Default for RdmaDevice {
     fn default() -> Self {
-        get_all_devices()
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| panic!("No RDMA devices found"))
+        // Try to get a smart default using device selection logic (defaults to cpu:0)
+        if let Some(device) = crate::device_selection::select_optimal_rdma_device(Some("cpu:0")) {
+            device
+        } else {
+            // Fallback to first available device
+            get_all_devices()
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| panic!("No RDMA devices found"))
+        }
     }
 }
 

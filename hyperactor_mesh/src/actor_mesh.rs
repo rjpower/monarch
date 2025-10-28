@@ -10,6 +10,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Deref;
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use hyperactor::Actor;
@@ -39,6 +40,7 @@ use ndslice::Selection;
 use ndslice::Shape;
 use ndslice::ShapeError;
 use ndslice::SliceError;
+use ndslice::View;
 use ndslice::reshape::Limit;
 use ndslice::reshape::ReshapeError;
 use ndslice::reshape::ReshapeSliceExt;
@@ -47,6 +49,7 @@ use ndslice::selection;
 use ndslice::selection::EvalOpts;
 use ndslice::selection::ReifySlice;
 use ndslice::selection::normal;
+use ndslice::view::ViewExt;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_multipart::Part;
@@ -62,7 +65,7 @@ use crate::metrics;
 use crate::proc_mesh::ProcMesh;
 use crate::reference::ActorMeshId;
 use crate::reference::ActorMeshRef;
-use crate::reference::ProcMeshId;
+use crate::v1;
 
 declare_attrs! {
     /// Which mesh this message was cast to. Used for undeliverable message
@@ -199,9 +202,15 @@ pub trait ActorMesh: Mesh<Id = ActorMeshId> {
         message: M,
     ) -> Result<(), CastError>
     where
-        Self::Actor: RemoteHandles<IndexedErasedUnbound<M>>,
-        M: Castable + RemoteMessage,
+        Self::Actor: RemoteHandles<M> + RemoteHandles<IndexedErasedUnbound<M>>,
+        M: Castable + RemoteMessage + Clone,
     {
+        if let Some(v1) = self.v1() {
+            return v1
+                .cast_for_tensor_engine_only_do_not_use(cx, selection, message)
+                .map_err(anyhow::Error::from)
+                .map_err(CastError::from);
+        }
         actor_mesh_cast::<Self::Actor, M>(
             cx,                            // actor context
             self.id(),                     // actor mesh id (destination mesh)
@@ -224,27 +233,39 @@ pub trait ActorMesh: Mesh<Id = ActorMeshId> {
     }
 
     /// Iterate over all `ActorRef<Self::Actor>` in this mesh.
-    fn iter_actor_refs(&self) -> impl Iterator<Item = ActorRef<Self::Actor>> {
-        let gang: GangRef<Self::Actor> =
-            GangId(self.proc_mesh().world_id().clone(), self.name().to_string()).into();
-        self.shape().slice().iter().map(move |rank| gang.rank(rank))
+    fn iter_actor_refs(&self) -> Box<dyn Iterator<Item = ActorRef<Self::Actor>>> {
+        if let Some(v1) = self.v1() {
+            // We collect() here to ensure that the data are owned. Since this is a short-lived
+            // shim, we'll live with it.
+            return Box::new(
+                v1.iter()
+                    .map(|(_point, actor_ref)| actor_ref.clone())
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            );
+        }
+        let gang: GangRef<Self::Actor> = GangRef::attest(GangId(
+            self.proc_mesh().world_id().clone(),
+            self.name().to_string(),
+        ));
+        Box::new(self.shape().slice().iter().map(move |rank| gang.rank(rank)))
     }
 
-    async fn stop(&self) -> Result<(), anyhow::Error> {
-        self.proc_mesh().stop_actor_by_name(self.name()).await
+    async fn stop(&self, cx: &impl context::Actor) -> Result<(), anyhow::Error> {
+        self.proc_mesh().stop_actor_by_name(cx, self.name()).await
     }
 
     /// Get a serializeable reference to this mesh similar to ActorHandle::bind
     fn bind(&self) -> ActorMeshRef<Self::Actor> {
         ActorMeshRef::attest(
-            ActorMeshId::V0(
-                ProcMeshId(self.world_id().to_string()),
-                self.name().to_string(),
-            ),
+            self.id(),
             self.shape().clone(),
             self.proc_mesh().comm_actor().clone(),
         )
     }
+
+    /// Retrieves the v1 mesh for this v0 ActorMesh, if it is available.
+    fn v1(&self) -> Option<v1::ActorMeshRef<Self::Actor>>;
 }
 
 /// Abstracts over shared and borrowed references to a [`ProcMesh`].
@@ -276,12 +297,40 @@ impl Deref for ProcMeshRef<'_> {
 /// `ActorRef<A>` handles (see `ranks`), and `ActorRef` is only
 /// defined for `A: Referable`.
 pub struct RootActorMesh<'a, A: Referable> {
-    proc_mesh: ProcMeshRef<'a>,
-    name: String,
-    pub(crate) ranks: Vec<ActorRef<A>>, // temporary until we remove `ArcActorMesh`.
-    // The receiver of supervision events. It is None if it has been transferred to
-    // an actor event observer.
-    actor_supervision_rx: Option<mpsc::UnboundedReceiver<ActorSupervisionEvent>>,
+    inner: ActorMeshKind<'a, A>,
+    shape: OnceLock<Shape>,
+    proc_mesh: OnceLock<ProcMesh>,
+    name: OnceLock<String>,
+}
+
+enum ActorMeshKind<'a, A: Referable> {
+    V0 {
+        proc_mesh: ProcMeshRef<'a>,
+        name: String,
+        ranks: Vec<ActorRef<A>>, // temporary until we remove `ArcActorMesh`.
+        // The receiver of supervision events. It is None if it has been transferred to
+        // an actor event observer.
+        actor_supervision_rx: Option<mpsc::UnboundedReceiver<ActorSupervisionEvent>>,
+    },
+
+    V1(v1::ActorMeshRef<A>),
+}
+
+impl<'a, A: Referable> From<v1::ActorMeshRef<A>> for RootActorMesh<'a, A> {
+    fn from(actor_mesh: v1::ActorMeshRef<A>) -> Self {
+        Self {
+            inner: ActorMeshKind::V1(actor_mesh),
+            shape: OnceLock::new(),
+            proc_mesh: OnceLock::new(),
+            name: OnceLock::new(),
+        }
+    }
+}
+
+impl<'a, A: Referable> From<v1::ActorMesh<A>> for RootActorMesh<'a, A> {
+    fn from(actor_mesh: v1::ActorMesh<A>) -> Self {
+        actor_mesh.detach().into()
+    }
 }
 
 impl<'a, A: Referable> RootActorMesh<'a, A> {
@@ -292,10 +341,24 @@ impl<'a, A: Referable> RootActorMesh<'a, A> {
         ranks: Vec<ActorRef<A>>,
     ) -> Self {
         Self {
-            proc_mesh: ProcMeshRef::Borrowed(proc_mesh),
-            name,
-            ranks,
-            actor_supervision_rx: Some(actor_supervision_rx),
+            inner: ActorMeshKind::V0 {
+                proc_mesh: ProcMeshRef::Borrowed(proc_mesh),
+                name,
+                ranks,
+                actor_supervision_rx: Some(actor_supervision_rx),
+            },
+            shape: OnceLock::new(),
+            proc_mesh: OnceLock::new(),
+            name: OnceLock::new(),
+        }
+    }
+
+    pub fn new_v1(actor_mesh: v1::ActorMeshRef<A>) -> Self {
+        Self {
+            inner: ActorMeshKind::V1(actor_mesh),
+            shape: OnceLock::new(),
+            proc_mesh: OnceLock::new(),
+            name: OnceLock::new(),
         }
     }
 
@@ -306,27 +369,50 @@ impl<'a, A: Referable> RootActorMesh<'a, A> {
         ranks: Vec<ActorRef<A>>,
     ) -> Self {
         Self {
-            proc_mesh: ProcMeshRef::Shared(Box::new(proc_mesh)),
-            name,
-            ranks,
-            actor_supervision_rx: Some(actor_supervision_rx),
+            inner: ActorMeshKind::V0 {
+                proc_mesh: ProcMeshRef::Shared(Box::new(proc_mesh)),
+                name,
+                ranks,
+                actor_supervision_rx: Some(actor_supervision_rx),
+            },
+            shape: OnceLock::new(),
+            proc_mesh: OnceLock::new(),
+            name: OnceLock::new(),
         }
     }
 
     /// Open a port on this ActorMesh.
     pub fn open_port<M: Message>(&self) -> (PortHandle<M>, PortReceiver<M>) {
-        self.proc_mesh.client().open_port()
+        match &self.inner {
+            ActorMeshKind::V0 { proc_mesh, .. } => proc_mesh.client().open_port(),
+            ActorMeshKind::V1(_actor_mesh) => unimplemented!("unsupported operation"),
+        }
     }
 
     /// An event stream of actor events. Each RootActorMesh can produce only one such
     /// stream, returning None after the first call.
     pub fn events(&mut self) -> Option<ActorSupervisionEvents> {
-        self.actor_supervision_rx
-            .take()
-            .map(|actor_supervision_rx| ActorSupervisionEvents {
+        match &mut self.inner {
+            ActorMeshKind::V0 {
                 actor_supervision_rx,
-                mesh_id: self.id(),
-            })
+                ..
+            } => actor_supervision_rx
+                .take()
+                .map(|actor_supervision_rx| ActorSupervisionEvents {
+                    actor_supervision_rx,
+                    mesh_id: self.id(),
+                }),
+            ActorMeshKind::V1(_actor_mesh) => unimplemented!("unsupported operation"),
+        }
+    }
+
+    /// Access the ranks field (temporary until we remove `ArcActorMesh`).
+    #[cfg(test)]
+    pub(crate) fn ranks(&self) -> &Vec<ActorRef<A>> {
+        match &self.inner {
+            ActorMeshKind::V0 { ranks, .. } => ranks,
+            ActorMeshKind::V1(_actor_mesh) => unimplemented!("unsupported operation"),
+        }
     }
 }
 
@@ -361,7 +447,10 @@ impl<'a, A: Referable> Mesh for RootActorMesh<'a, A> {
         'a: 'b;
 
     fn shape(&self) -> &Shape {
-        self.proc_mesh.shape()
+        self.shape.get_or_init(|| match &self.inner {
+            ActorMeshKind::V0 { proc_mesh, .. } => proc_mesh.shape().clone(),
+            ActorMeshKind::V1(actor_mesh) => actor_mesh.region().into(),
+        })
     }
 
     fn select<R: Into<Range>>(
@@ -373,11 +462,19 @@ impl<'a, A: Referable> Mesh for RootActorMesh<'a, A> {
     }
 
     fn get(&self, rank: usize) -> Option<ActorRef<A>> {
-        self.ranks.get(rank).cloned()
+        match &self.inner {
+            ActorMeshKind::V0 { ranks, .. } => ranks.get(rank).cloned(),
+            ActorMeshKind::V1(actor_mesh) => actor_mesh.get(rank),
+        }
     }
 
     fn id(&self) -> Self::Id {
-        ActorMeshId::V0(self.proc_mesh.id(), self.name.clone())
+        match &self.inner {
+            ActorMeshKind::V0 {
+                proc_mesh, name, ..
+            } => ActorMeshId::V0(proc_mesh.id(), name.clone()),
+            ActorMeshKind::V1(actor_mesh) => ActorMeshId::V1(actor_mesh.name().clone()),
+        }
     }
 }
 
@@ -385,11 +482,28 @@ impl<A: Referable> ActorMesh for RootActorMesh<'_, A> {
     type Actor = A;
 
     fn proc_mesh(&self) -> &ProcMesh {
-        &self.proc_mesh
+        match &self.inner {
+            ActorMeshKind::V0 { proc_mesh, .. } => proc_mesh,
+            ActorMeshKind::V1(actor_mesh) => self
+                .proc_mesh
+                .get_or_init(|| actor_mesh.proc_mesh().clone().into()),
+        }
     }
 
     fn name(&self) -> &str {
-        &self.name
+        match &self.inner {
+            ActorMeshKind::V0 { name, .. } => name,
+            ActorMeshKind::V1(actor_mesh) => {
+                self.name.get_or_init(|| actor_mesh.name().to_string())
+            }
+        }
+    }
+
+    fn v1(&self) -> Option<v1::ActorMeshRef<Self::Actor>> {
+        match &self.inner {
+            ActorMeshKind::V0 { .. } => None,
+            ActorMeshKind::V1(actor_mesh) => Some(actor_mesh.clone()),
+        }
     }
 }
 
@@ -439,11 +553,11 @@ impl<A: Referable> ActorMesh for SlicedActorMesh<'_, A> {
     type Actor = A;
 
     fn proc_mesh(&self) -> &ProcMesh {
-        &self.0.proc_mesh
+        self.0.proc_mesh()
     }
 
     fn name(&self) -> &str {
-        &self.0.name
+        self.0.name()
     }
 
     #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
@@ -462,6 +576,12 @@ impl<A: Referable> ActorMesh for SlicedActorMesh<'_, A> {
             /*root_mesh_shape=*/ self.0.shape(),
         )
     }
+
+    fn v1(&self) -> Option<v1::ActorMeshRef<Self::Actor>> {
+        self.0
+            .v1()
+            .map(|actor_mesh| actor_mesh.subset(self.shape().into()).unwrap())
+    }
 }
 
 /// The type of error of casting operations.
@@ -472,6 +592,9 @@ pub enum CastError {
 
     #[error("send on rank {0}: {1}")]
     MailboxSenderError(usize, MailboxSenderError),
+
+    #[error("unsupported selection: {0}")]
+    SelectionNotSupported(String),
 
     #[error(transparent)]
     RootMailboxSenderError(#[from] MailboxSenderError),
@@ -503,6 +626,7 @@ pub(crate) mod test_util {
     use anyhow::ensure;
     use hyperactor::Context;
     use hyperactor::Handler;
+    use hyperactor::Instance;
     use hyperactor::PortRef;
     use ndslice::extent;
 
@@ -625,8 +749,8 @@ pub(crate) mod test_util {
         ],
     )]
     pub struct ProxyActor {
-        proc_mesh: Arc<ProcMesh>,
-        actor_mesh: RootActorMesh<'static, TestActor>,
+        proc_mesh: &'static Arc<ProcMesh>,
+        actor_mesh: Option<RootActorMesh<'static, TestActor>>,
     }
 
     impl fmt::Debug for ProxyActor {
@@ -664,12 +788,15 @@ pub(crate) mod test_util {
                 .unwrap();
             let proc_mesh = Arc::new(ProcMesh::allocate(alloc).await.unwrap());
             let leaked: &'static Arc<ProcMesh> = Box::leak(Box::new(proc_mesh));
-            let actor_mesh: RootActorMesh<'static, TestActor> =
-                leaked.spawn("echo", &()).await.unwrap();
             Ok(Self {
-                proc_mesh: Arc::clone(leaked),
-                actor_mesh,
+                proc_mesh: leaked,
+                actor_mesh: None,
             })
+        }
+
+        async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
+            self.actor_mesh = Some(self.proc_mesh.spawn(this, "echo", &()).await?);
+            Ok(())
         }
     }
 
@@ -679,7 +806,7 @@ pub(crate) mod test_util {
             if std::env::var("HYPERACTOR_MESH_ROUTER_NO_GLOBAL_FALLBACK").is_err() {
                 // test_proxy_mesh
 
-                let actor = self.actor_mesh.get(0).unwrap();
+                let actor = self.actor_mesh.as_ref().unwrap().get(0).unwrap();
 
                 // For now, we reply directly to the client.
                 // We will support directly wiring up the meshes later.
@@ -692,14 +819,14 @@ pub(crate) mod test_util {
             } else {
                 // test_router_undeliverable_return
 
-                let actor: ActorRef<_> = self.actor_mesh.get(0).unwrap();
+                let actor: ActorRef<_> = self.actor_mesh.as_ref().unwrap().get(0).unwrap();
                 let (tx, mut rx) = cx.open_port::<String>();
                 actor.send(cx, Echo(message.0, tx.bind()))?;
 
                 use tokio::time::Duration;
                 use tokio::time::timeout;
                 #[allow(clippy::disallowed_methods)]
-                if let Ok(_) = timeout(Duration::from_secs(1), rx.recv()).await {
+                if timeout(Duration::from_secs(1), rx.recv()).await.is_ok() {
                     message
                         .1
                         .send(cx, "the impossible happened".to_owned())
@@ -765,8 +892,9 @@ mod tests {
                     })
                     .await
                     .unwrap();
+                let instance = $crate::v1::testing::instance().await;
                 let proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
-                let actor_mesh: RootActorMesh<'_, ProxyActor> = proc_mesh.spawn("proxy", &()).await.unwrap();
+                let actor_mesh: RootActorMesh<'_, ProxyActor> = proc_mesh.spawn(&instance, "proxy", &()).await.unwrap();
                 let proxy_actor = actor_mesh.get(0).unwrap();
                 let (tx, mut rx) = actor_mesh.open_port::<String>();
                 proxy_actor.send(proc_mesh.client(), Echo("hello!".to_owned(), tx.bind())).unwrap();
@@ -790,8 +918,9 @@ mod tests {
                     .await
                     .unwrap();
 
+                let instance = $crate::v1::testing::instance().await;
                 let proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
-                let actor_mesh: RootActorMesh<TestActor> = proc_mesh.spawn("echo", &()).await.unwrap();
+                let actor_mesh: RootActorMesh<TestActor> = proc_mesh.spawn(&instance, "echo", &()).await.unwrap();
                 let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
                 actor_mesh
                     .cast(proc_mesh.client(), sel!(*), Echo("Hello".to_string(), reply_handle.bind()))
@@ -816,12 +945,13 @@ mod tests {
                     })
                     .await
                     .unwrap();
+                let instance = $crate::v1::testing::instance().await;
                 let mesh = ProcMesh::allocate(alloc).await.unwrap();
 
                 let (undeliverable_msg_tx, _) = mesh.client().open_port();
                 let ping_pong_actor_params = PingPongActorParams::new(Some(undeliverable_msg_tx.bind()), None);
                 let actor_mesh: RootActorMesh<PingPongActor> = mesh
-                    .spawn::<PingPongActor>("ping-pong", &ping_pong_actor_params)
+                    .spawn::<PingPongActor>(&instance, "ping-pong", &ping_pong_actor_params)
                     .await
                     .unwrap();
 
@@ -854,10 +984,11 @@ mod tests {
                     .await
                     .unwrap();
 
+                let instance = crate::v1::testing::instance().await;
                 let proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
                 let (undeliverable_tx, _undeliverable_rx) = proc_mesh.client().open_port();
                 let params = PingPongActorParams::new(Some(undeliverable_tx.bind()), None);
-                let actor_mesh = proc_mesh.spawn::<PingPongActor>("pingpong", &params).await.unwrap();
+                let actor_mesh = proc_mesh.spawn::<PingPongActor>(&instance, "pingpong", &params).await.unwrap();
                 let slice = actor_mesh.shape().slice();
 
                 let mut futures = Vec::new();
@@ -899,8 +1030,9 @@ mod tests {
                     .await
                     .unwrap();
 
+                let instance = crate::v1::testing::instance().await;
                 let proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
-                let actor_mesh: RootActorMesh<TestActor> = proc_mesh.spawn("echo", &()).await.unwrap();
+                let actor_mesh: RootActorMesh<TestActor> = proc_mesh.spawn(&instance, "echo", &()).await.unwrap();
                 let dont_simulate_error = true;
                 let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
                 actor_mesh
@@ -942,8 +1074,9 @@ mod tests {
                     .await
                     .unwrap();
 
+                let instance = crate::v1::testing::instance().await;
                 let proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
-                let actor_mesh: RootActorMesh<TestActor> = proc_mesh.spawn("echo", &()).await.unwrap();
+                let actor_mesh: RootActorMesh<TestActor> = proc_mesh.spawn(&instance, "echo", &()).await.unwrap();
 
                 // Bounce the message through all actors and return it to the sender (us).
                 let mut hops: VecDeque<_> = actor_mesh.iter().map(|actor| actor.port()).collect();
@@ -963,6 +1096,7 @@ mod tests {
             #[tokio::test]
             async fn test_inter_proc_mesh_comms() {
                 let mut meshes = Vec::new();
+                let instance = crate::v1::testing::instance().await;
                 for _ in 0..2 {
                     let alloc = $allocator
                         .allocate(AllocSpec {
@@ -976,7 +1110,7 @@ mod tests {
 
                     let proc_mesh = Arc::new(ProcMesh::allocate(alloc).await.unwrap());
                     let proc_mesh_clone = Arc::clone(&proc_mesh);
-                    let actor_mesh : RootActorMesh<TestActor> = proc_mesh_clone.spawn("echo", &()).await.unwrap();
+                    let actor_mesh : RootActorMesh<TestActor> = proc_mesh_clone.spawn(&instance, "echo", &()).await.unwrap();
                     meshes.push((proc_mesh, actor_mesh));
                 }
 
@@ -1023,11 +1157,12 @@ mod tests {
                     .await
                     .unwrap();
 
+                let instance = crate::v1::testing::instance().await;
                 let mut proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
 
                 let (tx, mut rx) = hyperactor::mailbox::open_port(proc_mesh.client());
                 let params = CastTestActorParams{ forward_port: tx.bind() };
-                let actor_mesh: RootActorMesh<CastTestActor> = proc_mesh.spawn("actor", &params).await.unwrap();
+                let actor_mesh: RootActorMesh<CastTestActor> = proc_mesh.spawn(&instance, "actor", &params).await.unwrap();
 
                 actor_mesh.cast(proc_mesh.client(), sel!(*), CastTestMessage::Forward("abc".to_string())).unwrap();
 
@@ -1085,11 +1220,12 @@ mod tests {
                     .await
                     .unwrap();
 
+                let instance = crate::v1::testing::instance().await;
                 let mesh = ProcMesh::allocate(alloc).await.unwrap();
                 let (reply_port_handle, mut reply_port_receiver) = mesh.client().open_port::<usize>();
                 let reply_port = reply_port_handle.bind();
 
-                let actor_mesh: RootActorMesh<TestActor> = mesh.spawn("test", &()).await.unwrap();
+                let actor_mesh: RootActorMesh<TestActor> = mesh.spawn(&instance, "test", &()).await.unwrap();
                 let actor_ref = actor_mesh.get(0).unwrap();
                 let mut headers = Attrs::new();
                 set_cast_info_on_headers(&mut headers, extent.point_of_rank(0).unwrap(), mesh.client().self_id().clone());
@@ -1149,6 +1285,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            let instance = crate::v1::testing::instance().await;
             let monkey = alloc.chaos_monkey();
             let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
             let mut events = mesh.events().unwrap();
@@ -1158,7 +1295,7 @@ mod tests {
                 None,
             );
             let actor_mesh: RootActorMesh<PingPongActor> = mesh
-                .spawn::<PingPongActor>("ping-pong", &ping_pong_actor_params)
+                .spawn::<PingPongActor>(&instance, "ping-pong", &ping_pong_actor_params)
                 .await
                 .unwrap();
 
@@ -1218,13 +1355,14 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            let instance = crate::v1::testing::instance().await;
 
             let stop = alloc.stopper();
             let mut mesh = ProcMesh::allocate(alloc).await.unwrap();
             let mut events = mesh.events().unwrap();
 
             let actor_mesh = mesh
-                .spawn::<TestActor>("reply-then-fail", &())
+                .spawn::<TestActor>(&instance, "reply-then-fail", &())
                 .await
                 .unwrap();
 
@@ -1286,6 +1424,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            let instance = crate::v1::testing::instance().await;
             let mesh = ProcMesh::allocate(alloc).await.unwrap();
 
             let ping_pong_actor_params = PingPongActorParams::new(
@@ -1293,16 +1432,16 @@ mod tests {
                 None,
             );
             let mesh_one: RootActorMesh<PingPongActor> = mesh
-                .spawn::<PingPongActor>("mesh_one", &ping_pong_actor_params)
+                .spawn::<PingPongActor>(&instance, "mesh_one", &ping_pong_actor_params)
                 .await
                 .unwrap();
 
             let mesh_two: RootActorMesh<PingPongActor> = mesh
-                .spawn::<PingPongActor>("mesh_two", &ping_pong_actor_params)
+                .spawn::<PingPongActor>(&instance, "mesh_two", &ping_pong_actor_params)
                 .await
                 .unwrap();
 
-            mesh_two.stop().await.unwrap();
+            mesh_two.stop(&instance).await.unwrap();
 
             let ping_two: ActorRef<PingPongActor> = mesh_two.get(0).unwrap();
             let pong_two: ActorRef<PingPongActor> = mesh_two.get(1).unwrap();
@@ -1369,6 +1508,7 @@ mod tests {
                 let serialized = Serialized::serialize(pay).unwrap();
                 let mut headers = Attrs::new();
                 hyperactor::mailbox::headers::set_send_timestamp(&mut headers);
+                hyperactor::mailbox::headers::set_rust_message_type::<Payload>(&mut headers);
                 let envelope = MessageEnvelope::new(src.clone(), dst.clone(), serialized, headers);
                 let frame = Frame::Message(0u64, envelope);
                 let message = serde_multipart::serialize_illegal_bincode(&frame).unwrap();
@@ -1398,16 +1538,17 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            let instance = crate::v1::testing::instance().await;
             let mut proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
             let mut proc_events = proc_mesh.events().unwrap();
             let actor_mesh: RootActorMesh<TestActor> =
-                proc_mesh.spawn("ingest", &()).await.unwrap();
+                proc_mesh.spawn(&instance, "ingest", &()).await.unwrap();
             let (reply_handle, mut reply_receiver) = actor_mesh.open_port();
             let dest = actor_mesh.get(0).unwrap();
 
             // Message sized to exactly max frame length.
             let payload = Payload {
-                part: Part::from(Bytes::from(vec![0u8; 698])),
+                part: Part::from(Bytes::from(vec![0u8; 588])),
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
@@ -1427,7 +1568,7 @@ mod tests {
 
             // Message sized to max frame length + 1.
             let payload = Payload {
-                part: Part::from(Bytes::from(vec![0u8; 699])),
+                part: Part::from(Bytes::from(vec![0u8; 589])),
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
@@ -1486,10 +1627,11 @@ mod tests {
             // SAFETY: Not multithread safe.
             unsafe { std::env::set_var("HYPERACTOR_MESH_ROUTER_NO_GLOBAL_FALLBACK", "1") };
 
+            let instance = crate::v1::testing::instance().await;
             let mut proc_mesh = ProcMesh::allocate(alloc).await.unwrap();
             let mut proc_events = proc_mesh.events().unwrap();
             let mut actor_mesh: RootActorMesh<'_, ProxyActor> =
-                { proc_mesh.spawn("proxy", &()).await.unwrap() };
+                { proc_mesh.spawn(&instance, "proxy", &()).await.unwrap() };
             let mut actor_events = actor_mesh.events().unwrap();
 
             let proxy_actor = actor_mesh.get(0).unwrap();
@@ -1508,7 +1650,7 @@ mod tests {
                     );
                     assert_eq!(
                         actor_events.next().await.unwrap().actor_id.name(),
-                        &actor_mesh.name
+                        actor_mesh.name(),
                     );
                 }
             }
@@ -1589,7 +1731,7 @@ mod tests {
             let config = hyperactor::config::global::lock();
             let _guard = config.override_key(MAX_CAST_DIMENSION_SIZE, 2);
 
-            let (_, mut rx) = serve::<usize>(addr).unwrap();
+            let (_, mut rx) = serve::<usize>(addr, "test").unwrap();
 
             let expected_ranks = selection
                 .eval(
@@ -1644,12 +1786,13 @@ mod tests {
                         transport: ChannelTransport::Local
                     }))
                     .unwrap();
+                let instance = runtime.block_on(crate::v1::testing::instance());
                 let proc_mesh = runtime.block_on(ProcMesh::allocate(alloc)).unwrap();
 
                 let addr = ChannelAddr::any(ChannelTransport::Unix);
 
                 let actor_mesh: RootActorMesh<EchoActor> =
-                    runtime.block_on(proc_mesh.spawn("echo", &addr)).unwrap();
+                    runtime.block_on(proc_mesh.spawn(&instance, "echo", &addr)).unwrap();
 
                 let mut runner = TestRunner::default();
                 let selection = gen_selection(4, actor_mesh.shape().slice().sizes().to_vec(), 0)
@@ -1676,12 +1819,13 @@ mod tests {
                         transport: ChannelTransport::Local
                     }))
                     .unwrap();
+                let instance = runtime.block_on(crate::v1::testing::instance());
                 let proc_mesh = runtime.block_on(ProcMesh::allocate(alloc)).unwrap();
 
                 let addr = ChannelAddr::any(ChannelTransport::Unix);
 
                 let actor_mesh: RootActorMesh<EchoActor> =
-                    runtime.block_on(proc_mesh.spawn("echo", &addr)).unwrap();
+                    runtime.block_on(proc_mesh.spawn(&instance, "echo", &addr)).unwrap();
 
 
                 let first_label = extent.labels().first().unwrap();
@@ -1749,12 +1893,13 @@ mod tests {
                         transport: ChannelTransport::Local
                     }))
                     .unwrap();
+                let instance = runtime.block_on(crate::v1::testing::instance());
                 let proc_mesh = runtime.block_on(ProcMesh::allocate(alloc)).unwrap();
 
                 let addr = ChannelAddr::any(ChannelTransport::Unix);
 
                 let actor_mesh: RootActorMesh<EchoActor> =
-                    runtime.block_on(proc_mesh.spawn("echo", &addr)).unwrap();
+                    runtime.block_on(proc_mesh.spawn(&instance, "echo", &addr)).unwrap();
 
                 let mut runner = TestRunner::default();
                 let selection = gen_selection(4, actor_mesh.shape().slice().sizes().to_vec(), 0)
@@ -1768,6 +1913,56 @@ mod tests {
                     addr,
                     selection
                 ));
+            }
+        }
+    }
+
+    mod shim {
+        use std::collections::HashSet;
+
+        use hyperactor::context::Mailbox;
+        use ndslice::Extent;
+        use ndslice::extent;
+
+        use super::*;
+        use crate::sel;
+
+        #[tokio::test]
+        async fn test_basic() {
+            let instance = v1::testing::instance().await;
+            let host_mesh = v1::testing::host_mesh(extent!(host = 4)).await;
+            let proc_mesh = host_mesh
+                .spawn(instance, "test", Extent::unity())
+                .await
+                .unwrap();
+            let actor_mesh = proc_mesh
+                .spawn::<v1::testactor::TestActor>(instance, "test", &())
+                .await
+                .unwrap();
+
+            let actor_mesh_v0: RootActorMesh<'_, _> = actor_mesh.clone().into();
+
+            let (cast_info, mut cast_info_rx) = instance.mailbox().open_port();
+            actor_mesh_v0
+                .cast(
+                    instance,
+                    sel!(*),
+                    v1::testactor::GetCastInfo {
+                        cast_info: cast_info.bind(),
+                    },
+                )
+                .unwrap();
+
+            let mut point_to_actor: HashSet<_> = actor_mesh.iter().collect();
+            while !point_to_actor.is_empty() {
+                let (point, origin_actor_ref, sender_actor_id) = cast_info_rx.recv().await.unwrap();
+                let key = (point, origin_actor_ref);
+                assert!(
+                    point_to_actor.remove(&key),
+                    "key {:?} not present or removed twice",
+                    key
+                );
+                assert_eq!(&sender_actor_id, instance.self_id());
             }
         }
     }

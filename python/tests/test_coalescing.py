@@ -17,18 +17,10 @@ import monarch
 import pytest
 
 import torch
-from monarch import (
-    coalescing,
-    DeviceMesh,
-    fetch_shard,
-    get_active_mesh,
-    get_active_stream,
-    no_mesh,
-    remote,
-    Stream,
-)
+from monarch import coalescing, fetch_shard, get_active_stream, remote, Stream
 from monarch._testing import TestingContext
 from monarch.common._coalescing import _record_and_define, compile
+from monarch.common.device_mesh import DeviceMesh, get_active_mesh, no_mesh
 from monarch.common.function_caching import AliasOf, Storage, TensorGroup
 from monarch.common.tensor import Tensor
 
@@ -57,13 +49,16 @@ def testing_context():
 class BackendType(Enum):
     PY = "py"
     RS = "rs"
+    MESH = "mesh"
 
 
 @pytest.mark.skipif(
     torch.cuda.device_count() < 2,
     reason="Not enough GPUs, this test requires at least 2 GPUs",
 )
-@pytest.mark.parametrize("backend_type", [BackendType.PY, BackendType.RS])
+@pytest.mark.parametrize(
+    "backend_type", [BackendType.PY, BackendType.RS, BackendType.MESH]
+)
 class TestCoalescing:
     @classmethod
     def local_device_mesh(

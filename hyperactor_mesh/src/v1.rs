@@ -21,6 +21,7 @@ use std::str::FromStr;
 
 pub use actor_mesh::ActorMesh;
 pub use actor_mesh::ActorMeshRef;
+use enum_as_inner::EnumAsInner;
 pub use host_mesh::HostMeshRef;
 use hyperactor::ActorId;
 use hyperactor::ActorRef;
@@ -32,13 +33,35 @@ use serde::Deserialize;
 use serde::Serialize;
 pub use value_mesh::ValueMesh;
 
+/// A mesh of per-rank lifecycle statuses.
+///
+/// `StatusMesh` is `ValueMesh<Status>` and supports dense or
+/// compressed encodings. Updates are applied via sparse overlays with
+/// **last-writer-wins** semantics (see
+/// [`ValueMesh::merge_from_overlay`]). The mesh's `Region` defines
+/// the rank space; all updates must match that region.
+pub type StatusMesh = ValueMesh<Status>;
+
+/// A sparse set of `(Range<usize>, Status)` updates for a
+/// [`StatusMesh`].
+///
+/// `StatusOverlay` carries **normalized** runs (sorted,
+/// non-overlapping, and coalesced). Applying an overlay to a
+/// `StatusMesh` uses **right-wins** semantics on overlap and
+/// preserves first-appearance order in the compressed table.
+/// Construct via `ValueOverlay::try_from_runs` after normalizing.
+pub type StatusOverlay = value_mesh::ValueOverlay<Status>;
+
 use crate::resource;
+use crate::resource::RankedValues;
+use crate::resource::Status;
 use crate::shortuuid::ShortUuid;
 use crate::v1::host_mesh::HostMeshAgent;
 use crate::v1::host_mesh::HostMeshRefParseError;
+use crate::v1::host_mesh::mesh_agent::ProcState;
 
 /// Errors that occur during mesh operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, EnumAsInner, thiserror::Error)]
 pub enum Error {
     #[error("invalid mesh ref: expected {expected} ranks, but contains {actual} ranks")]
     InvalidRankCardinality { expected: usize, actual: usize },
@@ -88,13 +111,32 @@ pub enum Error {
     #[error("error configuring host mesh agent {0}: {1}")]
     HostMeshAgentConfigurationError(ActorId, String),
 
-    #[error("error creating {proc_name} (host rank {host_rank}) on host mesh agent {mesh_agent}")]
+    #[error(
+        "error creating proc (host rank {host_rank}) on host mesh agent {mesh_agent}, state: {state}"
+    )]
     ProcCreationError {
-        proc_name: Name,
-        mesh_agent: ActorRef<HostMeshAgent>,
+        state: resource::State<ProcState>,
         host_rank: usize,
-        status: resource::Status,
+        mesh_agent: ActorRef<HostMeshAgent>,
     },
+
+    #[error(
+        "error spawning proc mesh: statuses: {}",
+        RankedValues::invert(&*.statuses)
+    )]
+    ProcSpawnError { statuses: RankedValues<Status> },
+
+    #[error(
+        "error spawning actor mesh: statuses: {}",
+        RankedValues::invert(&*.statuses)
+    )]
+    ActorSpawnError { statuses: RankedValues<Status> },
+
+    #[error(
+        "error stopping actor mesh: statuses: {}",
+        RankedValues::invert(statuses)
+    )]
+    ActorStopError { statuses: RankedValues<Status> },
 
     #[error("error: {0} does not exist")]
     NotExist(Name),
@@ -255,7 +297,8 @@ impl FromStr for Name {
     type Err = NameParseError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        if let Some((name, uuid)) = s.split_once(NAME_SUFFIX_DELIMITER) {
+        // Split from the last in case the name has underscores in it.
+        if let Some((name, uuid)) = s.rsplit_once(NAME_SUFFIX_DELIMITER) {
             if name.is_empty() {
                 return Err(NameParseError::MissingName);
             }
@@ -333,9 +376,9 @@ mod tests {
 
     #[test]
     fn test_name_parse() {
-        // Multiple underscores are allowed in the name, as ShortUuid will discard
-        // them.
-        let name = Name::from_str("foo__1a2b3c4_d5e6f").unwrap();
-        assert_eq!(format!("{}", name), "foo_1a2b3c4d5e6f");
+        // Multiple underscores are allowed in the name, as ShortUuid will choose
+        // the part after the last underscore.
+        let name = Name::from_str("foo_bar_1a2b3c4d5e6f").unwrap();
+        assert_eq!(format!("{}", name), "foo_bar_1a2b3c4d5e6f");
     }
 }

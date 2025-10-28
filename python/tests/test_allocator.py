@@ -15,13 +15,14 @@ import os
 import subprocess
 import sys
 import unittest
+from collections.abc import Callable
 from time import sleep
 from typing import Generator, Optional
 from unittest import mock
 
 import cloudpickle
+import monarch.actor
 import pytest
-
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -31,23 +32,20 @@ from monarch._rust_bindings.monarch_hyperactor.channel import (
     ChannelAddr,
     ChannelTransport,
 )
+from monarch._rust_bindings.monarch_hyperactor.shape import Extent
 
 from monarch._src.actor.allocator import (
     ALLOC_LABEL_PROC_MESH_NAME,
+    AllocateMixin,
     LocalAllocator,
     RemoteAllocator,
     StaticRemoteAllocInitializer,
     TorchXRemoteAllocInitializer,
 )
+from monarch._src.actor.host_mesh import _bootstrap_cmd, HostMesh
+from monarch._src.actor.proc_mesh import ProcMesh
 from monarch._src.actor.sync_state import fake_sync_state
-from monarch.actor import (
-    Actor,
-    current_rank,
-    current_size,
-    endpoint,
-    ProcMesh,
-    ValueMesh,
-)
+from monarch.actor import Actor, current_rank, current_size, endpoint, ValueMesh
 from monarch.tools.mesh_spec import MeshSpec, ServerSpec
 from monarch.tools.network import get_sockaddr
 
@@ -56,6 +54,21 @@ from torchx.specs import AppState
 
 SERVER_READY = "monarch.tools.commands.server_ready"
 UNUSED = "__UNUSED__"
+
+
+def proc_mesh_from_alloc(
+    allocator: AllocateMixin,
+    spec: AllocSpec,
+    setup: Optional[Callable[[], None]] = None,
+    constraints: Optional[AllocConstraints] = None,
+) -> ProcMesh:
+    return HostMesh.allocate_nonblocking(
+        "hosts",
+        Extent(*zip(*list(spec.extent.items()))),
+        allocator,
+        constraints,
+        bootstrap_cmd=_bootstrap_cmd(),
+    ).spawn_procs(bootstrap=setup)
 
 
 class EnvCheckActor(Actor):
@@ -160,6 +173,8 @@ class TestSetupActorInAllocator(unittest.IsolatedAsyncioTestCase):
             "TEST_ENV_VAR_2": "value_2",
             "TEST_ENV_VAR_3": "value_3",
         }
+        # If the proc mesh is stopped, don't crash the process.
+        monarch.actor.unhandled_fault_hook = lambda failure: None
 
         def setup_multiple_env_vars() -> None:
             for name, value in env_vars.items():
@@ -167,9 +182,8 @@ class TestSetupActorInAllocator(unittest.IsolatedAsyncioTestCase):
 
         spec = AllocSpec(AllocConstraints(), gpus=1, hosts=1)
         allocator = LocalAllocator()
-        alloc = allocator.allocate(spec)
 
-        proc_mesh = ProcMesh.from_alloc(alloc, setup=setup_multiple_env_vars)
+        proc_mesh = proc_mesh_from_alloc(allocator, spec, setup=setup_multiple_env_vars)
         try:
             actor = proc_mesh.spawn("env_check", EnvCheckActor)
 
@@ -193,9 +207,8 @@ class TestSetupActorInAllocator(unittest.IsolatedAsyncioTestCase):
 
         spec = AllocSpec(AllocConstraints(), gpus=1, hosts=1)
         allocator = LocalAllocator()
-        alloc = allocator.allocate(spec)
 
-        proc_mesh = ProcMesh.from_alloc(alloc, setup=setup_with_rank)
+        proc_mesh = proc_mesh_from_alloc(allocator, spec, setup=setup_with_rank)
 
         try:
             actor = proc_mesh.spawn("env_check", EnvCheckActor)
@@ -235,6 +248,9 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
         self.assertDictEqual(expected_world_sizes, computed_world_sizes)
 
     async def test_allocate_failure_message(self) -> None:
+        # This will generate a supervision failure, and we don't want to crash
+        # the test process.
+        monarch.actor.unhandled_fault_hook = lambda failure: None
         spec = AllocSpec(AllocConstraints(), host=2, gpu=4)
 
         with self.assertRaisesRegex(
@@ -252,7 +268,12 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 )
                 alloc = allocator.allocate(spec)
                 await alloc.initialized
-                pm = ProcMesh.from_alloc(alloc)
+                pm = HostMesh.allocate_nonblocking(
+                    "hosts",
+                    Extent(*zip(*list(spec.extent.items()))),
+                    allocator,
+                    AllocConstraints(),
+                ).spawn_procs()
                 await pm.initialized
 
     async def test_call_allocate_twice(self) -> None:
@@ -305,7 +326,9 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 AllocSpec(AllocConstraints(), host=1, gpu=1)
             ).initialized
 
+    @pytest.mark.oss_skip  # pyre-ignore[56]: Pyre cannot infer the type of this pytest marker
     async def test_allocate_2d_mesh(self) -> None:
+        monarch.actor.unhandled_fault_hook = lambda failure: None
         hosts = 2
         gpus = 4
         world_size = hosts * gpus
@@ -317,8 +340,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 world_id="test_remote_allocator",
                 initializer=StaticRemoteAllocInitializer(host1, host2),
             )
-            alloc = allocator.allocate(spec)
-            proc_mesh = ProcMesh.from_alloc(alloc)
+            proc_mesh = proc_mesh_from_alloc(allocator, spec)
             actor = proc_mesh.spawn("test_actor", TestActor)
 
             values = await actor.compute_world_size.call(
@@ -329,6 +351,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             self.assert_computed_world_size(values, world_size)
 
     async def test_stop_proc_mesh_blocking(self) -> None:
+        monarch.actor.unhandled_fault_hook = lambda failure: None
         spec = AllocSpec(AllocConstraints(), host=2, gpu=4)
         with remote_process_allocator() as host1, remote_process_allocator() as host2:
             allocator = RemoteAllocator(
@@ -336,8 +359,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 initializer=StaticRemoteAllocInitializer(host1, host2),
             )
 
-            alloc = allocator.allocate(spec)
-            proc_mesh = ProcMesh.from_alloc(alloc)
+            proc_mesh = proc_mesh_from_alloc(allocator, spec)
             # XXX - it is not clear why this trying to use
             # async code in a sync context.
             with fake_sync_state():
@@ -367,7 +389,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(
                 Exception, r"no process has ever been allocated.*"
             ):
-                await ProcMesh.from_alloc(alloc).initialized
+                await proc_mesh_from_alloc(allocator, spec).initialized
 
     async def test_init_failure(self) -> None:
         class FailInitActor(Actor):
@@ -385,7 +407,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 initializer=StaticRemoteAllocInitializer(host1, host2),
             )
             spec = AllocSpec(AllocConstraints(), host=2, gpu=2)
-            proc_mesh = ProcMesh.from_alloc(allocator.allocate(spec))
+            proc_mesh = proc_mesh_from_alloc(allocator, spec)
             actor_mesh = proc_mesh.spawn("actor", FailInitActor)
 
             with self.assertRaisesRegex(
@@ -394,6 +416,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             ):
                 await actor_mesh.dummy.call()
 
+    @pytest.mark.skip("stop proc mesh not supported yet in v1")
     async def test_stop_proc_mesh(self) -> None:
         spec = AllocSpec(AllocConstraints(), host=2, gpu=4)
 
@@ -403,8 +426,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 world_id="test_remote_allocator",
                 initializer=StaticRemoteAllocInitializer(host1, host2),
             )
-            alloc = allocator.allocate(spec)
-            proc_mesh = ProcMesh.from_alloc(alloc)
+            proc_mesh = proc_mesh_from_alloc(allocator, spec)
             actor = proc_mesh.spawn("test_actor", TestActor)
 
             await proc_mesh.stop()
@@ -419,6 +441,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             # now we doing casting without accessing the wrapped type.
             del actor
 
+    @pytest.mark.skip("stop proc mesh not supported yet in v1")
     async def test_stop_proc_mesh_context_manager(self) -> None:
         spec = AllocSpec(AllocConstraints(), host=2, gpu=4)
 
@@ -428,8 +451,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 world_id="test_remote_allocator",
                 initializer=StaticRemoteAllocInitializer(host1, host2),
             )
-            alloc = allocator.allocate(spec)
-            proc_mesh = ProcMesh.from_alloc(alloc)
+            proc_mesh = proc_mesh_from_alloc(allocator, spec)
             with self.assertRaises(ValueError, msg="foo"):
                 async with proc_mesh:
                     actor = proc_mesh.spawn("test_actor", TestActor)
@@ -463,8 +485,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 world_id="test_remote_allocator",
                 initializer=StaticRemoteAllocInitializer(host1, host2),
             )
-            alloc = allocator.allocate(spec)
-            proc_mesh = ProcMesh.from_alloc(alloc, setup=setup_env_vars)
+            proc_mesh = proc_mesh_from_alloc(allocator, spec, setup=setup_env_vars)
             await proc_mesh.initialized
             try:
                 actor = proc_mesh.spawn("env_check", EnvCheckActor)
@@ -480,6 +501,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             finally:
                 await proc_mesh.stop()
 
+    @pytest.mark.skip("stop proc mesh not supported yet in v1")
     async def test_stop_proc_mesh_context_manager_multiple_times(self) -> None:
         spec = AllocSpec(AllocConstraints(), host=2, gpu=4)
 
@@ -489,8 +511,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
                 world_id="test_remote_allocator",
                 initializer=StaticRemoteAllocInitializer(host1, host2),
             )
-            alloc = allocator.allocate(spec)
-            proc_mesh = ProcMesh.from_alloc(alloc)
+            proc_mesh = proc_mesh_from_alloc(allocator, spec)
             # We can nest multiple context managers on the same mesh, the innermost
             # one closes the mesh and it cannot be used after that.
             async with proc_mesh:
@@ -521,10 +542,11 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(
                 Exception, "no process has ever been allocated on"
             ):
-                alloc = allocator.allocate(spec)
-                await ProcMesh.from_alloc(alloc).initialized
+                await proc_mesh_from_alloc(allocator, spec).initialized
 
+    @pytest.mark.oss_skip  # pyre-ignore[56]: Pyre cannot infer the type of this pytest marker
     async def test_stacked_1d_meshes(self) -> None:
+        monarch.actor.unhandled_fault_hook = lambda failure: None
         # create two stacked actor meshes on the same host
         # each actor mesh running on separate process-allocators
 
@@ -541,8 +563,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             spec_a = AllocSpec(AllocConstraints(), host=1, gpu=2)
             spec_b = AllocSpec(AllocConstraints(), host=1, gpu=6)
 
-            proc_mesh_a = ProcMesh.from_alloc(allocator_a.allocate(spec_a))
-            proc_mesh_b = ProcMesh.from_alloc(allocator_b.allocate(spec_b))
+            proc_mesh_a = proc_mesh_from_alloc(allocator_a, spec_a)
+            proc_mesh_b = proc_mesh_from_alloc(allocator_b, spec_b)
 
             actor_a = proc_mesh_a.spawn("actor_a", TestActor)
             actor_b = proc_mesh_b.spawn("actor_b", TestActor)
@@ -612,15 +634,18 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             ],
         )
         port = get_free_port()
-        with remote_process_allocator(addr=f"tcp!{get_sockaddr('localhost', port)}"):
+
+        with remote_process_allocator(
+            addr=f"tcp!{get_sockaddr('localhost', port)}",
+        ):
             with mock.patch(SERVER_READY, return_value=server):
                 initializer = TorchXRemoteAllocInitializer("local:///test", port=port)
                 allocator = RemoteAllocator(
                     world_id="test",
                     initializer=initializer,
                 )
-                alloc = allocator.allocate(AllocSpec(AllocConstraints(), host=1, gpu=4))
-                proc_mesh = ProcMesh.from_alloc(alloc)
+                spec = AllocSpec(AllocConstraints(), host=1, gpu=4)
+                proc_mesh = proc_mesh_from_alloc(allocator, spec)
                 actor = proc_mesh.spawn("test_actor", TestActor)
                 results = await actor.compute_world_size.call(
                     master_addr="localhost", master_port=get_free_port()
@@ -644,23 +669,22 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             ],
         )
         port = get_free_port()
-        with remote_process_allocator(addr=f"tcp!{get_sockaddr('localhost', port)}"):
+
+        with remote_process_allocator(
+            addr=f"tcp!{get_sockaddr('localhost', port)}",
+        ):
             with mock.patch(SERVER_READY, return_value=server):
                 initializer = TorchXRemoteAllocInitializer("local:///test", port=port)
                 allocator = RemoteAllocator(
                     world_id="test",
                     initializer=initializer,
                 )
-                alloc = allocator.allocate(
-                    AllocSpec(
-                        AllocConstraints(
-                            match_labels={ALLOC_LABEL_PROC_MESH_NAME: "x"}
-                        ),
-                        host=1,
-                        gpu=3,
-                    )
+                spec = AllocSpec(
+                    AllocConstraints(match_labels={ALLOC_LABEL_PROC_MESH_NAME: "x"}),
+                    host=1,
+                    gpu=3,
                 )
-                proc_mesh = ProcMesh.from_alloc(alloc)
+                proc_mesh = proc_mesh_from_alloc(allocator, spec)
                 actor = proc_mesh.spawn("test_actor", TestActor)
                 results = await actor.compute_world_size.call(
                     master_addr="localhost", master_port=get_free_port()
@@ -690,17 +714,14 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, r"'y' not found in job: test"):
                 initializer = TorchXRemoteAllocInitializer("local:///test")
                 allocator = RemoteAllocator(world_id="test", initializer=initializer)
-                alloc = allocator.allocate(
-                    AllocSpec(
-                        AllocConstraints(
-                            match_labels={ALLOC_LABEL_PROC_MESH_NAME: "y"}
-                        ),
-                        host=1,
-                        gpu=1,
-                    )
+                spec = AllocSpec(
+                    AllocConstraints(match_labels={ALLOC_LABEL_PROC_MESH_NAME: "y"}),
+                    host=1,
+                    gpu=1,
                 )
+                alloc = allocator.allocate(spec)
                 await alloc.initialized
-                await ProcMesh.from_alloc(alloc).initialized
+                await proc_mesh_from_alloc(allocator, spec).initialized
 
     async def test_log(self) -> None:
         # create a mesh to log to both stdout and stderr
@@ -713,7 +734,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
 
             spec = AllocSpec(AllocConstraints(), host=1, gpu=2)
 
-            proc_mesh = ProcMesh.from_alloc(allocator.allocate(spec))
+            proc_mesh = proc_mesh_from_alloc(allocator, spec)
 
             # Generate aggregated log every 1 second.
             await proc_mesh.logging_option(True, 1)

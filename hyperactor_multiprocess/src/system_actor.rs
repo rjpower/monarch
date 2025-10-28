@@ -570,7 +570,6 @@ impl World {
         world_id.name().starts_with(SHADOW_PREFIX)
     }
 
-    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `CastError`.
     fn get_port_ref_from_host(
         &self,
         host_id: &HostId,
@@ -584,7 +583,6 @@ impl World {
     }
 
     /// Adds procs to the world.
-    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `SystemActorError`.
     fn add_proc(
         &mut self,
         proc_id: ProcId,
@@ -654,7 +652,6 @@ impl World {
         Ok(())
     }
 
-    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `SystemActorError`.
     fn get_hosts_to_procs(&mut self) -> Result<HashMap<HostId, Vec<ProcId>>, SystemActorError> {
         // A map from host ID to scheduled proc IDs on this host.
         let mut host_proc_map: HashMap<HostId, Vec<ProcId>> = HashMap::new();
@@ -1852,6 +1849,7 @@ mod tests {
     use hyperactor::channel;
     use hyperactor::channel::ChannelTransport;
     use hyperactor::channel::Rx;
+    use hyperactor::channel::TcpMode;
     use hyperactor::clock::Clock;
     use hyperactor::clock::RealClock;
     use hyperactor::data::Serialized;
@@ -1880,7 +1878,8 @@ mod tests {
             host_id,
         );
         let (local_proc_addr, local_proc_rx) =
-            channel::serve::<MessageEnvelope>(ChannelAddr::any(ChannelTransport::Local)).unwrap();
+            channel::serve::<MessageEnvelope>(ChannelAddr::any(ChannelTransport::Local), "test")
+                .unwrap();
         let local_proc_mbox = Mailbox::new_detached(local_proc_id.actor_id("test".to_string(), 0));
         let (local_proc_message_port, local_proc_message_receiver) = local_proc_mbox.open_port();
         let _local_proc_serve_handle = local_proc_mbox.clone().serve(local_proc_rx);
@@ -2197,7 +2196,7 @@ mod tests {
         // Serve a system. Undeliverable messages encountered by the
         // mailbox server are returned to the system actor.
         let server_handle = System::serve(
-            ChannelAddr::any(ChannelTransport::Tcp),
+            ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname)),
             Duration::from_secs(2), // supervision update timeout
             Duration::from_secs(2), // duration to evict an unhealthy world
         )
@@ -2242,8 +2241,7 @@ mod tests {
 
         // Build a supervisor.
         let supervisor = system.attach().await.unwrap();
-        let (sup_tx, _sup_rx) = supervisor.open_port::<ProcSupervisionMessage>();
-        sup_tx.bind_to(ProcSupervisionMessage::port());
+        let (_sup_tx, _sup_rx) = supervisor.bind_actor_port::<ProcSupervisionMessage>();
         let sup_ref = ActorRef::<ProcSupervisor>::attest(supervisor.self_id().clone());
 
         // Construct a system sender.
@@ -2259,7 +2257,7 @@ mod tests {
         let _proc_actor_0 = ProcActor::bootstrap_for_proc(
             proc_0.clone(),
             world_id.clone(),
-            ChannelAddr::any(ChannelTransport::Tcp),
+            ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname)),
             server_handle.local_addr().clone(),
             sup_ref.clone(),
             Duration::from_millis(300), // supervision update interval
@@ -2276,7 +2274,7 @@ mod tests {
         let proc_actor_1 = ProcActor::bootstrap_for_proc(
             proc_1.clone(),
             world_id.clone(),
-            ChannelAddr::any(ChannelTransport::Tcp),
+            ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname)),
             server_handle.local_addr().clone(),
             sup_ref.clone(),
             Duration::from_millis(300), // supervision update interval
@@ -2352,7 +2350,7 @@ mod tests {
     #[tokio::test]
     async fn test_stop_fast() -> Result<()> {
         let server_handle = System::serve(
-            ChannelAddr::any(ChannelTransport::Tcp),
+            ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname)),
             Duration::from_secs(2), // supervision update timeout
             Duration::from_secs(2), // duration to evict an unhealthy world
         )
@@ -2387,7 +2385,7 @@ mod tests {
         let src_id = id!(proc[0].actor);
         let src_addr = ChannelAddr::Sim(SimAddr::new("unix!@src".parse().unwrap()).unwrap());
         let dst_addr = ChannelAddr::Sim(SimAddr::new("unix!@dst".parse().unwrap()).unwrap());
-        let (_, mut rx) = channel::serve::<MessageEnvelope>(src_addr.clone()).unwrap();
+        let (_, mut rx) = channel::serve::<MessageEnvelope>(src_addr.clone(), "test").unwrap();
 
         let router = ReportingRouter::new();
 

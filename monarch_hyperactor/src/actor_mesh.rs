@@ -70,13 +70,22 @@ pub(crate) trait ActorMeshProtocol: Send + Sync {
 
     /// Get supervision events for this actor mesh.
     /// Returns None by default for implementations that don't support supervision events.
-    fn supervision_event(&self) -> PyResult<Option<PyShared>> {
+    fn supervision_event(&self, _instance: &PyInstance) -> PyResult<Option<PyShared>> {
         Ok(None)
+    }
+
+    /// Start supervision monitoring on this mesh.
+    /// This function is idempotent, and is used to start the channel that
+    /// will provide "supervision_event" with events.
+    /// The default implementation does nothing, and it is not required that
+    /// it has to be called before supervision_event.
+    fn start_supervision(&self, _instance: &PyInstance) -> PyResult<()> {
+        Ok(())
     }
 
     /// Stop the actor mesh asynchronously.
     /// Default implementation raises NotImplementedError for types that don't support stopping.
-    fn stop(&self) -> PyResult<PyPythonTask> {
+    fn stop(&self, _instance: &PyInstance) -> PyResult<PyPythonTask> {
         Err(PyNotImplementedError::new_err(format!(
             "stop() is not supported for {}",
             std::any::type_name::<Self>()
@@ -143,12 +152,16 @@ impl PythonActorMesh {
         Ok(PythonActorMesh { inner })
     }
 
-    fn supervision_event(&self) -> PyResult<Option<PyShared>> {
-        self.inner.supervision_event()
+    fn supervision_event(&self, instance: &PyInstance) -> PyResult<Option<PyShared>> {
+        self.inner.supervision_event(instance)
     }
 
-    fn stop(&self) -> PyResult<PyPythonTask> {
-        self.inner.stop()
+    fn start_supervision(&self, instance: &PyInstance) -> PyResult<()> {
+        self.inner.start_supervision(instance)
+    }
+
+    fn stop(&self, instance: &PyInstance) -> PyResult<PyPythonTask> {
+        self.inner.stop(instance)
     }
 
     fn initialized(&self) -> PyResult<PyPythonTask> {
@@ -292,7 +305,7 @@ impl ActorMeshProtocol for PythonActorMeshImpl {
         Ok(())
     }
 
-    fn supervision_event(&self) -> PyResult<Option<PyShared>> {
+    fn supervision_event(&self, _instance: &PyInstance) -> PyResult<Option<PyShared>> {
         let mut receiver = self.health_state.user_monitor_sender.subscribe();
         PyPythonTask::new(async move {
             let event = receiver.recv().await;
@@ -313,22 +326,26 @@ impl ActorMeshProtocol for PythonActorMeshImpl {
                 event.__repr__()?
             )))
         })
-        .map(|mut x| x.spawn().map(Some))?
+        // If the monitor is deleted, there's no need to keep awaiting this result.
+        .map(|mut x| x.spawn_abortable().map(Some))?
     }
 
     fn new_with_region(&self, region: &PyRegion) -> PyResult<Box<dyn ActorMeshProtocol>> {
         self.bind()?.new_with_region(region)
     }
 
-    fn stop<'py>(&self) -> PyResult<PyPythonTask> {
+    fn stop<'py>(&self, instance: &PyInstance) -> PyResult<PyPythonTask> {
         let actor_mesh = self.inner.clone();
+        let instance = Python::with_gil(|_| instance.clone());
         PyPythonTask::new(async move {
             let actor_mesh = actor_mesh
                 .take()
                 .await
                 .map_err(|_| PyRuntimeError::new_err("`ActorMesh` has already been stopped"))?;
-            actor_mesh.stop().await.map_err(|err| {
-                PyException::new_err(format!("Failed to stop actor mesh: {}", err))
+            instance_dispatch!(instance, |cx_instance| {
+                actor_mesh.stop(cx_instance).await.map_err(|err| {
+                    PyException::new_err(format!("Failed to stop actor mesh: {}", err))
+                })
             })?;
             Ok(())
         })
@@ -367,11 +384,15 @@ impl PythonActorMeshImpl {
         }
     }
 
-    fn supervision_event(&self) -> PyResult<Option<PyShared>> {
-        ActorMeshProtocol::supervision_event(self)
+    fn supervision_event(&self, instance: &PyInstance) -> PyResult<Option<PyShared>> {
+        ActorMeshProtocol::supervision_event(self, instance)
     }
-    fn stop(&self) -> PyResult<PyPythonTask> {
-        ActorMeshProtocol::stop(self)
+    fn start_supervision(&self, instance: &PyInstance) -> PyResult<()> {
+        ActorMeshProtocol::start_supervision(self, instance)
+    }
+
+    fn stop(&self, instance: &PyInstance) -> PyResult<PyPythonTask> {
+        ActorMeshProtocol::stop(self, instance)
     }
     // Consider defining a "PythonActorRef", which carries specifically
     // a reference to python message actors.
@@ -470,7 +491,7 @@ impl ActorMeshProtocol for PythonActorMeshRef {
         }))
     }
 
-    fn supervision_event(&self) -> PyResult<Option<PyShared>> {
+    fn supervision_event(&self, _instance: &PyInstance) -> PyResult<Option<PyShared>> {
         match self.root_health_state.as_ref().and_then(|x| x.upgrade()) {
             Some(root_health_state) => {
                 let mut receiver = root_health_state.user_monitor_sender.subscribe();
@@ -644,22 +665,41 @@ impl ActorMeshProtocol for AsyncActorMesh {
         mesh?.__reduce__(py)
     }
 
-    fn supervision_event(&self) -> PyResult<Option<PyShared>> {
+    fn supervision_event(&self, instance: &PyInstance) -> PyResult<Option<PyShared>> {
         if !self.supervised {
             return Ok(None);
         }
         let mesh = self.mesh.clone();
-        PyPythonTask::new(async {
-            let mut event = mesh.await?.supervision_event()?.unwrap();
+        let instance = Python::with_gil(|_py| instance.clone());
+        PyPythonTask::new(async move {
+            let mut event = mesh.await?.supervision_event(&instance)?.unwrap();
             event.task()?.take_task()?.await
         })
-        .map(|mut x| x.spawn().map(Some))?
+        // This task must be aborted to run the Drop for the inner PyShared, in
+        // case that one is also abortable.
+        .map(|mut x| x.spawn_abortable().map(Some))?
     }
 
-    fn stop(&self) -> PyResult<PyPythonTask> {
+    fn start_supervision(&self, instance: &PyInstance) -> PyResult<()> {
+        if !self.supervised {
+            return Ok(());
+        }
         let mesh = self.mesh.clone();
-        PyPythonTask::new(async {
-            let task = mesh.await?.stop()?.take_task()?;
+        let instance = Python::with_gil(|_py| instance.clone());
+        self.push(async move {
+            let mesh = mesh.await;
+            if let Ok(mesh) = mesh {
+                mesh.start_supervision(&instance).unwrap();
+            }
+        });
+        Ok(())
+    }
+
+    fn stop(&self, instance: &PyInstance) -> PyResult<PyPythonTask> {
+        let mesh = self.mesh.clone();
+        let instance = Python::with_gil(|_py| instance.clone());
+        PyPythonTask::new(async move {
+            let task = mesh.await?.stop(&instance)?.take_task()?;
             task.await
         })
     }
@@ -684,17 +724,17 @@ pub struct PyActorSupervisionEvent {
 
 #[pymethods]
 impl PyActorSupervisionEvent {
-    fn __repr__(&self) -> PyResult<String> {
+    pub(crate) fn __repr__(&self) -> PyResult<String> {
         Ok(format!("<PyActorSupervisionEvent: {}>", self.inner))
     }
 
     #[getter]
-    fn actor_id(&self) -> PyResult<PyActorId> {
+    pub(crate) fn actor_id(&self) -> PyResult<PyActorId> {
         Ok(PyActorId::from(self.inner.actor_id.clone()))
     }
 
     #[getter]
-    fn actor_status(&self) -> PyResult<String> {
+    pub(crate) fn actor_status(&self) -> PyResult<String> {
         Ok(self.inner.actor_status.to_string())
     }
 }

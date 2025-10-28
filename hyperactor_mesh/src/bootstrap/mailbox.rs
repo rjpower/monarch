@@ -120,16 +120,18 @@ mod tests {
             format!("unix:{}/first", dir.path().display())
                 .parse()
                 .unwrap(),
+            "test",
         )
         .unwrap();
         let (second_addr, mut second_rx) = channel::serve::<MessageEnvelope>(
             format!("unix:{}/second", dir.path().display())
                 .parse()
                 .unwrap(),
+            "test",
         )
         .unwrap();
         let (backend_addr, mut backend_rx) =
-            channel::serve::<MessageEnvelope>(ChannelTransport::Unix.any()).unwrap();
+            channel::serve::<MessageEnvelope>(ChannelTransport::Unix.any(), "test").unwrap();
 
         let local_addr: ChannelAddr = "tcp:3.4.5.6:123".parse().unwrap();
         let first_actor_id = ActorId(

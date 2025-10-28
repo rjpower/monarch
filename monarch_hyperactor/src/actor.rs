@@ -8,7 +8,6 @@
 
 use std::error::Error;
 use std::future::pending;
-use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -21,12 +20,17 @@ use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::OncePortHandle;
+use hyperactor::ProcId;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::Undeliverable;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;
 use hyperactor::message::Unbind;
+use hyperactor::reference::WorldId;
+use hyperactor_mesh::actor_mesh::CAST_ACTOR_MESH_ID;
+use hyperactor_mesh::comm::multicast::CAST_ORIGINATING_SENDER;
 use hyperactor_mesh::comm::multicast::CastInfo;
+use hyperactor_mesh::reference::ActorMeshId;
 use monarch_types::PickledPyObject;
 use monarch_types::SerializablePyErr;
 use pyo3::IntoPyObjectExt;
@@ -63,6 +67,8 @@ use crate::proc::PyProc;
 use crate::proc::PySerialized;
 use crate::pytokio::PythonTask;
 use crate::runtime::signal_safe_block_on;
+use crate::supervision::MeshFailure;
+use crate::supervision::SupervisionFailureMessage;
 
 #[pyclass(frozen, module = "monarch._rust_bindings.monarch_hyperactor.actor")]
 #[derive(Serialize, Deserialize, Named)]
@@ -449,8 +455,8 @@ impl PythonActorHandle {
 
 #[derive(Debug)]
 enum UnhandledErrorObserver {
-    ForwardTo(UnboundedReceiver<anyhow::Result<(), SerializablePyErr>>),
-    HandlerActor(ActorHandle<PythonActorPanicWatcher>),
+    ForwardTo(UnboundedReceiver<SerializablePyErr>),
+    HandlerActor(ActorHandle<EndpointPanic2SupervisionEvent>),
     None,
 }
 
@@ -460,6 +466,7 @@ enum UnhandledErrorObserver {
     spawn = true,
     handlers = [
         PythonMessage { cast = true },
+        SupervisionFailureMessage { cast = true },
     ],
 )]
 pub struct PythonActor {
@@ -471,7 +478,7 @@ pub struct PythonActor {
     /// This is None when using single runtime mode, Some when using per-actor mode.
     task_locals: Option<pyo3_async_runtimes::TaskLocals>,
     panic_watcher: UnhandledErrorObserver,
-    panic_sender: UnboundedSender<anyhow::Result<(), SerializablePyErr>>,
+    panic_sender: UnboundedSender<SerializablePyErr>,
 
     /// instance object that we keep across handle calls
     /// so that we can store information from the Init (spawn rank, controller controller)
@@ -489,6 +496,47 @@ impl PythonActor {
             Python::allow_threads(py, || SHARED_TASK_LOCALS.get_or_init(create_task_locals))
         })
     }
+}
+
+/// An undeliverable might have its sender address set as the comm actor instead
+/// of the original sender. Update it based on the headers present in the message
+/// so it matches the sender.
+fn update_undeliverable_envelope_for_casting(
+    mut envelope: Undeliverable<MessageEnvelope>,
+) -> Undeliverable<MessageEnvelope> {
+    let old_actor = envelope.0.sender().clone();
+    // v1 casting
+    if let Some(actor_id) = envelope.0.headers().get(CAST_ORIGINATING_SENDER).cloned() {
+        tracing::debug!(
+            actor_id = %old_actor,
+            "PythonActor::handle_undeliverable_message: remapped comm-actor id to id from CAST_ORIGINATING_SENDER {}", actor_id
+        );
+        envelope.0.update_sender(actor_id);
+    // v0 casting
+    } else if let Some(actor_mesh_id) = envelope.0.headers().get(CAST_ACTOR_MESH_ID) {
+        match actor_mesh_id {
+            ActorMeshId::V0(proc_mesh_id, actor_name) => {
+                let actor_id = ActorId(
+                    ProcId::Ranked(WorldId(proc_mesh_id.0.clone()), 0),
+                    actor_name.clone(),
+                    0,
+                );
+                tracing::debug!(
+                    actor_id = %old_actor,
+                    "PythonActor::handle_undeliverable_message: remapped comm-actor id to mesh id from CAST_ACTOR_MESH_ID {}", actor_id
+                );
+                envelope.0.update_sender(actor_id);
+            }
+            ActorMeshId::V1(_) => {
+                tracing::debug!(
+                    "PythonActor::handle_undeliverable_message: headers present but V1 ActorMeshId; leaving actor_id unchanged"
+                );
+            }
+        }
+    } else {
+        // Do nothing, it wasn't from a comm actor.
+    }
+    envelope
 }
 
 #[async_trait]
@@ -519,7 +567,7 @@ impl Actor for PythonActor {
         self.panic_watcher = UnhandledErrorObserver::HandlerActor(
             match std::mem::replace(&mut self.panic_watcher, UnhandledErrorObserver::None) {
                 UnhandledErrorObserver::ForwardTo(chan) => {
-                    PythonActorPanicWatcher::spawn(this, chan).await?
+                    EndpointPanic2SupervisionEvent::spawn(this, chan).await?
                 }
                 UnhandledErrorObserver::HandlerActor(_actor) => {
                     panic!("init called twice");
@@ -535,9 +583,21 @@ impl Actor for PythonActor {
     async fn handle_undeliverable_message(
         &mut self,
         ins: &Instance<Self>,
-        envelope: Undeliverable<MessageEnvelope>,
+        mut envelope: Undeliverable<MessageEnvelope>,
     ) -> Result<(), anyhow::Error> {
-        assert_eq!(envelope.0.sender(), ins.self_id());
+        if envelope.0.sender() != ins.self_id() {
+            // This can happen if the sender is comm. Update the envelope.
+            envelope = update_undeliverable_envelope_for_casting(envelope);
+        }
+        assert_eq!(
+            envelope.0.sender(),
+            ins.self_id(),
+            "undeliverable message was returned to the wrong actor. \
+            Return address = {}, src actor = {}, dest actor port = {}",
+            envelope.0.sender(),
+            ins.self_id(),
+            envelope.0.dest()
+        );
 
         let cx = Context::new(ins, envelope.0.headers().clone());
 
@@ -660,41 +720,43 @@ impl PanicFlag {
     }
 }
 
+/// The sole reason why this Actor exists as opposed to a background task is because returning Err in an Actor message
+/// handler is how we can surface supervision events.
+///
+/// We call this actor EndpointPanic2SupervisionEvent because it's only responsibility is to turn endpoint panics into supervision events
 #[derive(Debug)]
-struct PythonActorPanicWatcher {
-    panic_rx: UnboundedReceiver<anyhow::Result<(), SerializablePyErr>>,
+struct EndpointPanic2SupervisionEvent {
+    endpoint_panic_rx: UnboundedReceiver<SerializablePyErr>,
 }
 
 #[async_trait]
-impl Actor for PythonActorPanicWatcher {
-    type Params = UnboundedReceiver<anyhow::Result<(), SerializablePyErr>>;
+impl Actor for EndpointPanic2SupervisionEvent {
+    type Params = UnboundedReceiver<SerializablePyErr>;
 
     async fn new(
-        panic_rx: UnboundedReceiver<anyhow::Result<(), SerializablePyErr>>,
+        endpoint_panic_rx: UnboundedReceiver<SerializablePyErr>,
     ) -> Result<Self, anyhow::Error> {
-        Ok(Self { panic_rx })
+        Ok(Self { endpoint_panic_rx })
     }
 
     async fn init(&mut self, this: &Instance<Self>) -> Result<(), anyhow::Error> {
-        this.handle().send(HandlePanic {})?;
+        this.handle().send(WatchForEndpointPanics)?;
         Ok(())
     }
 }
 
 #[derive(Debug, Named, Serialize, Deserialize)]
-struct HandlePanic {}
+struct WatchForEndpointPanics;
 
 #[async_trait]
-impl Handler<HandlePanic> for PythonActorPanicWatcher {
-    async fn handle(&mut self, cx: &Context<Self>, _message: HandlePanic) -> anyhow::Result<()> {
-        match self.panic_rx.recv().await {
-            Some(Ok(_)) => {
-                // async endpoint executed successfully.
-                // run again
-                let h = cx.deref().handle();
-                h.send(HandlePanic {})?;
-            }
-            Some(Err(err)) => {
+impl Handler<WatchForEndpointPanics> for EndpointPanic2SupervisionEvent {
+    async fn handle(
+        &mut self,
+        _cx: &Context<Self>,
+        _message: WatchForEndpointPanics,
+    ) -> anyhow::Result<()> {
+        match self.endpoint_panic_rx.recv().await {
+            Some(err) => {
                 tracing::error!("caught error in async endpoint {}", err);
                 return Err(err.into());
             }
@@ -764,8 +826,77 @@ impl Handler<PythonMessage> for PythonActor {
     }
 }
 
+#[async_trait]
+impl Handler<SupervisionFailureMessage> for PythonActor {
+    async fn handle(
+        &mut self,
+        cx: &Context<Self>,
+        message: SupervisionFailureMessage,
+    ) -> anyhow::Result<()> {
+        Python::with_gil(|py| {
+            let instance = self.instance.get_or_insert_with(|| {
+                let instance: crate::context::PyInstance = cx.into();
+                instance.into_pyobject(py).unwrap().into()
+            });
+            let actor = self.actor.bind(py);
+            // The _Actor class always has a __supervise__ method, so this should
+            // never happen.
+            if !actor.hasattr("__supervise__")? {
+                return Err(anyhow::anyhow!("no __supervise__ method on {:?}", actor));
+            }
+            let result = actor.call_method(
+                "__supervise__",
+                (
+                    crate::context::PyContext::new(cx, instance.clone_ref(py)),
+                    MeshFailure::from(message.clone()),
+                ),
+                None,
+            );
+            match result {
+                Ok(s) => {
+                    if s.is_truthy()? {
+                        // If the return value is truthy, then the exception was handled
+                        // and doesn't need to be propagated.
+                        // TODO: We also don't want to deliver multiple supervision
+                        // events from the same mesh if an earlier one is handled.
+                        tracing::info!(
+                            "__supervise__ on {} handled a supervision event, not reporting any further: {}",
+                            cx.self_id(),
+                            message.event
+                        );
+                        Ok(())
+                    } else {
+                        // For a falsey return value, we propagate the supervision event
+                        // to the next owning actor. We do this by returning a new
+                        // error. This will not set the causal chain for ActorSupervisionEvent,
+                        // so make sure to include the original event in the error message
+                        // to provide context.
+                        Err(anyhow::anyhow!(
+                            "__supervise__ on {} did not handle a supervision event, \
+                            propagating to next owner. Original event:\n{}",
+                            cx.self_id(),
+                            message.event
+                        ))
+                    }
+                }
+                Err(err) => {
+                    // Any other exception will supersede in the propagation chain,
+                    // and will become its own supervision failure.
+                    // Include the event it was handling in the error message.
+                    Err(anyhow::anyhow!(
+                        "__supervise__ on {} raised an exception while handling a supervision event. Original event: {}. Exception raised: {}",
+                        cx.self_id(),
+                        message.event,
+                        err
+                    ))
+                }
+            }
+        })
+    }
+}
+
 async fn handle_async_endpoint_panic(
-    panic_sender: UnboundedSender<anyhow::Result<(), SerializablePyErr>>,
+    panic_sender: UnboundedSender<SerializablePyErr>,
     task: PythonTask,
     side_channel: oneshot::Receiver<PyObject>,
 ) {
@@ -773,13 +904,13 @@ async fn handle_async_endpoint_panic(
         // The side channel will resolve with a value if a panic occured during
         // processing of the async endpoint, see [Panics in async endpoints].
         match side_channel.await {
-            Ok(value) => Python::with_gil(|py| -> anyhow::Result<(), SerializablePyErr> {
+            Ok(value) => Python::with_gil(|py| -> Option<SerializablePyErr> {
                 let err: PyErr = value
                     .downcast_bound::<PyBaseException>(py)
                     .unwrap()
                     .clone()
                     .into();
-                Err(err.into())
+                Some(err.into())
             }),
             // An Err means that the sender has been dropped without sending.
             // That's okay, it just means that the Python task has completed.
@@ -789,20 +920,21 @@ async fn handle_async_endpoint_panic(
         }
     };
     let future = task.take();
-    let result: anyhow::Result<(), SerializablePyErr> = tokio::select! {
+    if let Some(panic) = tokio::select! {
         result = future => {
             match result {
-                Ok(_) => Ok(()),
-                Err(e) => Err(e.into()),
+                Ok(_) => None,
+                Err(e) => Some(e.into()),
             }
         },
         result = err_or_never => {
             result
         }
-    };
-    panic_sender
-        .send(result)
-        .expect("Unable to send panic message");
+    } {
+        panic_sender
+            .send(panic)
+            .expect("Unable to send panic message");
+    }
 }
 
 #[pyclass(module = "monarch._rust_bindings.monarch_hyperactor.actor")]
@@ -851,8 +983,15 @@ mod tests {
     use hyperactor::message::ErasedUnbound;
     use hyperactor::message::Unbound;
     use hyperactor::reference::UnboundPort;
+    use hyperactor_mesh::resource::Status;
+    use hyperactor_mesh::resource::{self};
+    use hyperactor_mesh::v1::Error as MeshError;
+    use hyperactor_mesh::v1::Name;
+    use hyperactor_mesh::v1::host_mesh::mesh_agent::ProcState;
+    use pyo3::PyTypeInfo;
 
     use super::*;
+    use crate::actor::to_py_error;
 
     #[test]
     fn test_python_message_bind_unbind() {
@@ -909,5 +1048,40 @@ mod tests {
             let unbound = Unbound::try_from_message(no_port_message.clone()).unwrap();
             assert_eq!(no_port_message, unbound.bind().unwrap());
         }
+    }
+
+    #[test]
+    fn to_py_error_preserves_proc_creation_message() {
+        // State<ProcState> w/ `state.is_none()`
+        let state: resource::State<ProcState> = resource::State {
+            name: Name::new("my_proc"),
+            status: Status::Failed("boom".into()),
+            state: None,
+        };
+
+        // A ProcCreationError
+        let err = MeshError::ProcCreationError {
+            host_rank: 0,
+            mesh_agent: hyperactor::ActorRef::attest(id!(hello[0].actor[0])),
+            state,
+        };
+
+        let rust_msg = err.to_string();
+        let pyerr = to_py_error(err);
+
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert!(pyerr.get_type(py).is(&PyValueError::type_object(py)));
+            let py_msg = pyerr.value(py).to_string();
+
+            // 1) Bridge preserves the exact message
+            assert_eq!(py_msg, rust_msg);
+            // 2) Contains the structured state and failure status
+            assert!(py_msg.contains(", state: "));
+            assert!(py_msg.contains("\"status\":{\"Failed\":\"boom\"}"));
+            // 3) Starts with the expected prefix
+            let expected_prefix = "error creating proc (host rank 0) on host mesh agent hello[0].actor[0]<hyperactor_mesh::v1::host_mesh::mesh_agent::HostMeshAgent>";
+            assert!(py_msg.starts_with(expected_prefix));
+        });
     }
 }

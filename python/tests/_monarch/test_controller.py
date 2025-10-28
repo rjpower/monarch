@@ -8,6 +8,8 @@
 
 from unittest import TestCase
 
+import pytest
+
 from monarch._rust_bindings.monarch_extension import (  # @manual=//monarch/monarch_extension:monarch_extension
     controller,
     tensor_worker,

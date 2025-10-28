@@ -334,7 +334,7 @@ impl Proc {
 
     /// Create a new direct-addressed proc.
     pub async fn direct(addr: ChannelAddr, name: String) -> Result<Self, ChannelError> {
-        let (addr, rx) = channel::serve(addr)?;
+        let (addr, rx) = channel::serve(addr, &format!("creating Proc::direct: {}", name))?;
         let proc_id = ProcId::Direct(addr, name);
         let proc = Self::new(proc_id, DialMailboxRouter::new().into_boxed());
         proc.clone().serve(rx);
@@ -347,7 +347,10 @@ impl Proc {
         name: String,
         default: BoxedMailboxSender,
     ) -> Result<Self, ChannelError> {
-        let (addr, rx) = channel::serve(addr)?;
+        let (addr, rx) = channel::serve(
+            addr,
+            &format!("creating Proc::direct_with_default: {}", name),
+        )?;
         let proc_id = ProcId::Direct(addr, name);
         let proc = Self::new(
             proc_id,
@@ -477,8 +480,7 @@ impl Proc {
         R: Referable + RemoteHandles<M>,
     {
         let (instance, _handle) = self.instance(name)?;
-        let (handle, rx) = instance.open_port::<M>();
-        handle.bind_to(M::port());
+        let (_handle, rx) = instance.bind_actor_port::<M>();
         let actor_ref = ActorRef::attest(instance.self_id().clone());
         Ok((instance, actor_ref, rx))
     }
@@ -1007,7 +1009,6 @@ impl<A: Actor> Instance<A> {
     }
 
     /// Signal the actor to stop.
-    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `ActorError`.
     pub fn stop(&self) -> Result<(), ActorError> {
         tracing::info!("Instance::stop called, {}", self.cell.actor_id());
         self.cell.signal(Signal::DrainAndStop)
@@ -1034,7 +1035,6 @@ impl<A: Actor> Instance<A> {
     }
 
     /// Send a message to the actor itself with a delay usually to trigger some event.
-    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `ActorError`.
     pub fn self_message_with_delay<M>(&self, message: M, delay: Duration) -> Result<(), ActorError>
     where
         M: Message,
@@ -1097,7 +1097,7 @@ impl<A: Actor> Instance<A> {
         let (actor_status, event) = match result {
             Ok(_) => (ActorStatus::Stopped, None),
             Err(ActorError {
-                kind: ActorErrorKind::UnhandledSupervisionEvent(event),
+                kind: box ActorErrorKind::UnhandledSupervisionEvent(event),
                 ..
             }) => (event.actor_status.clone(), Some(event)),
             Err(err) => (
@@ -1168,7 +1168,7 @@ impl<A: Actor> Instance<A> {
                 let backtrace = panic_handler::take_panic_backtrace()
                     .unwrap_or_else(|e| format!("Cannot take backtrace due to: {:?}", e));
                 Err(ActorError::new(
-                    self.self_id().clone(),
+                    self.self_id(),
                     ActorErrorKind::Panic(anyhow::anyhow!("{}\n{}", err_msg, backtrace)),
                 ))
             }
@@ -1200,8 +1200,25 @@ impl<A: Actor> Instance<A> {
 
         let (mut signal_receiver, _) = actor_loop_receivers;
         while self.cell.child_count() > 0 {
-            if let Signal::ChildStopped(pid) = signal_receiver.recv().await? {
-                assert!(self.cell.get_child(pid).is_none());
+            match RealClock
+                .timeout(Duration::from_millis(500), signal_receiver.recv())
+                .await
+            {
+                Ok(signal) => {
+                    if let Signal::ChildStopped(pid) = signal? {
+                        assert!(self.cell.get_child(pid).is_none());
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "timeout waiting for ChildStopped signal from child on actor: {}, ignoring",
+                        self.self_id()
+                    );
+                    // No more waiting to receive messages. Unlink all remaining
+                    // children.
+                    self.cell.unlink_all();
+                    break;
+                }
             }
         }
 
@@ -1222,7 +1239,7 @@ impl<A: Actor> Instance<A> {
         actor
             .init(self)
             .await
-            .map_err(|err| ActorError::new(self.self_id().clone(), ActorErrorKind::Init(err)))?;
+            .map_err(|err| ActorError::new(self.self_id(), ActorErrorKind::Init(err)))?;
         let need_drain;
         'messages: loop {
             self.change_status(ActorStatus::Idle);
@@ -1238,7 +1255,7 @@ impl<A: Actor> Instance<A> {
                         for supervision_event in supervision_event_receiver.drain() {
                             self.handle_supervision_event(actor, supervision_event).await?;
                         }
-                        return Err(ActorError::new(self.self_id().clone(), ActorErrorKind::Processing(err)));
+                        return Err(ActorError::new(self.self_id(), ActorErrorKind::Processing(err)));
                     }
                 }
                 signal = signal_receiver.recv() => {
@@ -1270,7 +1287,7 @@ impl<A: Actor> Instance<A> {
             while let Ok(work) = work_rx.try_recv() {
                 if let Err(err) = work.handle(actor, self).await {
                     return Err(ActorError::new(
-                        self.self_id().clone(),
+                        self.self_id(),
                         ActorErrorKind::Processing(err),
                     ));
                 }
@@ -1509,6 +1526,17 @@ impl<A: Actor> context::Actor for &Context<'_, A> {
     }
 }
 
+impl Instance<()> {
+    /// See [Mailbox::bind_actor_port] for details.
+    pub fn bind_actor_port<M: RemoteMessage>(&self) -> (PortHandle<M>, PortReceiver<M>) {
+        assert!(
+            self.actor_task_handle().is_none(),
+            "can only bind actor port on instance with no running actor task"
+        );
+        self.mailbox.bind_actor_port()
+    }
+}
+
 #[derive(Debug)]
 enum ActorType {
     Named(&'static TypeInfo),
@@ -1654,7 +1682,6 @@ impl InstanceCell {
     }
 
     /// Send a signal to the actor.
-    #[allow(clippy::result_large_err)] // TODO: Consider reducing the size of `ActorError`.
     pub fn signal(&self, signal: Signal) -> Result<(), ActorError> {
         if let Some((signal_port, _)) = &self.inner.actor_loop {
             signal_port.send(signal).map_err(ActorError::from)
@@ -1716,6 +1743,11 @@ impl InstanceCell {
     fn unlink(&self, child: &InstanceCell) {
         assert_eq!(self.actor_id().proc_id(), child.actor_id().proc_id());
         self.inner.children.remove(&child.pid());
+    }
+
+    /// Unlink this instance from all children.
+    fn unlink_all(&self) {
+        self.inner.children.clear();
     }
 
     /// Link this instance to its parent, if it has one.
@@ -1947,24 +1979,15 @@ impl<A: Actor> Ports<A> {
         }
     }
 
-    /// Bind the given message type to its default port.
+    /// Bind the given message type to its actor port.
     pub fn bind<M: RemoteMessage>(&self)
     where
         A: Handler<M>,
     {
-        self.bind_to::<M>(M::port());
-    }
-
-    /// Bind the given message type to the provided port.
-    /// Ports cannot be rebound to different message types;
-    /// and attempting to do so will result in a panic.
-    pub fn bind_to<M: RemoteMessage>(&self, port_index: u64)
-    where
-        A: Handler<M>,
-    {
+        let port_index = M::port();
         match self.bound.entry(port_index) {
             Entry::Vacant(entry) => {
-                self.get::<M>().bind_to(port_index);
+                self.get::<M>().bind_actor_port();
                 entry.insert(M::typename());
             }
             Entry::Occupied(entry) => {

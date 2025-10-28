@@ -13,6 +13,7 @@ import functools
 import inspect
 import itertools
 import logging
+import threading
 from abc import abstractproperty
 
 from dataclasses import dataclass
@@ -49,6 +50,8 @@ from monarch._rust_bindings.monarch_hyperactor.actor import (
 )
 from monarch._rust_bindings.monarch_hyperactor.actor_mesh import PythonActorMesh
 from monarch._rust_bindings.monarch_hyperactor.buffers import FrozenBuffer
+from monarch._rust_bindings.monarch_hyperactor.channel import ChannelTransport
+from monarch._rust_bindings.monarch_hyperactor.config import configure
 from monarch._rust_bindings.monarch_hyperactor.context import Instance as HyInstance
 from monarch._rust_bindings.monarch_hyperactor.mailbox import (
     Mailbox,
@@ -84,7 +87,7 @@ from monarch._src.actor.pickle import flatten, unflatten
 from monarch._src.actor.python_extension_methods import rust_struct
 from monarch._src.actor.shape import MeshTrait, NDSlice
 from monarch._src.actor.sync_state import fake_sync_state
-from monarch._src.actor.telemetry import METER, TracingForwarder
+from monarch._src.actor.telemetry import METER
 from monarch._src.actor.tensor_engine_shim import actor_rref, actor_send
 from typing_extensions import Self
 
@@ -92,17 +95,13 @@ if TYPE_CHECKING:
     from monarch._rust_bindings.monarch_hyperactor.actor import PortProtocol
     from monarch._rust_bindings.monarch_hyperactor.actor_mesh import ActorMeshProtocol
     from monarch._rust_bindings.monarch_hyperactor.mailbox import PortReceiverBase
+    from monarch._src.actor.host_mesh import HostMesh
     from monarch._src.actor.proc_mesh import _ControllerController, ProcMesh
-    from monarch._src.actor.v1.proc_mesh import (
-        _ControllerController as _ControllerControllerV1,
-        ProcMesh as ProcMeshV1,
-    )
 from monarch._src.actor.telemetry import get_monarch_tracer
 
 CallMethod = PythonMessageKind.CallMethod
 
 logger: logging.Logger = logging.getLogger(__name__)
-logging.root.addHandler(TracingForwarder(level=logging.DEBUG))
 
 TRACER = get_monarch_tracer()
 
@@ -147,7 +146,7 @@ class Instance(abc.ABC):
         ...
 
     @property
-    def proc(self) -> "ProcMesh | ProcMeshV1":
+    def proc(self) -> "ProcMesh":
         """
         The singleton proc mesh that corresponds to just this actor.
         """
@@ -160,14 +159,14 @@ class Instance(abc.ABC):
     The actors __init__ message.
     """
     rank: Point
-    proc_mesh: "ProcMesh | ProcMeshV1"
-    _controller_controller: "_ControllerController | _ControllerControllerV1"
+    proc_mesh: "ProcMesh"
+    _controller_controller: "_ControllerController"
 
     # this property is used to hold the handles to actors and processes launched by this actor
     # in order to keep them alive until this actor exits.
-    _children: "Optional[List[ActorMesh | ProcMesh | ProcMeshV1]]"
+    _children: "Optional[List[ActorMesh | ProcMesh]]"
 
-    def _add_child(self, child: "ActorMesh | ProcMesh | ProcMeshV1") -> None:
+    def _add_child(self, child: "ActorMesh | ProcMesh") -> None:
         if self._children is None:
             self._children = [child]
         else:
@@ -211,6 +210,49 @@ _context: contextvars.ContextVar[Context] = contextvars.ContextVar(
     "monarch.actor_mesh._context"
 )
 
+T = TypeVar("T")
+
+
+class _Lazy(Generic[T]):
+    def __init__(self, init: Callable[[], T]) -> None:
+        self._lock = threading.Lock()
+        self._val: Optional[T] = None
+        self._init = init
+
+    def get(self) -> T:
+        with self._lock:
+            if not self._val:
+                self._val = self._init()
+            return self._val
+
+    def try_get(self) -> Optional[T]:
+        return self._val
+
+
+def _init_this_host_for_fake_in_process_host() -> "HostMesh":
+    from monarch._src.actor.host_mesh import create_local_host_mesh
+
+    return create_local_host_mesh()
+
+
+_this_host_for_fake_in_process_host: _Lazy["HostMesh"] = _Lazy(
+    _init_this_host_for_fake_in_process_host
+)
+
+
+def _init_root_proc_mesh() -> "ProcMesh":
+    from monarch._src.actor.host_mesh import fake_in_process_host
+
+    return fake_in_process_host()._spawn_nonblocking(
+        name="root_client_proc_mesh",
+        per_host=Extent([], []),
+        setup=None,
+        _attach_controller_controller=False,  # can't attach the controller controller because it doesn't exist yet
+    )
+
+
+_root_proc_mesh: _Lazy["ProcMesh"] = _Lazy(_init_root_proc_mesh)
+
 
 def context() -> Context:
     c = _context.get(None)
@@ -218,16 +260,70 @@ def context() -> Context:
         c = Context._root_client_context()
         _context.set(c)
 
-        # FIXME: Switch to the v1 APIs when it becomes the default.
         from monarch._src.actor.host_mesh import create_local_host_mesh
         from monarch._src.actor.proc_mesh import _get_controller_controller
+        from monarch._src.actor.v1 import enabled as v1_enabled
 
-        c.actor_instance.proc_mesh, c.actor_instance._controller_controller = (
-            _get_controller_controller()
+        if not v1_enabled:
+            c.actor_instance.proc_mesh, c.actor_instance._controller_controller = (
+                _get_controller_controller()
+            )
+
+            c.actor_instance.proc_mesh._host_mesh = create_local_host_mesh()  # type: ignore
+        else:
+            c.actor_instance.proc_mesh = _root_proc_mesh.get()
+
+            # This needs to be initialized when the root client context is initialized.
+            # Otherwise, it will be initialized inside an actor endpoint running inside
+            # a fake in-process host. That will fail with an "unroutable mesh" error,
+            # because the hyperactor Proc being used to spawn the local host mesh
+            # won't have the correct type of forwarder.
+            _this_host_for_fake_in_process_host.get()
+
+            c.actor_instance._controller_controller = _get_controller_controller()[1]
+    return c
+
+
+_transport: Optional[ChannelTransport] = None
+_transport_lock = threading.Lock()
+
+
+def enable_transport(transport: "ChannelTransport | str") -> None:
+    """
+    Allow monarch to communicate with transport type 'transport'
+    This must be called before any other calls in the monarch API.
+    If it isn't called, we will implicitly call
+    `monarch.enable_transport(ChannelTransport.Unix)` on the first monarch call.
+
+    Currently only one transport type may be enabled at one time.
+    In the future we may allow multiple to be enabled.
+    """
+    if isinstance(transport, str):
+        transport = {
+            "tcp": ChannelTransport.TcpWithHostname,
+            "ipc": ChannelTransport.Unix,
+            "metatls": ChannelTransport.MetaTlsWithIpV6,
+        }.get(transport)
+        if transport is None:
+            raise ValueError(f"unknown transport: {transport}")
+
+    if _context.get(None) is not None:
+        raise RuntimeError(
+            "`enable_transport()` must be called before any other calls in the monarch API. "
+            "If it isn't called, we will implicitly call `monarch.enable_transport(ChannelTransport.Unix)` "
+            "on the first monarch call."
         )
 
-        c.actor_instance.proc_mesh._host_mesh = create_local_host_mesh()  # type: ignore
-    return c
+    global _transport
+    with _transport_lock:
+        if _transport is not None and _transport != transport:
+            raise RuntimeError(
+                f"Only one transport type may be enabled at one time. "
+                f"Currently enabled transport type is `{_transport}`. "
+                f"Attempted to enable transport type `{transport}`."
+            )
+        _transport = transport
+    configure(default_transport=transport)
 
 
 @dataclass
@@ -271,10 +367,13 @@ class _SingletonActorAdapator:
     def new_with_region(self, region: Region) -> "ActorMeshProtocol":
         return _SingletonActorAdapator(self._inner, self._region)
 
-    def supervision_event(self) -> "Optional[Shared[Exception]]":
+    def supervision_event(self, instance: HyInstance) -> "Optional[Shared[Exception]]":
         return None
 
-    def stop(self) -> "PythonTask[None]":
+    def start_supervision(self, instance: HyInstance) -> None:
+        return None
+
+    def stop(self, instance: HyInstance) -> "PythonTask[None]":
         raise NotImplementedError("stop()")
 
     def initialized(self) -> "PythonTask[None]":
@@ -289,7 +388,7 @@ class ActorEndpoint(Endpoint[P, R]):
         self,
         actor_mesh: "ActorMeshProtocol",
         shape: Shape,
-        proc_mesh: "Optional[ProcMesh] | Optional[ProcMeshV1]",
+        proc_mesh: "Optional[ProcMesh]",
         name: MethodSpecifier,
         impl: Callable[Concatenate[Any, P], Awaitable[R]],
         propagator: Propagator,
@@ -343,7 +442,10 @@ class ActorEndpoint(Endpoint[P, R]):
 
     def _port(self, once: bool = False) -> "Tuple[Port[R], PortReceiver[R]]":
         p, r = super()._port(once=once)
-        monitor: Optional[Shared[Exception]] = self._actor_mesh.supervision_event()
+        instance = context().actor_instance._as_rust()
+        monitor: Optional[Shared[Exception]] = self._actor_mesh.supervision_event(
+            instance
+        )
         r._set_monitor(monitor)
         return (p, r)
 
@@ -493,6 +595,16 @@ class ValueMesh(MeshTrait, Generic[R]):
         extent = self._shape.extent
         for i, _global_rank in enumerate(self._shape.ranks()):
             yield Point(i, extent), self._hy.get(i)
+
+    def values(self) -> Iterable[R]:
+        """
+        Generator that iterates over just the values in the mesh.
+
+        Returns:
+            Values at all coordinates.
+        """
+        for _, value in self.items():
+            yield value
 
     def __iter__(self) -> Iterator[Tuple[Point, R]]:
         return iter(self.items())
@@ -805,34 +917,38 @@ class _Actor:
                 raise AssertionError(error_message)
 
             the_method = getattr(self.instance, method_name)
+            should_instrument = False
+
             if isinstance(the_method, EndpointProperty):
+                should_instrument = the_method._instrument
                 the_method = functools.partial(the_method._method, self.instance)
 
             if inspect.iscoroutinefunction(the_method):
-
-                async def instrumented():
-                    with TRACER.start_as_current_span(
-                        method_name,
-                        attributes={"actor_id": str(ctx.actor_instance.actor_id)},
-                    ):
-                        try:
+                try:
+                    if should_instrument:
+                        with TRACER.start_as_current_span(
+                            method_name,
+                            attributes={"actor_id": str(ctx.actor_instance.actor_id)},
+                        ):
                             result = await the_method(*args, **kwargs)
-                            self._maybe_exit_debugger()
-                        except Exception as e:
-                            logging.critical(
-                                "Unhandled exception in actor endpoint",
-                                exc_info=e,
-                            )
-                            raise e
-                    return result
-
-                result = await instrumented()
+                    else:
+                        result = await the_method(*args, **kwargs)
+                    self._maybe_exit_debugger()
+                except Exception as e:
+                    logging.critical(
+                        "Unhandled exception in actor endpoint",
+                        exc_info=e,
+                    )
+                    raise e
             else:
-                with TRACER.start_as_current_span(
-                    method_name,
-                    attributes={"actor_id": str(ctx.actor_instance.actor_id)},
-                ):
-                    with fake_sync_state():
+                with fake_sync_state():
+                    if should_instrument:
+                        with TRACER.start_as_current_span(
+                            method_name,
+                            attributes={"actor_id": str(ctx.actor_instance.actor_id)},
+                        ):
+                            result = the_method(*args, **kwargs)
+                    else:
                         result = the_method(*args, **kwargs)
                     self._maybe_exit_debugger()
 
@@ -888,6 +1004,41 @@ class _Actor:
             return handle_undeliverable(message)
         else:
             return False
+
+    def __supervise__(self, cx: Context, *args, **kwargs) -> object:
+        _context.set(cx)
+        instance = self.instance
+        if instance is None:
+            # This could happen because of the following reasons. Both
+            # indicates a possible bug in the framework:
+            # 1. the execution of the previous message for "__init__" failed,
+            #    but that error is not surfaced to the caller.
+            #      - TODO(T229200522): there is a known bug. fix it.
+            # 2. this message is delivered to this actor before the previous
+            #    message of "__init__" is delivered. Out-of-order delivery
+            #    should never happen. It indicates either a bug in the
+            #    message delivery mechanism, or the framework accidentally
+            #    mixed the usage of cast and direct send.
+
+            error_message = f"Actor object is missing when executing method __supervise__ on actor {cx.actor_instance.actor_id}."
+            if self._saved_error is not None:
+                error_message += (
+                    f" This is likely due to an earlier error: {self._saved_error}"
+                )
+            raise AssertionError(error_message)
+
+        # Forward a call to supervise on this actor to the user-provided instance.
+        if hasattr(instance, "__supervise__"):
+            # pyre-fixme[16]: Caller needs to handle the case where instance is None.
+            return instance.__supervise__(*args, **kwargs)
+        else:
+            # If there is no __supervise__ method, the default would be to return
+            # None. That means the supervision error is not handled and will be
+            # propagated to the next owner.
+            return None
+
+    def __repr__(self) -> str:
+        return f"_Actor(instance={self.instance!r})"
 
 
 def _is_mailbox(x: object) -> bool:
@@ -959,13 +1110,20 @@ class ActorMesh(MeshTrait, Generic[T]):
         Class: Type[T],
         inner: "ActorMeshProtocol",
         shape: Shape,
-        proc_mesh: "Optional[ProcMesh] | Optional[ProcMeshV1]",
+        proc_mesh: "Optional[ProcMesh]",
     ) -> None:
         self.__name__: str = Class.__name__
         self._class: Type[T] = Class
         self._inner: "ActorMeshProtocol" = inner
         self._shape = shape
         self._proc_mesh = proc_mesh
+        # We don't start the supervision polling loop until the first call to
+        # supervision_event, which needs an Instance. Initialize here so events
+        # can be collected even without any endpoints being awaited.
+        self._inner.start_supervision(context().actor_instance._as_rust())
+
+        async_endpoints = []
+        sync_endpoints = []
         for attr_name in dir(self._class):
             attr_value = getattr(self._class, attr_name, None)
             if isinstance(attr_value, EndpointProperty):
@@ -985,6 +1143,17 @@ class ActorMesh(MeshTrait, Generic[T]):
                         attr_value._explicit_response_port,
                     ),
                 )
+                if inspect.iscoroutinefunction(attr_value._method):
+                    async_endpoints.append(attr_name)
+                else:
+                    sync_endpoints.append(attr_name)
+
+        if sync_endpoints and async_endpoints:
+            raise ValueError(
+                f"{self._class} mixes both async and sync endpoints."
+                "Synchronous endpoints cannot be mixed with async endpoints because they can cause the asyncio loop to deadlock if they wait."
+                f"sync: {sync_endpoints} async: {async_endpoints}"
+            )
 
     def __getattr__(self, attr: str) -> NotAnEndpoint:
         if attr in dir(self._class):
@@ -1014,9 +1183,8 @@ class ActorMesh(MeshTrait, Generic[T]):
         Class: Type[T],
         actor_mesh: "PythonActorMesh",
         shape: Shape,
-        proc_mesh: "ProcMesh | ProcMeshV1",
-        controller_controller: Optional["_ControllerController"]
-        | Optional["_ControllerControllerV1"],
+        proc_mesh: "ProcMesh",
+        controller_controller: Optional["_ControllerController"],
         # args and kwargs are passed to the __init__ method of the user defined
         # python actor object.
         *args: Any,
@@ -1066,7 +1234,8 @@ class ActorMesh(MeshTrait, Generic[T]):
         return f"ActorMesh(class={self._class}, shape={self._shape}), inner={type(self._inner)})"
 
     def stop(self) -> "Future[None]":
-        return Future(coro=self._inner.stop())
+        instance = context().actor_instance._as_rust()
+        return Future(coro=self._inner.stop(instance))
 
     @property
     def initialized(self) -> Future[None]:

@@ -19,9 +19,10 @@ from monarch._rust_bindings.monarch_hyperactor.shape import Extent
 from monarch._rust_bindings.monarch_hyperactor.v1.host_mesh import (
     HostMesh as HyHostMesh,
 )
+from monarch._src.actor.actor_mesh import _Lazy
 
 from monarch._src.actor.future import _Unawaited, Future
-from monarch._src.actor.v1.host_mesh import HostMesh
+from monarch._src.actor.host_mesh import HostMesh
 
 PrivateKey = Union[bytes, Path, None]
 CA = Union[bytes, Path, Literal["trust_all_connections"]]
@@ -73,6 +74,11 @@ def run_worker_loop_forever(
         raise NotImplementedError("TLS security plumbing")
     # we maybe want to actually return the future and let you do other stuff,
     # not sure ...
+    if "tcp://*" in address:
+        raise NotImplementedError(
+            "implementation does not get the host name right if it was specified as a wild card. We have to fix this"
+        )
+
     _run_worker_loop_forever(address).block_on()
 
 
@@ -104,9 +110,17 @@ def attach_to_workers(
 
     if private_key is not None or ca != "trust_all_connections":
         raise NotImplementedError("TLS security plumbing")
+
     workers_tasks = [_as_python_task(w) for w in workers]
     host_mesh: PythonTask[HyHostMesh] = _attach_to_workers(workers_tasks, name=name)
     extent = Extent(["hosts"], [len(workers)])
-    return HostMesh(
-        host_mesh.spawn(), extent.region, stream_logs=True, is_fake_in_process=False
+    hm = HostMesh(
+        host_mesh.spawn(),
+        extent.region,
+        stream_logs=True,
+        is_fake_in_process=False,
+        _initialized_hy_host_mesh=None,
+        _code_sync_proc_mesh=None,
     )
+    hm._code_sync_proc_mesh = _Lazy(lambda: hm.spawn_procs())
+    return hm

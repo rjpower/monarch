@@ -66,6 +66,7 @@ use hyperactor::Handler;
 use hyperactor::Instance;
 use hyperactor::Named;
 use hyperactor::OncePortRef;
+use hyperactor::Proc;
 use hyperactor::Unbind;
 use hyperactor::channel::ChannelTransport;
 use hyperactor::supervision::ActorSupervisionEvent;
@@ -468,7 +469,12 @@ impl Handler<PerformPingPong> for CudaRdmaActor {
         }
         let qp = self
             .rdma_manager
-            .request_queue_pair(cx, remote_buffer.owner.clone())
+            .request_queue_pair(
+                cx,
+                remote_buffer.owner.clone(),
+                local_buffer.device_name.clone(),
+                remote_buffer.device_name.clone(),
+            )
             .await?;
 
         unsafe {
@@ -676,6 +682,8 @@ pub async fn run() -> Result<(), anyhow::Error> {
         device_2_ibv_config = IbverbsConfig::default();
     }
 
+    let (instance, _) = Proc::local().instance("test").unwrap();
+
     // Create process allocator for spawning actors
     let mut alloc = ProcessAllocator::new(Command::new(
         buck_resources::get("monarch/monarch_rdma/examples/cuda_ping_pong/bootstrap").unwrap(),
@@ -708,12 +716,20 @@ pub async fn run() -> Result<(), anyhow::Error> {
 
     // Create RDMA manager for the first device
     let device_1_rdma_manager: RootActorMesh<'_, RdmaManagerActor> = device_1_proc_mesh
-        .spawn("device_1_rdma_manager", &Some(device_1_ibv_config))
+        .spawn(
+            &instance,
+            "device_1_rdma_manager",
+            &Some(device_1_ibv_config),
+        )
         .await?;
 
     // Create RDMA manager for the second device
     let device_2_rdma_manager: RootActorMesh<'_, RdmaManagerActor> = device_2_proc_mesh
-        .spawn("device_2_rdma_manager", &Some(device_2_ibv_config))
+        .spawn(
+            &instance,
+            "device_2_rdma_manager",
+            &Some(device_2_ibv_config),
+        )
         .await?;
 
     // Get the RDMA manager actor references
@@ -723,6 +739,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
     // Create the CUDA RDMA actors
     let device_1_actor_mesh: RootActorMesh<'_, CudaRdmaActor> = device_1_proc_mesh
         .spawn(
+            &instance,
             "device_1_actor",
             &(device_1_rdma_manager_ref.clone(), 0, config.buffer_size),
         )
@@ -730,6 +747,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
 
     let device_2_actor_mesh: RootActorMesh<'_, CudaRdmaActor> = device_2_proc_mesh
         .spawn(
+            &instance,
             "device_2_actor",
             &(device_2_rdma_manager_ref.clone(), 1, config.buffer_size),
         )

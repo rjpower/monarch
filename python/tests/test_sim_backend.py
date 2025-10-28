@@ -7,7 +7,7 @@
 # pyre-unsafe
 
 from contextlib import contextmanager
-from typing import Generator, Optional
+from typing import Generator
 from unittest import TestCase
 
 import pytest

@@ -10,10 +10,11 @@ import functools
 import logging
 import warnings
 from collections import defaultdict
-from typing import cast, List, Optional, Tuple
+from typing import Any, cast, List, Optional, Tuple
 
 import torch
 from monarch._rust_bindings.monarch_hyperactor.pytokio import PythonTask, Shared
+from monarch._src.actor.proc_mesh import ProcMesh
 from typing_extensions import Self
 
 try:
@@ -27,7 +28,7 @@ from typing import Dict
 from monarch._src.actor.actor_mesh import Actor, context
 from monarch._src.actor.endpoint import endpoint
 from monarch._src.actor.future import Future
-from monarch._src.actor.proc_mesh import get_or_spawn_controller, ProcMesh
+from monarch._src.actor.proc_mesh import get_or_spawn_controller
 from pyre_extensions import none_throws
 
 
@@ -54,13 +55,13 @@ def is_rdma_available():
 @functools.cache
 def _ensure_init_rdma_manager() -> Shared[None]:
     async def task() -> None:
+        # Ensure the proc mesh is initialized before we can send it over the wire,
+        # since pickling the proc mesh before it is initiliazed would block the
+        # tokio runtime and cause a panic.
+        await context().actor_instance.proc_mesh.initialized
         await (
             await get_or_spawn_controller("rdma_controller", RdmaController)
-        ).init_rdma_on_mesh.call_one(
-            # FIXME(slurye): Fix this once controller API is working properly
-            # for v1.
-            cast(ProcMesh, none_throws(context().actor_instance.proc_mesh))
-        )
+        ).init_rdma_on_mesh.call_one(none_throws(context().actor_instance.proc_mesh))
 
     return PythonTask.from_coroutine(task()).spawn()
 
@@ -130,9 +131,13 @@ class RdmaController(Actor):
         if proc_mesh not in self._manager_futures:
 
             async def create_manager() -> _RdmaManager:
-                proc_mesh_result = await Future(coro=proc_mesh._proc_mesh.task())
+                proc_mesh_result = await Future(
+                    coro=cast("PythonTask[Any]", proc_mesh._proc_mesh.task())
+                )
                 return none_throws(
-                    await _RdmaManager.create_rdma_manager_nonblocking(proc_mesh_result)
+                    await _RdmaManager.create_rdma_manager_nonblocking(
+                        proc_mesh_result, context().actor_instance
+                    )
                 )
 
             self._manager_futures[proc_mesh] = Future(coro=create_manager())
