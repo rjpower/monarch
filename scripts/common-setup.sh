@@ -15,6 +15,7 @@ setup_conda_environment() {
     echo "Setting up conda environment with Python ${python_version}..."
     conda create -n venv python="${python_version}" -y
     conda activate venv
+    export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:$LD_LIBRARY_PATH"
     export PATH=/opt/rh/devtoolset-10/root/usr/bin/:$PATH
     python -m pip install --upgrade pip
 }
@@ -152,4 +153,67 @@ setup_test_environment() {
     local python_version=${1:-3.10}
     setup_conda_environment "${python_version}"
     install_python_test_dependencies
+}
+
+# Run Python test groups for Monarch.
+# Usage: run_test_groups <enable_actor_error_test: 0|1>
+#
+# Arguments:
+#   enable_actor_error_test:
+#       0 → skip python/tests/test_actor_error.py
+#       1 → include python/tests/test_actor_error.py
+#
+# Tests are executed in 10 sequential groups with process cleanup
+# between runs.
+run_test_groups() {
+  set +e
+  local enable_actor_error_test="${2:-0}"
+  # Validate argument enable_actor_error_test
+  if [[ "$enable_actor_error_test" != "0" && "$enable_actor_error_test" != "1" ]]; then
+    echo "Usage: run_test_groups <enable_actor_error_test: 0|1>"
+    return 2
+  fi
+  local FAILED_GROUPS=()
+  for GROUP in $(seq 1 10); do
+    echo "Running test group $GROUP of 10..."
+    # Kill any existing Python processes to ensure clean state
+    echo "Cleaning up Python processes before group $GROUP..."
+    pkill -9 python || true
+    pkill -9 pytest || true
+    sleep 2
+    if [[ "$enable_actor_error_test" == "1" ]]; then
+        LC_ALL=C pytest python/tests/ -s -v -m "not oss_skip" \
+            --ignore-glob="**/meta/**" \
+            --dist=no \
+            --group="$GROUP" \
+            --splits=10
+    else
+        LC_ALL=C pytest python/tests/ -s -v -m "not oss_skip" \
+            --ignore-glob="**/meta/**" \
+            --dist=no \
+            --ignore=python/tests/test_actor_error.py \
+            --group="$GROUP" \
+            --splits=10
+    fi
+    # Check result and record failures
+    if [[ $? -eq 0 ]]; then
+        echo "✓ Test group $GROUP completed successfully"
+    else
+        FAILED_GROUPS+=($GROUP)
+        echo "✗ Test group $GROUP failed with exit code $?"
+    fi
+  done
+  # Final cleanup after all groups
+  echo "Final cleanup of Python processes..."
+  pkill -9 python || true
+  pkill -9 pytest || true
+  # Check if any groups failed and exit with appropriate code
+  if [ ${#FAILED_GROUPS[@]} -eq 0 ]; then
+    echo "✓ All test groups completed successfully!"
+  else
+    echo "✗ The following test groups failed: ${FAILED_GROUPS[*]}"
+    echo "Failed groups count: ${#FAILED_GROUPS[@]}/10"
+    return 1
+  fi
+  set -e
 }

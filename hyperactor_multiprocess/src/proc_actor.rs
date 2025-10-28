@@ -417,7 +417,7 @@ impl ProcActor {
         labels: HashMap<String, String>,
         lifecycle_mode: ProcLifecycleMode,
     ) -> Result<BootstrappedProc, anyhow::Error> {
-        let (local_addr, rx) = channel::serve(listen_addr)?;
+        let (local_addr, rx) = channel::serve(listen_addr, "bootstrap_for_proc")?;
         let mailbox_handle = proc.clone().serve(rx);
         let (state_tx, mut state_rx) = watch::channel(ProcState::AwaitingJoin);
 
@@ -876,9 +876,9 @@ mod tests {
     use hyperactor::channel;
     use hyperactor::channel::ChannelAddr;
     use hyperactor::channel::ChannelTransport;
+    use hyperactor::channel::TcpMode;
     use hyperactor::clock::Clock;
     use hyperactor::clock::RealClock;
-    use hyperactor::data::Named;
     use hyperactor::forward;
     use hyperactor::id;
     use hyperactor::reference::ActorRef;
@@ -1205,9 +1205,8 @@ mod tests {
         // A test supervisor.
         let mut system = System::new(server_handle.local_addr().clone());
         let supervisor = system.attach().await.unwrap();
-        let (supervisor_supervision_tx, mut supervisor_supervision_receiver) =
-            supervisor.open_port::<ProcSupervisionMessage>();
-        supervisor_supervision_tx.bind_to(ProcSupervisionMessage::port());
+        let (_supervisor_supervision_tx, mut supervisor_supervision_receiver) =
+            supervisor.bind_actor_port::<ProcSupervisionMessage>();
         let supervisor_actor_ref: ActorRef<ProcSupervisor> =
             ActorRef::attest(supervisor.self_id().clone());
 
@@ -1378,7 +1377,7 @@ mod tests {
 
         // Serve a system.
         let server_handle = System::serve(
-            ChannelAddr::any(ChannelTransport::Tcp),
+            ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname)),
             Duration::from_secs(120),
             Duration::from_secs(120),
         )
@@ -1388,8 +1387,7 @@ mod tests {
 
         // Build a supervisor.
         let supervisor = system.attach().await.unwrap();
-        let (sup_tx, _sup_rx) = supervisor.open_port::<ProcSupervisionMessage>();
-        sup_tx.bind_to(ProcSupervisionMessage::port());
+        let (_sup_tx, _sup_rx) = supervisor.bind_actor_port::<ProcSupervisionMessage>();
         let sup_ref = ActorRef::<ProcSupervisor>::attest(supervisor.self_id().clone());
 
         // Construct a system sender.
@@ -1398,7 +1396,7 @@ mod tests {
         ));
 
         // Construct a proc forwarder in terms of the system sender.
-        let listen_addr = ChannelAddr::any(ChannelTransport::Tcp);
+        let listen_addr = ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname));
         let proc_forwarder =
             BoxedMailboxSender::new(DialMailboxRouter::new_with_default(system_sender));
 
@@ -1425,7 +1423,7 @@ mod tests {
         let _proc_actor_1 = ProcActor::bootstrap_for_proc(
             proc_1.clone(),
             world_id.clone(),
-            ChannelAddr::any(ChannelTransport::Tcp),
+            ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname)),
             server_handle.local_addr().clone(),
             sup_ref.clone(),
             Duration::from_secs(120),
@@ -1500,7 +1498,7 @@ mod tests {
 
         // Serve a system.
         let server_handle = System::serve(
-            ChannelAddr::any(ChannelTransport::Tcp),
+            ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname)),
             Duration::from_secs(120),
             Duration::from_secs(120),
         )
@@ -1512,8 +1510,7 @@ mod tests {
 
         // Build a supervisor.
         let supervisor = system.attach().await.unwrap();
-        let (sup_tx, _sup_rx) = supervisor.open_port::<ProcSupervisionMessage>();
-        sup_tx.bind_to(ProcSupervisionMessage::port());
+        let (_sup_tx, _sup_rx) = supervisor.bind_actor_port::<ProcSupervisionMessage>();
         let sup_ref = ActorRef::<ProcSupervisor>::attest(supervisor.self_id().clone());
 
         // Construct a system sender.
@@ -1522,7 +1519,7 @@ mod tests {
         ));
 
         // Construct a proc forwarder in terms of the system sender.
-        let listen_addr = ChannelAddr::any(ChannelTransport::Tcp);
+        let listen_addr = ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname));
         let proc_forwarder =
             BoxedMailboxSender::new(DialMailboxRouter::new_with_default(system_sender));
 
@@ -1549,7 +1546,7 @@ mod tests {
         let _proc_actor_1 = ProcActor::bootstrap_for_proc(
             proc_1.clone(),
             world_id.clone(),
-            ChannelAddr::any(ChannelTransport::Tcp),
+            ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname)),
             server_handle.local_addr().clone(),
             sup_ref.clone(),
             Duration::from_secs(120),
@@ -1655,7 +1652,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_address_book_cache() {
         let server_handle = System::serve(
-            ChannelAddr::any(ChannelTransport::Tcp),
+            ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname)),
             Duration::from_secs(2), // supervision update timeout
             Duration::from_secs(2), // duration to evict an unhealthy world
         )
@@ -1709,7 +1706,7 @@ mod tests {
         actor_id: &ActorId,
         system_addr: &ChannelAddr,
     ) -> (ActorRef<PingPongActor>, ActorRef<ProcActor>) {
-        let listen_addr = ChannelAddr::any(ChannelTransport::Tcp);
+        let listen_addr = ChannelAddr::any(ChannelTransport::Tcp(TcpMode::Hostname));
         let bootstrap = ProcActor::bootstrap(
             actor_id.proc_id().clone(),
             actor_id

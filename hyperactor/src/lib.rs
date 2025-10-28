@@ -57,6 +57,7 @@
 #![feature(anonymous_lifetime_in_impl_trait)]
 #![feature(assert_matches)]
 #![feature(associated_type_defaults)]
+#![feature(box_patterns)]
 #![feature(btree_cursors)]
 #![feature(const_type_id)]
 #![feature(error_reporter)]
@@ -92,7 +93,7 @@ pub mod supervision;
 pub mod sync;
 /// Test utilities
 pub mod test_utils;
-mod time;
+pub mod time;
 
 pub use actor::Actor;
 pub use actor::ActorHandle;
@@ -127,7 +128,7 @@ pub use hyperactor_macros::RefClient;
 #[doc(inline)]
 pub use hyperactor_macros::Unbind;
 #[doc(inline)]
-pub use hyperactor_macros::alias;
+pub use hyperactor_macros::behavior;
 #[doc(inline)]
 pub use hyperactor_macros::export;
 #[doc(inline)]

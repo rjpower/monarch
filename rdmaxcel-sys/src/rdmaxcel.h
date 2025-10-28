@@ -9,6 +9,7 @@
 #ifndef RDMAXCEL_H
 #define RDMAXCEL_H
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 #include <infiniband/mlx5dv.h>
 #include <infiniband/verbs.h>
@@ -122,10 +123,16 @@ typedef enum {
   RDMAXCEL_MKEY_CREATE_FAILED = -8, // Failed to create mkey
   RDMAXCEL_WR_COMPLETE_FAILED = -9, // Work request completion failed
   RDMAXCEL_WC_STATUS_FAILED = -10, // Work completion status failed
-  RDMAXCEL_MKEY_REG_LIMIT = -11 // Memory key registration limit exceeded
+  RDMAXCEL_MKEY_REG_LIMIT = -11, // Memory key registration limit exceeded
+  RDMAXCEL_CUDA_GET_ATTRIBUTE_FAILED =
+      -12, // Failed to get CUDA device attribute
+  RDMAXCEL_CUDA_GET_DEVICE_FAILED = -13, // Failed to get CUDA device handle
+  RDMAXCEL_BUFFER_TOO_SMALL = -14, // Output buffer too small
+  RDMAXCEL_QUERY_DEVICE_FAILED = -15 // Failed to query device attributes
 } rdmaxcel_error_code_t;
 
-// Function to get error message string
+// Error/Debugging functions
+void rdmaxcel_print_device_info(struct ibv_context* context);
 const char* rdmaxcel_error_string(int error_code);
 
 // Active segment tracking functions (implemented in C++)
@@ -133,6 +140,13 @@ int rdma_get_active_segment_count();
 int rdma_get_all_segment_info(rdma_segment_info_t* info_array, int max_count);
 bool pt_cuda_allocator_compatibility();
 int register_segments(struct ibv_pd* pd, struct ibv_qp* qp);
+int deregister_segments();
+
+// CUDA utility functions
+int get_cuda_pci_address_from_ptr(
+    CUdeviceptr cuda_ptr,
+    char* pci_addr_out,
+    size_t pci_addr_size);
 
 #ifdef __cplusplus
 }

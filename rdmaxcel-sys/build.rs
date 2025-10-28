@@ -24,6 +24,7 @@ fn main() {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=src/rdmaxcel.h");
     println!("cargo:rerun-if-changed=src/rdmaxcel.c");
+    println!("cargo:rerun-if-changed=src/rdmaxcel.cpp");
 
     // Validate CUDA installation and get CUDA home path
     let cuda_home = match build_utils::validate_cuda_installation() {
@@ -86,6 +87,7 @@ fn main() {
         .allowlist_function("rdma_get_all_segment_info")
         .allowlist_function("pt_cuda_allocator_compatibility")
         .allowlist_function("register_segments")
+        .allowlist_function("deregister_segments")
         .allowlist_type("ibv_.*")
         .allowlist_type("mlx5dv_.*")
         .allowlist_type("mlx5_wqe_.*")

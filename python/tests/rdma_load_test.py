@@ -11,6 +11,7 @@ import random
 import statistics
 import time
 
+
 # parse up front to extract env variables.
 args = None
 if __name__ == "__main__":
@@ -26,8 +27,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--device",
         type=str,
-        default="cpu",
-        help="Device: cpu or cuda:X where X is 0-7 (default: cpu)",
+        nargs=2,
+        default=["cpu", "cpu"],
+        help="Two devices for actor0 and actor1: cpu or cuda:X where X is 0-7 (default: ['cpu', 'cpu'])",
     )
     parser.add_argument(
         "--operation",
@@ -47,6 +49,12 @@ if __name__ == "__main__":
         choices=["true", "false"],
         default="true",
         help="Enable/disable PyTorch CUDA expandable segments (default: true)",
+    )
+    parser.add_argument(
+        "--warmup-iterations",
+        type=int,
+        default=10,
+        help="Number of warmup iterations (default: 5)",
     )
 
     args = parser.parse_args()
@@ -79,11 +87,11 @@ class RDMATest(Actor):
         self.size_data = []
 
     @endpoint
-    def set_other_actor(self, other_actor):
+    async def set_other_actor(self, other_actor):
         self.other_actor = other_actor
 
     @endpoint
-    async def send(self) -> None:
+    async def send(self, is_warmup=False) -> None:
         shape = int(
             1024 * 1024 * self.size_mb / 4 * (0.5 * random.randint(1, 3))
         )  # Random size with +/- 50% variation based on user size
@@ -116,15 +124,14 @@ class RDMATest(Actor):
 
         # Store timing and size data in this actor
         size_elem = torch.numel(tensor) * tensor.element_size()
-        self.timing_data.append(elapsed)
-        self.size_data.append(size_elem)
+        if not is_warmup:
+            self.timing_data.append(elapsed)
+            self.size_data.append(size_elem)
         buffer_size = buffer.size()
         assert buffer_size == size_elem, f"{buffer_size=} != {size_elem=}"
 
         # Call recv - timing happens there
-        await self.other_actor.recv.call(
-            buffer, tensor.shape, tensor.dtype, self.device
-        )
+        await self.other_actor.recv.call(buffer, tensor.shape, tensor.dtype, is_warmup)
 
         # cleanup
         await buffer.drop()
@@ -132,9 +139,9 @@ class RDMATest(Actor):
         self.i += 1
 
     @endpoint
-    async def recv(self, rdma_buffer, shape, dtype, device):
+    async def recv(self, rdma_buffer, shape, dtype, is_warmup):
         # Create receiving tensor on the same device
-        tensor = torch.rand(shape, dtype=dtype, device=device)
+        tensor = torch.rand(shape, dtype=dtype, device=self.device)
         byte_view = tensor.view(torch.uint8).flatten()
 
         execution_start = time.time()
@@ -154,8 +161,9 @@ class RDMATest(Actor):
 
         # Store timing and size data in this actor
         size_elem = torch.numel(tensor) * tensor.element_size()
-        self.timing_data.append(elapsed)
-        self.size_data.append(size_elem)
+        if not is_warmup:
+            self.timing_data.append(elapsed)
+            self.size_data.append(size_elem)
 
     @endpoint
     async def print_statistics(self, calc_bwd: bool = False):
@@ -214,22 +222,30 @@ class RDMATest(Actor):
 
 
 async def main(
-    device: str = "cpu",
+    devices: list[str],
     iterations: int = 100,
     operation: str = "write",
     size_mb: int = 64,
+    warmup_iterations: int = 10,
 ):
-    # Adjust GPU allocation based on the device type
-    use_cuda = device.startswith("cuda:")
-    gpu_config = {"gpus": 1} if use_cuda else {"cpus": 1}
+    # Adjust GPU allocation based on the device types
+    device_0, device_1 = devices[0], devices[1]
+    use_cuda_0 = device_0.startswith("cuda:")
+    use_cuda_1 = device_1.startswith("cuda:")
 
-    mesh_0 = this_host().spawn_procs(per_host=gpu_config)
-    actor_0 = mesh_0.spawn("rdma_test", RDMATest, device, operation, size_mb)
+    gpu_config_0 = {"gpus": 1} if use_cuda_0 else {"cpus": 1}
+    gpu_config_1 = {"gpus": 1} if use_cuda_1 else {"cpus": 1}
 
-    mesh_1 = this_host().spawn_procs(per_host=gpu_config)
-    actor_1 = mesh_1.spawn("rdma_test", RDMATest, device, operation, size_mb)
+    mesh_0 = this_host().spawn_procs(per_host=gpu_config_0)
+    actor_0 = mesh_0.spawn("rdma_test", RDMATest, device_0, operation, size_mb)
+
+    mesh_1 = this_host().spawn_procs(per_host=gpu_config_1)
+    actor_1 = mesh_1.spawn("rdma_test", RDMATest, device_1, operation, size_mb)
 
     await actor_0.set_other_actor.call(actor_1)
+
+    for i in range(warmup_iterations):
+        await actor_0.send.call(is_warmup=True)
 
     for i in range(iterations):
         await actor_0.send.call()
@@ -253,36 +269,49 @@ if __name__ == "__main__":
         print(f"Error: --size must be a multiple of 4. Got: {args.size}")
         exit(1)
 
-    # Parse and validate device string
-    device = args.device.lower()
-    if device == "cpu":
-        pass  # CPU is always valid
-    elif device.startswith("cuda:"):
-        # Validate CUDA device format
-        try:
-            device_id = int(device.split(":")[1])
-            if device_id < 0 or device_id > 7:
-                print(f"Error: CUDA device ID must be 0-7. Got: {device_id}")
+    # Parse and validate device list
+    devices = [device.lower() for device in args.device]
+    validated_devices = []
+
+    for i, device in enumerate(devices):
+        if device == "cpu":
+            validated_devices.append(device)  # CPU is always valid
+        elif device.startswith("cuda:"):
+            # Validate CUDA device format
+            try:
+                device_id = int(device.split(":")[1])
+                if device_id < 0 or device_id > 7:
+                    print(f"Error: CUDA device ID must be 0-7. Got: {device_id}")
+                    exit(1)
+            except (ValueError, IndexError):
+                print(
+                    f"Error: Invalid device format. Use 'cpu' or 'cuda:X' where X is 0-7. Got: {args.device[i]}"
+                )
                 exit(1)
-        except (ValueError, IndexError):
+
+            # Check if CUDA is available
+            if not torch.cuda.is_available():
+                print("Warning: CUDA requested but not available. Falling back to CPU.")
+                validated_devices.append("cpu")
+            elif device_id >= torch.cuda.device_count():
+                print(
+                    f"Warning: CUDA device {device_id} not available. Available devices: 0-{torch.cuda.device_count()-1}. Falling back to CPU."
+                )
+                validated_devices.append("cpu")
+            else:
+                validated_devices.append(device)
+        else:
             print(
-                f"Error: Invalid device format. Use 'cpu' or 'cuda:X' where X is 0-7. Got: {args.device}"
+                f"Error: Invalid device format. Use 'cpu' or 'cuda:X' where X is 0-7. Got: {args.device[i]}"
             )
             exit(1)
 
-        # Check if CUDA is available
-        if not torch.cuda.is_available():
-            print("Warning: CUDA requested but not available. Falling back to CPU.")
-            device = "cpu"
-        elif device_id >= torch.cuda.device_count():
-            print(
-                f"Warning: CUDA device {device_id} not available. Available devices: 0-{torch.cuda.device_count()-1}. Falling back to CPU."
-            )
-            device = "cpu"
-    else:
-        print(
-            f"Error: Invalid device format. Use 'cpu' or 'cuda:X' where X is 0-7. Got: {args.device}"
+    asyncio.run(
+        main(
+            validated_devices,
+            args.iterations,
+            args.operation,
+            args.size,
+            args.warmup_iterations,
         )
-        exit(1)
-
-    asyncio.run(main(device, args.iterations, args.operation, args.size))
+    )

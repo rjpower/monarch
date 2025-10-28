@@ -7,11 +7,16 @@
 # pyre-unsafe
 
 from pathlib import Path
-from typing import Dict, final
+from typing import Any, Dict, final
 
-from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh
+from monarch._rust_bindings.monarch_hyperactor.context import Instance
+
+from monarch._rust_bindings.monarch_hyperactor.proc_mesh import ProcMesh as ProcMeshV0
 
 from monarch._rust_bindings.monarch_hyperactor.shape import Shape
+from monarch._rust_bindings.monarch_hyperactor.v1.proc_mesh import (
+    ProcMesh as ProcMeshV1,
+)
 
 class WorkspaceLocation:
     """
@@ -83,11 +88,13 @@ class CodeSyncMeshClient:
     """
     @staticmethod
     def spawn_blocking(
-        proc_mesh: ProcMesh,
+        client: Any,
+        proc_mesh: ProcMeshV0 | ProcMeshV1,
     ) -> CodeSyncMeshClient: ...
     async def sync_workspace(
         self,
         *,
+        instance: Instance,
         local: str,
         remote: RemoteWorkspace,
         auto_reload: bool = False,
@@ -95,6 +102,7 @@ class CodeSyncMeshClient:
     async def sync_workspaces(
         self,
         *,
+        instance: Instance,
         workspaces: list[WorkspaceConfig],
         auto_reload: bool = False,
     ) -> None: ...

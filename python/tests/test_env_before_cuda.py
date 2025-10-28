@@ -12,12 +12,10 @@ import unittest
 from typing import Dict, List
 
 import cloudpickle
-
+import monarch.actor
 import torch
-from monarch._rust_bindings.monarch_hyperactor.alloc import AllocConstraints, AllocSpec
-from monarch._src.actor.allocator import LocalAllocator
-from monarch._src.actor.proc_mesh import proc_mesh
-from monarch.actor import Actor, endpoint, ProcMesh
+from monarch._src.actor.host_mesh import create_local_host_mesh, fake_in_process_host
+from monarch.actor import Actor, endpoint
 
 
 class CudaInitTestActor(Actor):
@@ -73,11 +71,7 @@ class TestEnvBeforeCuda(unittest.IsolatedAsyncioTestCase):
             for name, value in cuda_env_vars.items():
                 os.environ[name] = value
 
-        spec = AllocSpec(AllocConstraints(), gpus=1, hosts=1)
-        allocator = LocalAllocator()
-        alloc = allocator.allocate(spec)
-
-        proc_mesh = ProcMesh.from_alloc(alloc, setup=setup_cuda_env)
+        proc_mesh = fake_in_process_host().spawn_procs(bootstrap=setup_cuda_env)
 
         try:
             actor = proc_mesh.spawn("cuda_init", CudaInitTestActor)
@@ -110,7 +104,9 @@ class TestEnvBeforeCuda(unittest.IsolatedAsyncioTestCase):
             for name, value in cuda_env_vars.items():
                 os.environ[name] = value
 
-        proc_mesh_instance = proc_mesh(gpus=1, hosts=1, setup=setup_cuda_env)
+        proc_mesh_instance = create_local_host_mesh().spawn_procs(
+            bootstrap=setup_cuda_env
+        )
 
         try:
             actor = proc_mesh_instance.spawn("cuda_init", CudaInitTestActor)
@@ -136,7 +132,8 @@ class TestEnvBeforeCuda(unittest.IsolatedAsyncioTestCase):
             "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         }
 
-        proc_mesh_instance = proc_mesh(gpus=1, hosts=1, env=cuda_env_vars)
+        monarch.actor.unhandled_fault_hook = lambda failure: None
+        proc_mesh_instance = create_local_host_mesh(env=cuda_env_vars).spawn_procs()
 
         try:
             actor = proc_mesh_instance.spawn("cuda_init", CudaInitTestActor)

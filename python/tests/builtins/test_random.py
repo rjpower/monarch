@@ -7,9 +7,9 @@
 # pyre-unsafe
 import pytest
 import torch
-from monarch import fetch_shard, no_mesh
+from monarch import fetch_shard
 
-from monarch._testing import BackendType, TestingContext
+from monarch._testing import TestingContext
 from monarch.builtins.random import (
     get_rng_state_all_cuda_remote,
     get_rng_state_remote,
@@ -21,10 +21,10 @@ from monarch.builtins.random import (
     set_rng_state_all_cuda_remote,
     set_rng_state_remote,
 )
+from monarch.common.device_mesh import no_mesh
 
 
 @pytest.mark.timeout(120)
-@pytest.mark.parametrize("backend_type", [BackendType.PY, BackendType.RS])
 class TestRandomFunctions:
     local = None
 
@@ -38,16 +38,15 @@ class TestRandomFunctions:
             cls.local.__exit__(None, None, None)
 
     @classmethod
-    def local_device_mesh(cls, num_hosts, gpu_per_host, backend_type, activate=True):
+    def local_device_mesh(cls, num_hosts, gpu_per_host, activate=True):
         return cls.local.local_device_mesh(
             num_hosts,
             gpu_per_host,
             activate,
-            backend=str(backend_type),
         )
 
-    def test_set_manual_seed_remote(self, backend_type):
-        with self.local_device_mesh(1, 1, backend_type) as device_mesh:
+    def test_set_manual_seed_remote(self):
+        with self.local_device_mesh(1, 1) as device_mesh:
             with device_mesh.activate():
                 set_manual_seed_remote(12345)
                 t1 = torch.rand(5, 5)
@@ -64,8 +63,8 @@ class TestRandomFunctions:
                     assert torch.equal(result[0], result[1])
                     assert not torch.equal(result[0], result[2])
 
-    def test_set_manual_seed_remote_with_process_idx(self, backend_type):
-        with self.local_device_mesh(1, 1, backend_type) as device_mesh:
+    def test_set_manual_seed_remote_with_process_idx(self):
+        with self.local_device_mesh(1, 1) as device_mesh:
             with device_mesh.activate():
                 set_manual_seed_remote(12345, process_idx=0)
                 t1 = torch.rand(5, 5)
@@ -77,8 +76,8 @@ class TestRandomFunctions:
                 with no_mesh.activate():
                     assert not torch.equal(result[0], result[1])
 
-    def test_get_rng_state(self, backend_type):
-        with self.local_device_mesh(1, 1, backend_type) as device_mesh:
+    def test_get_rng_state(self):
+        with self.local_device_mesh(1, 1) as device_mesh:
             with device_mesh.activate():
                 state1 = get_rng_state_remote()
                 state2 = get_rng_state_remote()
@@ -93,8 +92,8 @@ class TestRandomFunctions:
                     assert torch.equal(result[0], result[1])
                     assert not torch.equal(result[0], result[2])
 
-    def test_set_rng_state(self, backend_type):
-        with self.local_device_mesh(1, 1, backend_type) as device_mesh:
+    def test_set_rng_state(self):
+        with self.local_device_mesh(1, 1) as device_mesh:
             with device_mesh.activate():
                 # save the initial RNG state
                 state = get_rng_state_remote()
@@ -113,8 +112,8 @@ class TestRandomFunctions:
                     assert torch.equal(result[0], result[2])
 
     # seed and random.seed seem to be the same function.
-    def test_random_seed(self, backend_type):
-        with self.local_device_mesh(1, 1, backend_type) as device_mesh:
+    def test_random_seed(self):
+        with self.local_device_mesh(1, 1) as device_mesh:
             with device_mesh.activate():
                 random_seed_remote()
                 t1 = torch.rand(5, 5)
@@ -130,9 +129,9 @@ class TestRandomFunctions:
                     assert not torch.equal(result[0], result[1])
                     assert not torch.equal(result[1], result[2])
 
-    def test_get_rng_state_all_cuda(self, backend_type):
+    def test_get_rng_state_all_cuda(self):
         NUM_GPUS = 1
-        with self.local_device_mesh(1, NUM_GPUS, backend_type) as device_mesh:
+        with self.local_device_mesh(1, NUM_GPUS) as device_mesh:
             with device_mesh.activate():
                 states = get_rng_state_all_cuda_remote()
 
@@ -141,8 +140,8 @@ class TestRandomFunctions:
                     assert isinstance(result, list)
                     assert len(result) == NUM_GPUS
 
-    def test_set_rng_state_all_cuda(self, backend_type):
-        with self.local_device_mesh(1, 1, backend_type) as device_mesh:
+    def test_set_rng_state_all_cuda(self):
+        with self.local_device_mesh(1, 1) as device_mesh:
             with device_mesh.activate():
                 # save the initial RNG states
                 states = get_rng_state_all_cuda_remote()
@@ -157,13 +156,13 @@ class TestRandomFunctions:
                 with no_mesh.activate():
                     assert torch.equal(result[0], result[1])
 
-    def test_cuda_manual_seed(self, backend_type):
-        with self.local_device_mesh(1, 1, backend_type) as device_mesh:
+    def test_cuda_manual_seed(self):
+        with self.local_device_mesh(1, 1) as device_mesh:
             with device_mesh.activate():
                 self._cuda_seed_test(manual_seed_cuda_remote)
 
-    def test_cuda_manual_seed_all(self, backend_type):
-        with self.local_device_mesh(1, 1, backend_type) as device_mesh:
+    def test_cuda_manual_seed_all(self):
+        with self.local_device_mesh(1, 1) as device_mesh:
             with device_mesh.activate():
                 self._cuda_seed_test(manual_seed_all_cuda_remote)
 

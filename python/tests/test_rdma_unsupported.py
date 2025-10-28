@@ -16,6 +16,7 @@ behavior when RDMA support is missing.
 import pytest
 from monarch.rdma import is_rdma_available
 
+
 needs_no_rdma = pytest.mark.skipif(
     is_rdma_available(),
     reason="RDMA is available, test only runs on systems without RDMA support",
@@ -35,6 +36,7 @@ async def test_rdma_manager_creation_fails_when_unsupported():
     ibverbs_supported() function that calls ibv_get_device_list() in the C library.
     """
     from monarch._rust_bindings.rdma import _RdmaManager
+    from monarch._src.actor.actor_mesh import context
     from monarch._src.actor.future import Future
     from monarch.actor import this_host
 
@@ -43,7 +45,8 @@ async def test_rdma_manager_creation_fails_when_unsupported():
     with pytest.raises(Exception) as exc_info:
         await Future(
             coro=_RdmaManager.create_rdma_manager_nonblocking(
-                await Future(coro=proc_mesh._proc_mesh.task())
+                await Future(coro=proc_mesh._proc_mesh.task()),
+                context().actor_instance,
             )
         )
 

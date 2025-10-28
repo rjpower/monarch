@@ -34,6 +34,7 @@ use hyperactor::PortRef;
 use hyperactor::ProcId;
 use hyperactor::RefClient;
 use hyperactor::Unbind;
+use hyperactor::WorldId;
 use hyperactor::actor::ActorStatus;
 use hyperactor::actor::remote::Remote;
 use hyperactor::channel;
@@ -52,7 +53,9 @@ use hyperactor::supervision::ActorSupervisionEvent;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::actor_mesh::CAST_ACTOR_MESH_ID;
 use crate::proc_mesh::SupervisionEventState;
+use crate::reference::ActorMeshId;
 use crate::resource;
 use crate::v1::Name;
 
@@ -169,6 +172,44 @@ impl State {
 struct ActorInstanceState {
     create_rank: usize,
     spawn: Result<ActorId, anyhow::Error>,
+    /// If true, the actor has been stopped. There is no way to restart it, a new
+    /// actor must be spawned.
+    stopped: bool,
+}
+
+/// Normalize events that came via the comm tree. Updates their actor id based on
+/// the message headers for the event.
+pub(crate) fn update_event_actor_id(mut event: ActorSupervisionEvent) -> ActorSupervisionEvent {
+    if let Some(headers) = &event.message_headers {
+        if let Some(actor_mesh_id) = headers.get(CAST_ACTOR_MESH_ID) {
+            match actor_mesh_id {
+                ActorMeshId::V0(proc_mesh_id, actor_name) => {
+                    let old_actor = event.actor_id.clone();
+                    event.actor_id = ActorId(
+                        ProcId::Ranked(WorldId(proc_mesh_id.0.clone()), 0),
+                        actor_name.clone(),
+                        0,
+                    );
+                    tracing::debug!(
+                        actor_id = %old_actor,
+                        "proc supervision: remapped comm-actor id to mesh id from CAST_ACTOR_MESH_ID {}", event.actor_id
+                    );
+                }
+                ActorMeshId::V1(_) => {
+                    tracing::debug!(
+                        "proc supervision: headers present but V1 ActorMeshId; leaving actor_id unchanged"
+                    );
+                }
+            }
+        } else {
+            tracing::debug!(
+                "proc supervision: headers present but no CAST_ACTOR_MESH_ID; leaving actor_id unchanged"
+            );
+        }
+    } else {
+        tracing::debug!("proc supervision: no headers attached; leaving actor_id unchanged");
+    }
+    event
 }
 
 /// A mesh agent is responsible for managing procs in a [`ProcMesh`].
@@ -177,6 +218,7 @@ struct ActorInstanceState {
     handlers=[
         MeshAgentMessage,
         resource::CreateOrUpdate<ActorSpec> { cast = true },
+        resource::Stop { cast = true },
         resource::GetState<ActorState> { cast = true },
         resource::GetRankStatus { cast = true },
     ]
@@ -397,8 +439,13 @@ impl Handler<ActorSupervisionEvent> for ProcMeshAgent {
         cx: &Context<Self>,
         event: ActorSupervisionEvent,
     ) -> anyhow::Result<()> {
+        let event = update_event_actor_id(event);
         if self.record_supervision_events {
-            tracing::info!("Received supervision event: {:?}, recording", event);
+            tracing::info!(
+                "Received supervision event on proc {}: {:?}, recording",
+                self.proc.proc_id(),
+                event
+            );
             self.supervision_events
                 .entry(event.actor_id.clone())
                 .or_default()
@@ -457,6 +504,23 @@ impl Handler<resource::CreateOrUpdate<ActorSpec>> for ProcMeshAgent {
             // There is no update.
             return Ok(());
         }
+        let create_rank = create_or_update.rank.unwrap();
+        // If there have been supervision events for any actors on this proc,
+        // we disallow spawning new actors on it, as this proc may be in an
+        // invalid state.
+        if !self.supervision_events.is_empty() {
+            self.actor_states.insert(
+                create_or_update.name.clone(),
+                ActorInstanceState {
+                    spawn: Err(anyhow::anyhow!(
+                        "Cannot spawn new actors on mesh with supervision events"
+                    )),
+                    create_rank,
+                    stopped: false,
+                },
+            );
+            return Ok(());
+        }
 
         let ActorSpec {
             actor_type,
@@ -465,7 +529,7 @@ impl Handler<resource::CreateOrUpdate<ActorSpec>> for ProcMeshAgent {
         self.actor_states.insert(
             create_or_update.name.clone(),
             ActorInstanceState {
-                create_rank: create_or_update.rank.unwrap(),
+                create_rank,
                 spawn: self
                     .remote
                     .gspawn(
@@ -475,8 +539,78 @@ impl Handler<resource::CreateOrUpdate<ActorSpec>> for ProcMeshAgent {
                         params_data,
                     )
                     .await,
+                stopped: false,
             },
         );
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler<resource::Stop> for ProcMeshAgent {
+    async fn handle(&mut self, cx: &Context<Self>, message: resource::Stop) -> anyhow::Result<()> {
+        use crate::v1::StatusOverlay;
+
+        // We don't remove the actor from the state map, instead we just store
+        // its state as Stopped.
+        let actor = self.actor_states.get_mut(&message.name);
+        enum StatusOrActorId {
+            Status(resource::Status),
+            ActorId(ActorId),
+        }
+        // Have to separate stop_actor from setting "stopped" because it borrows
+        // as mutable and cannot have self borrowed mutably twice.
+        let (rank, actor_id) = match actor {
+            Some(actor_state) => {
+                let rank = actor_state.create_rank;
+                match &actor_state.spawn {
+                    Ok(actor_id) => {
+                        if actor_state.stopped {
+                            (rank, StatusOrActorId::Status(resource::Status::Stopped))
+                        } else {
+                            actor_state.stopped = true;
+                            (rank, StatusOrActorId::ActorId(actor_id.clone()))
+                        }
+                    }
+                    // If the original spawn had failed, the actor is still considered
+                    // successfully stopped.
+                    Err(_) => (rank, StatusOrActorId::Status(resource::Status::Stopped)),
+                }
+            }
+            // TODO: represent unknown rank
+            None => (
+                usize::MAX,
+                StatusOrActorId::Status(resource::Status::NotExist),
+            ),
+        };
+        let timeout = hyperactor::config::global::get(hyperactor::config::STOP_ACTOR_TIMEOUT);
+        let status = match actor_id {
+            StatusOrActorId::Status(s) => s,
+            StatusOrActorId::ActorId(actor_id) => {
+                // If this fails, we will still leave the actor_state as stopped,
+                // because it shouldn't be attempted again.
+                let stop_result = self
+                    .stop_actor(cx, actor_id, timeout.as_millis() as u64)
+                    .await?;
+                match stop_result {
+                    // use Stopped as a successful result.
+                    StopActorResult::Success => resource::Status::Stopped,
+                    StopActorResult::Timeout => resource::Status::Timeout(timeout),
+                    StopActorResult::NotFound => resource::Status::NotExist,
+                }
+            }
+        };
+
+        // Send a sparse overlay update. If rank is unknown, emit an
+        // empty overlay.
+        let overlay = if rank == usize::MAX {
+            StatusOverlay::new()
+        } else {
+            StatusOverlay::try_from_runs(vec![(rank..(rank + 1), status)])
+                .expect("valid single-run overlay")
+        };
+        message.reply.send(cx, overlay)?;
 
         Ok(())
     }
@@ -489,36 +623,54 @@ impl Handler<resource::GetRankStatus> for ProcMeshAgent {
         cx: &Context<Self>,
         get_rank_status: resource::GetRankStatus,
     ) -> anyhow::Result<()> {
+        use crate::resource::Status;
+        use crate::v1::StatusOverlay;
+
         let (rank, status) = match self.actor_states.get(&get_rank_status.name) {
             Some(ActorInstanceState {
                 spawn: Ok(actor_id),
                 create_rank,
+                stopped,
             }) => {
-                let supervision_events = self
-                    .supervision_events
-                    .get(actor_id)
-                    .map_or_else(Vec::new, |a| a.clone());
-                (
-                    *create_rank,
-                    if supervision_events.is_empty() {
-                        resource::Status::Running
-                    } else {
-                        resource::Status::Failed(format!(
-                            "because of supervision events: {:?}",
-                            supervision_events
-                        ))
-                    },
-                )
+                if *stopped {
+                    (*create_rank, resource::Status::Stopped)
+                } else {
+                    let supervision_events = self
+                        .supervision_events
+                        .get(actor_id)
+                        .map_or_else(Vec::new, |a| a.clone());
+                    (
+                        *create_rank,
+                        if supervision_events.is_empty() {
+                            resource::Status::Running
+                        } else {
+                            resource::Status::Failed(format!(
+                                "because of supervision events: {:?}",
+                                supervision_events
+                            ))
+                        },
+                    )
+                }
             }
             Some(ActorInstanceState {
                 spawn: Err(e),
                 create_rank,
-            }) => (*create_rank, resource::Status::Failed(e.to_string())),
+                ..
+            }) => (*create_rank, Status::Failed(e.to_string())),
             // TODO: represent unknown rank
-            None => (usize::MAX, resource::Status::NotExist),
+            None => (usize::MAX, Status::NotExist),
         };
 
-        get_rank_status.reply.send(cx, (rank, status).into())?;
+        // Send a sparse overlay update. If rank is unknown, emit an
+        // empty overlay.
+        let overlay = if rank == usize::MAX {
+            StatusOverlay::new()
+        } else {
+            StatusOverlay::try_from_runs(vec![(rank..(rank + 1), status)])
+                .expect("valid single-run overlay")
+        };
+        get_rank_status.reply.send(cx, overlay)?;
+
         Ok(())
     }
 }
@@ -534,12 +686,15 @@ impl Handler<resource::GetState<ActorState>> for ProcMeshAgent {
             Some(ActorInstanceState {
                 create_rank,
                 spawn: Ok(actor_id),
+                stopped,
             }) => {
                 let supervision_events = self
                     .supervision_events
                     .get(actor_id)
                     .map_or_else(Vec::new, |a| a.clone());
-                let status = if supervision_events.is_empty() {
+                let status = if *stopped {
+                    resource::Status::Stopped
+                } else if supervision_events.is_empty() {
                     resource::Status::Running
                 } else {
                     resource::Status::Failed(format!(

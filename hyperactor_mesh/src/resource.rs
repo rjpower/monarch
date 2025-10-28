@@ -10,12 +10,16 @@
 //! in hyperactor meshes.
 
 use core::slice::GetDisjointMutIndex as _;
+use std::collections::HashMap;
+use std::fmt;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::marker::PhantomData;
 use std::mem::replace;
 use std::mem::take;
+use std::ops::Deref;
+use std::ops::DerefMut;
 use std::ops::Range;
+use std::time::Duration;
 
 use enum_as_inner::EnumAsInner;
 use hyperactor::Bind;
@@ -26,17 +30,19 @@ use hyperactor::PortRef;
 use hyperactor::RefClient;
 use hyperactor::RemoteMessage;
 use hyperactor::Unbind;
-use hyperactor::accum::Accumulator;
-use hyperactor::accum::CommReducer;
-use hyperactor::accum::ReducerFactory;
-use hyperactor::accum::ReducerSpec;
+use hyperactor::attrs::Attrs;
+use hyperactor::mailbox::PortReceiver;
 use hyperactor::message::Bind;
 use hyperactor::message::Bindings;
 use hyperactor::message::Unbind;
+use ndslice::Region;
+use ndslice::ViewExt;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::bootstrap;
 use crate::v1::Name;
+use crate::v1::StatusOverlay;
 
 /// The current lifecycle status of a resource.
 #[derive(
@@ -50,7 +56,8 @@ use crate::v1::Name;
     PartialEq,
     Eq,
     Hash,
-    EnumAsInner
+    EnumAsInner,
+    strum::Display
 )]
 pub enum Status {
     /// The resource does not exist.
@@ -64,13 +71,38 @@ pub enum Status {
     /// The resource is stopped.
     Stopped,
     /// The resource has failed, with an error message.
+    #[strum(to_string = "Failed({0})")]
     Failed(String),
+    /// The resource has been declared failed after a timeout.
+    #[strum(to_string = "Timeout({0:?})")]
+    Timeout(Duration),
 }
 
 impl Status {
     /// Returns whether the status is a terminating status.
     pub fn is_terminating(&self) -> bool {
-        matches!(self, Status::Stopping | Status::Stopped | Status::Failed(_))
+        matches!(
+            self,
+            Status::Stopping | Status::Stopped | Status::Failed(_) | Status::Timeout(_)
+        )
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        matches!(self, Status::Initializing | Status::Running)
+    }
+}
+
+impl From<bootstrap::ProcStatus> for Status {
+    fn from(status: bootstrap::ProcStatus) -> Self {
+        use bootstrap::ProcStatus;
+        match status {
+            ProcStatus::Starting => Status::Initializing,
+            ProcStatus::Running { .. } | ProcStatus::Ready { .. } => Status::Running,
+            ProcStatus::Stopping { .. } => Status::Stopping,
+            ProcStatus::Stopped { .. } => Status::Stopped,
+            ProcStatus::Failed { reason } => Status::Failed(reason),
+            ProcStatus::Killed { .. } => Status::Failed(format!("{}", status)),
+        }
     }
 }
 
@@ -106,8 +138,12 @@ impl Bind for Rank {
     }
 }
 
-/// Get the status of a resource at a rank. This message is designed to be
-/// cast and efficiently accumulated.
+/// Get the status of a resource across the mesh.
+///
+/// This message is cast to all ranks; each rank replies with a sparse
+/// status **overlay**. The comm reducer merges overlays (right-wins)
+/// and the accumulator applies them to produce **full StatusMesh
+/// snapshots** on the receiver side.
 #[derive(
     Clone,
     Debug,
@@ -123,9 +159,53 @@ impl Bind for Rank {
 pub struct GetRankStatus {
     /// The name of the resource.
     pub name: Name,
-    /// The status of the rank.
+    /// Sparse status updates (overlays) from a rank.
     #[binding(include)]
-    pub reply: PortRef<RankedValues<Status>>,
+    pub reply: PortRef<StatusOverlay>,
+}
+
+impl GetRankStatus {
+    pub async fn wait(
+        mut rx: PortReceiver<crate::v1::StatusMesh>,
+        num_ranks: usize,
+        max_idle_time: Duration,
+        region: Region, // used only for fallback
+    ) -> Result<crate::v1::StatusMesh, crate::v1::StatusMesh> {
+        debug_assert_eq!(region.num_ranks(), num_ranks, "region/num_ranks mismatch");
+
+        let mut alarm = hyperactor::time::Alarm::new();
+        alarm.arm(max_idle_time);
+
+        // Fallback snapshot if we time out before receiving anything.
+        let mut snapshot =
+            crate::v1::StatusMesh::from_single(region, crate::resource::Status::NotExist);
+
+        loop {
+            let mut sleeper = alarm.sleeper();
+            tokio::select! {
+                _ = sleeper.sleep() => return Err(snapshot),
+                next = rx.recv() => {
+                    match next {
+                        Ok(mesh) => { snapshot = mesh; }   // latest-wins snapshot
+                        Err(_)   => return Err(snapshot),
+                    }
+                }
+            }
+
+            alarm.arm(max_idle_time);
+
+            // Completion: once every rank (among the first
+            // `num_ranks`) has reported at least something (i.e.
+            // moved off NotExist).
+            if snapshot
+                .values()
+                .take(num_ranks)
+                .all(|s| !matches!(s, crate::resource::Status::NotExist))
+            {
+                break Ok(snapshot);
+            }
+        }
+    }
 }
 
 /// The state of a resource.
@@ -137,6 +217,16 @@ pub struct State<S> {
     pub status: Status,
     /// Optionally, a resource-defined state.
     pub state: Option<S>,
+}
+
+impl<S: Serialize> fmt::Display for State<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Use serde_json to serialize the struct to a compact JSON string
+        match serde_json::to_string(self) {
+            Ok(json) => write!(f, "{}", json),
+            Err(e) => write!(f, "<state: serde_json error: {}>", e),
+        }
+    }
 }
 
 /// Create or update a resource according to a spec.
@@ -160,6 +250,27 @@ pub struct CreateOrUpdate<S> {
     pub rank: Rank,
     /// The specification of the resource.
     pub spec: S,
+}
+
+/// Stop a resource according to a spec.
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    Named,
+    Handler,
+    HandleClient,
+    RefClient,
+    Bind,
+    Unbind
+)]
+pub struct Stop {
+    /// The name of the resource to stop.
+    pub name: Name,
+    /// The status of the rank.
+    #[binding(include)]
+    pub reply: PortRef<StatusOverlay>,
 }
 
 /// Retrieve the current state of the resource.
@@ -214,6 +325,14 @@ pub struct RankedValues<T> {
     intervals: Vec<(Range<usize>, T)>,
 }
 
+impl<T: PartialEq> PartialEq for RankedValues<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.intervals == other.intervals
+    }
+}
+
+impl<T: Eq> Eq for RankedValues<T> {}
+
 impl<T> Default for RankedValues<T> {
     fn default() -> Self {
         Self {
@@ -235,6 +354,28 @@ impl<T> RankedValues<T> {
             .take_while(|(ranks, _)| ranks.start <= value)
             .map(|(ranks, _)| ranks.end.min(value) - ranks.start)
             .sum()
+    }
+}
+
+impl<T: Clone> RankedValues<T> {
+    pub fn materialized_iter(&self, until: usize) -> impl Iterator<Item = &T> + '_ {
+        assert_eq!(self.rank(until), until, "insufficient rank");
+        self.iter()
+            .flat_map(|(range, value)| std::iter::repeat_n(value, range.end - range.start))
+    }
+}
+
+impl<T: Hash + Eq + Clone> RankedValues<T> {
+    /// Invert this ranked values into a [`ValuesByRank<T>`].
+    pub fn invert(&self) -> ValuesByRank<T> {
+        let mut inverted: HashMap<T, Vec<Range<usize>>> = HashMap::new();
+        for (range, value) in self.iter() {
+            inverted
+                .entry(value.clone())
+                .or_default()
+                .push(range.clone());
+        }
+        ValuesByRank { values: inverted }
     }
 }
 
@@ -298,6 +439,11 @@ impl<T: Eq + Clone> RankedValues<T> {
         }
     }
 
+    /// Merge the contents of this RankedValues into another RankedValues.
+    pub fn merge_into(self, other: &mut Self) {
+        other.merge_from(self);
+    }
+
     fn append(&mut self, range: Range<usize>, value: T) {
         if let Some(last) = self.intervals.last_mut()
             && last.0.end == range.start
@@ -310,11 +456,88 @@ impl<T: Eq + Clone> RankedValues<T> {
     }
 }
 
+impl RankedValues<Status> {
+    pub fn first_terminating(&self) -> Option<(usize, Status)> {
+        self.intervals
+            .iter()
+            .find(|(_, status)| status.is_terminating())
+            .map(|(range, status)| (range.start, status.clone()))
+    }
+
+    pub fn first_failed(&self) -> Option<(usize, Status)> {
+        self.intervals
+            .iter()
+            .find(|(_, status)| matches!(status, Status::Failed(_) | Status::Timeout(_)))
+            .map(|(range, status)| (range.start, status.clone()))
+    }
+}
+
 impl<T> From<(usize, T)> for RankedValues<T> {
     fn from((rank, value): (usize, T)) -> Self {
         Self {
             intervals: vec![(rank..rank + 1, value)],
         }
+    }
+}
+
+impl<T> From<(Range<usize>, T)> for RankedValues<T> {
+    fn from((range, value): (Range<usize>, T)) -> Self {
+        Self {
+            intervals: vec![(range, value)],
+        }
+    }
+}
+
+/// An inverted index of RankedValues, providing all ranks for
+/// which each unique T-typed value appears.
+#[derive(Clone, Debug)]
+pub struct ValuesByRank<T> {
+    values: HashMap<T, Vec<Range<usize>>>,
+}
+
+impl<T: Eq + Hash> PartialEq for ValuesByRank<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values
+    }
+}
+
+impl<T: Eq + Hash> Eq for ValuesByRank<T> {}
+
+impl<T: fmt::Display> fmt::Display for ValuesByRank<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first_value = true;
+        for (value, ranges) in self.iter() {
+            if first_value {
+                first_value = false;
+            } else {
+                write!(f, ";")?;
+            }
+            write!(f, "{}=", value)?;
+            let mut first_range = true;
+            for range in ranges.iter() {
+                if first_range {
+                    first_range = false;
+                } else {
+                    write!(f, ",")?;
+                }
+                write!(f, "{}..{}", range.start, range.end)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<T> Deref for ValuesByRank<T> {
+    type Target = HashMap<T, Vec<Range<usize>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl<T> DerefMut for ValuesByRank<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.values
     }
 }
 
@@ -329,43 +552,19 @@ impl<T> FromIterator<(Range<usize>, T)> for RankedValues<T> {
     }
 }
 
-impl<T: Eq + Clone + Named> Accumulator for RankedValues<T> {
-    type State = Self;
-    type Update = Self;
-
-    fn accumulate(&self, state: &mut Self::State, update: Self::Update) -> anyhow::Result<()> {
-        state.merge_from(update);
-        Ok(())
-    }
-
-    fn reducer_spec(&self) -> Option<ReducerSpec> {
-        None
-        // TODO: make this work. When it is enabled, the comm actor simply halts.
-        // Some(ReducerSpec {
-        //     typehash: <RankedValuesReducer<T> as Named>::typehash(),
-        //     builder_params: None,
-        // })
-    }
+/// Spec for a host mesh agent to use when spawning a new proc.
+#[derive(Clone, Debug, Serialize, Deserialize, Named, Default)]
+pub(crate) struct ProcSpec {
+    /// Config values to set on the spawned proc's global config,
+    /// at the `ClientOverride` layer.
+    pub(crate) client_config_override: Attrs,
 }
 
-#[derive(Named)]
-struct RankedValuesReducer<T>(std::marker::PhantomData<T>);
-
-impl<T: Hash + Eq + Ord + Clone> CommReducer for RankedValuesReducer<T> {
-    type Update = RankedValues<T>;
-
-    fn reduce(&self, mut left: Self::Update, right: Self::Update) -> anyhow::Result<Self::Update> {
-        left.merge_from(right);
-        Ok(left)
-    }
-}
-
-// register for concrete types:
-
-hyperactor::submit! {
-    ReducerFactory {
-        typehash_f: <RankedValuesReducer<Status> as Named>::typehash,
-        builder_f: |_| Ok(Box::new(RankedValuesReducer::<Status>(PhantomData))),
+impl ProcSpec {
+    pub(crate) fn new(client_config_override: Attrs) -> Self {
+        Self {
+            client_config_override,
+        }
     }
 }
 
@@ -424,5 +623,37 @@ mod tests {
         assert_eq!(left.rank(16), 13);
         assert_eq!(left.rank(70), 62);
         assert_eq!(left.rank(100), 62);
+    }
+
+    #[test]
+    fn test_equality() {
+        assert_eq!(
+            RankedValues::from((0..10, 123)),
+            RankedValues::from((0..10, 123))
+        );
+        assert_eq!(
+            RankedValues::from((0..10, Status::Failed("foo".to_string()))),
+            RankedValues::from((0..10, Status::Failed("foo".to_string()))),
+        );
+    }
+
+    #[test]
+    fn test_default_through_merging() {
+        let values: RankedValues<usize> =
+            [(0..10, 1), (15..20, 1), (30..50, 1)].into_iter().collect();
+
+        let mut default = RankedValues::from((0..50, 0));
+        default.merge_from(values);
+
+        assert_eq!(
+            default.iter().cloned().collect::<Vec<_>>(),
+            vec![
+                (0..10, 1),
+                (10..15, 0),
+                (15..20, 1),
+                (20..30, 0),
+                (30..50, 1)
+            ]
+        );
     }
 }

@@ -120,6 +120,7 @@ counters.increment.broadcast()
 # Note however that all messages (including broadcasts) are delivered in the order sent by
 # the client (about which more later).
 
+
 # %%
 # Slicing Meshes
 # --------------
@@ -182,6 +183,24 @@ trainers = trainer_procs.spawn("trainer", Trainer)
 # Do one training step and wait for all to finish it
 
 print(trainers.step.call().get())
+
+# %%
+# Logging
+# ---------------------
+# Since we're talking about having multiple hosts now, it's worth briefly covering how Monarch handles distributed logging.
+# User logs from a Monarch job are routed to stdout and stderr of the corresponding process.
+# In distributed runs, you can stream all worker logs to the client and aggregate them to reduce verbosity:
+
+procs.logging_option(stream_to_client=True, aggregate_window_sec=3)
+
+
+# %%
+# With stream_to_client=True, Monarch forwards logs from all processes (best effort)
+# and applies a windowed aggregator that collapses similar lines and emits summaries that allow to get a holistic view of the job.
+#
+# If you wish to inspect Monarch system logs, you can find them at ``/tmp/$USER/monarch*`` on the servers running the client and the other Monarch processes.
+# You can override the log levels by setting ``MONARCH_FILE_LOG`` (stdout), and ``MONARCH_STDERR_LOG`` (stderr).  Valid values
+# include ``["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]``.
 
 # %%
 # Actor and Process References

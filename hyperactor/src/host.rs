@@ -57,6 +57,7 @@ use tokio::sync::Mutex;
 
 use crate::Actor;
 use crate::ActorHandle;
+use crate::ActorId;
 use crate::ActorRef;
 use crate::PortHandle;
 use crate::Proc;
@@ -133,7 +134,7 @@ impl<M: ProcManager> Host<M> {
         manager: M,
         addr: ChannelAddr,
     ) -> Result<(Self, MailboxServerHandle), HostError> {
-        let (frontend_addr, frontend_rx) = channel::serve(addr)?;
+        let (frontend_addr, frontend_rx) = channel::serve(addr, "host frontend")?;
 
         // We set up a cascade of routers: first, the outer router supports
         // sending to the the system proc, while the dial router manages dialed
@@ -142,7 +143,8 @@ impl<M: ProcManager> Host<M> {
 
         // Establish a backend channel on the preferred transport. We currently simply
         // serve the same router on both.
-        let (backend_addr, backend_rx) = channel::serve(ChannelAddr::any(manager.transport()))?;
+        let (backend_addr, backend_rx) =
+            channel::serve(ChannelAddr::any(manager.transport()), "host backend")?;
 
         // Set up a system proc. This is often used to manage the host itself.
         let service_proc_id = ProcId::Direct(frontend_addr.clone(), "service".to_string());
@@ -197,6 +199,7 @@ impl<M: ProcManager> Host<M> {
     pub async fn spawn(
         &mut self,
         name: String,
+        config: M::Config,
     ) -> Result<(ProcId, ActorRef<ManagerAgent<M>>), HostError> {
         if self.procs.contains_key(&name) {
             return Err(HostError::ProcExists(name));
@@ -205,7 +208,7 @@ impl<M: ProcManager> Host<M> {
         let proc_id = ProcId::Direct(self.frontend_addr.clone(), name.clone());
         let handle = self
             .manager
-            .spawn(proc_id.clone(), self.backend_addr.clone())
+            .spawn(proc_id.clone(), self.backend_addr.clone(), config)
             .await?;
 
         // Await readiness (config-driven; 0s disables timeout).
@@ -377,6 +380,35 @@ impl fmt::Display for TerminateSummary {
     }
 }
 
+#[async_trait::async_trait]
+/// Trait for terminating a single proc.
+pub trait SingleTerminate: Send + Sync {
+    /// Gracefully terminate the given proc.
+    ///
+    /// Initiates a polite shutdown for each child, waits up to
+    /// `timeout` for completion, then escalates to a forceful stop
+    /// The returned [`TerminateSummary`] reports how
+    /// many children were attempted, succeeded, and failed.
+    ///
+    /// Implementation notes:
+    /// - "Polite shutdown" and "forceful stop" are intentionally
+    ///   abstract. Implementors should map these to whatever
+    ///   semantics they control (e.g., proc-level drain/abort, RPCs,
+    ///   OS signals).
+    /// - The operation must be idempotent and tolerate races with
+    ///   concurrent termination or external exits.
+    ///
+    /// # Parameters
+    /// - `timeout`: Per-child grace period before escalation to a
+    ///   forceful stop.
+    /// Returns a tuple of (polite shutdown actors vec, forceful stop actors vec)
+    async fn terminate_proc(
+        &self,
+        proc: &ProcId,
+        timeout: std::time::Duration,
+    ) -> Result<(Vec<ActorId>, Vec<ActorId>), anyhow::Error>;
+}
+
 /// Trait for managers that can terminate many child **units** in
 /// bulk.
 ///
@@ -439,6 +471,17 @@ impl<M: ProcManager + BulkTerminate> Host<M> {
         max_in_flight: usize,
     ) -> TerminateSummary {
         self.manager.terminate_all(timeout, max_in_flight).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<M: ProcManager + SingleTerminate> SingleTerminate for Host<M> {
+    async fn terminate_proc(
+        &self,
+        proc: &ProcId,
+        timeout: Duration,
+    ) -> Result<(Vec<ActorId>, Vec<ActorId>), anyhow::Error> {
+        self.manager.terminate_proc(proc, timeout).await
     }
 }
 
@@ -541,6 +584,9 @@ pub trait ProcManager {
     /// Concrete handle type this manager returns.
     type Handle: ProcHandle;
 
+    /// Additional configuration for the proc, supported by this manager.
+    type Config = ();
+
     /// The preferred transport for this ProcManager.
     /// In practice this will be [`ChannelTransport::Local`]
     /// for testing, and [`ChannelTransport::Unix`] for external
@@ -558,6 +604,7 @@ pub trait ProcManager {
         &self,
         proc_id: ProcId,
         forwarder_addr: ChannelAddr,
+        config: Self::Config,
     ) -> Result<Self::Handle, HostError>;
 }
 
@@ -641,6 +688,29 @@ where
             attempted,
             ok,
             failed: attempted.saturating_sub(ok),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> SingleTerminate for LocalProcManager<S>
+where
+    S: Send + Sync,
+{
+    async fn terminate_proc(
+        &self,
+        proc: &ProcId,
+        timeout: std::time::Duration,
+    ) -> Result<(Vec<ActorId>, Vec<ActorId>), anyhow::Error> {
+        // Snapshot procs so we don't hold the lock across awaits.
+        let procs: Option<Proc> = {
+            let mut guard = self.procs.lock().await;
+            guard.remove(proc)
+        };
+        if let Some(mut p) = procs {
+            p.destroy_and_wait::<()>(timeout, None).await
+        } else {
+            Err(anyhow::anyhow!("proc {} doesn't exist", proc))
         }
     }
 }
@@ -788,13 +858,17 @@ where
         &self,
         proc_id: ProcId,
         forwarder_addr: ChannelAddr,
+        _config: (),
     ) -> Result<Self::Handle, HostError> {
         let transport = forwarder_addr.transport();
         let proc = Proc::new(
             proc_id.clone(),
             MailboxClient::dial(forwarder_addr)?.into_boxed(),
         );
-        let (proc_addr, rx) = channel::serve(ChannelAddr::any(transport))?;
+        let (proc_addr, rx) = channel::serve(
+            ChannelAddr::any(transport),
+            &format!("LocalProcManager spawning: {}", &proc_id),
+        )?;
         self.procs
             .lock()
             .await
@@ -963,9 +1037,12 @@ where
         &self,
         proc_id: ProcId,
         forwarder_addr: ChannelAddr,
+        _config: (),
     ) -> Result<Self::Handle, HostError> {
-        let (callback_addr, mut callback_rx) =
-            channel::serve(ChannelAddr::any(ChannelTransport::Unix))?;
+        let (callback_addr, mut callback_rx) = channel::serve(
+            ChannelAddr::any(ChannelTransport::Unix),
+            &format!("ProcessProcManager spawning: {}", &proc_id),
+        )?;
 
         let mut cmd = Command::new(&self.program);
         cmd.env("HYPERACTOR_HOST_PROC_ID", proc_id.to_string());
@@ -1072,11 +1149,14 @@ where
 
     let agent_handle = spawn(proc.clone())
         .await
-        .map_err(|e| HostError::AgentSpawnFailure(proc_id, e))?;
+        .map_err(|e| HostError::AgentSpawnFailure(proc_id.clone(), e))?;
 
     // Finally serve the proc on the same transport as the backend address,
     // and call back.
-    let (proc_addr, proc_rx) = channel::serve(ChannelAddr::any(backend_transport))?;
+    let (proc_addr, proc_rx) = channel::serve(
+        ChannelAddr::any(backend_transport),
+        &format!("proc addr of: {}", &proc_id),
+    )?;
     proc.clone().serve(proc_rx);
     channel::dial(callback_addr)?
         .send((proc_addr, agent_handle.bind::<A>()))
@@ -1139,14 +1219,14 @@ mod tests {
                 .await
                 .unwrap();
 
-        let (proc_id1, _ref) = host.spawn("proc1".to_string()).await.unwrap();
+        let (proc_id1, _ref) = host.spawn("proc1".to_string(), ()).await.unwrap();
         assert_eq!(
             proc_id1,
             ProcId::Direct(host.addr().clone(), "proc1".to_string())
         );
         assert!(procs.lock().await.contains_key(&proc_id1));
 
-        let (proc_id2, _ref) = host.spawn("proc2".to_string()).await.unwrap();
+        let (proc_id2, _ref) = host.spawn("proc2".to_string(), ()).await.unwrap();
         assert!(procs.lock().await.contains_key(&proc_id2));
 
         let proc1 = procs.lock().await.get(&proc_id1).unwrap().clone();
@@ -1210,13 +1290,13 @@ mod tests {
 
         // (1) Spawn and check invariants.
         assert!(matches!(host.addr().transport(), ChannelTransport::Unix));
-        let (proc1, echo1) = host.spawn("proc1".to_string()).await.unwrap();
-        let (proc2, echo2) = host.spawn("proc2".to_string()).await.unwrap();
+        let (proc1, echo1) = host.spawn("proc1".to_string(), ()).await.unwrap();
+        let (proc2, echo2) = host.spawn("proc2".to_string(), ()).await.unwrap();
         assert_eq!(echo1.actor_id().proc_id(), &proc1);
         assert_eq!(echo2.actor_id().proc_id(), &proc2);
 
         // (2) Duplicate name rejection.
-        let dup = host.spawn("proc1".to_string()).await;
+        let dup = host.spawn("proc1".to_string(), ()).await;
         assert!(matches!(dup, Err(HostError::ProcExists(_))));
 
         // (3) Create a standalone client proc and verify echo1 agent responds.
@@ -1401,10 +1481,12 @@ mod tests {
         fn transport(&self) -> ChannelTransport {
             self.transport.clone()
         }
+
         async fn spawn(
             &self,
             proc_id: ProcId,
             forwarder_addr: ChannelAddr,
+            _config: (),
         ) -> Result<Self::Handle, HostError> {
             let agent = ActorRef::<()>::attest(proc_id.actor_id("agent", 0));
             Ok(TestHandle {
@@ -1433,7 +1515,7 @@ mod tests {
         .await
         .unwrap();
 
-        let err = host.spawn("t".into()).await.expect_err("must time out");
+        let err = host.spawn("t".into(), ()).await.expect_err("must time out");
         assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
     }
 
@@ -1452,7 +1534,7 @@ mod tests {
         .await
         .unwrap();
 
-        let (pid, agent) = host.spawn("ok".into()).await.expect("must succeed");
+        let (pid, agent) = host.spawn("ok".into(), ()).await.expect("must succeed");
         assert_eq!(agent.actor_id().proc_id(), &pid);
         assert!(host.procs.contains_key("ok"));
     }
@@ -1466,7 +1548,7 @@ mod tests {
         .await
         .unwrap();
 
-        let err = host.spawn("p".into()).await.expect_err("must fail");
+        let err = host.spawn("p".into(), ()).await.expect_err("must fail");
         assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
     }
 
@@ -1479,7 +1561,7 @@ mod tests {
         .await
         .unwrap();
 
-        let err = host.spawn("p".into()).await.expect_err("must fail");
+        let err = host.spawn("p".into(), ()).await.expect_err("must fail");
         assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
     }
 
@@ -1492,7 +1574,10 @@ mod tests {
         .await
         .unwrap();
 
-        let err = host.spawn("no-addr".into()).await.expect_err("must fail");
+        let err = host
+            .spawn("no-addr".into(), ())
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
     }
 
@@ -1505,7 +1590,10 @@ mod tests {
         .await
         .unwrap();
 
-        let err = host.spawn("no-agent".into()).await.expect_err("must fail");
+        let err = host
+            .spawn("no-agent".into(), ())
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, HostError::ProcessConfigurationFailure(_, _)));
     }
 }

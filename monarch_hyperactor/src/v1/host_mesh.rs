@@ -17,6 +17,7 @@ use ndslice::View;
 use ndslice::view::RankedSliceable;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyException;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -81,6 +82,15 @@ impl PyBootstrapCommand {
             env: self.env.clone(),
         }
     }
+
+    pub fn default<'py>(py: Python<'py>) -> PyResult<Bound<'py, Self>> {
+        py.import("monarch._src.actor.v1.host_mesh")?
+            .getattr("_bootstrap_cmd")?
+            .call0()?
+            .downcast::<PyBootstrapCommand>()
+            .cloned()
+            .map_err(to_py_error)
+    }
 }
 
 #[pyclass(
@@ -119,6 +129,8 @@ impl PyHostMesh {
         name: String,
         bootstrap_params: Option<PyBootstrapCommand>,
     ) -> PyResult<PyPythonTask> {
+        let bootstrap_params =
+            bootstrap_params.map_or_else(|| alloc.bootstrap_command.clone(), |b| Some(b.to_rust()));
         let alloc = match alloc.take() {
             Some(alloc) => alloc,
             None => {
@@ -130,13 +142,7 @@ impl PyHostMesh {
         let instance = instance.clone();
         PyPythonTask::new(async move {
             let mesh = instance_dispatch!(instance, async move |cx_instance| {
-                HostMesh::allocate(
-                    cx_instance,
-                    alloc,
-                    &name,
-                    bootstrap_params.map(|p| p.to_rust()),
-                )
-                .await
+                HostMesh::allocate(cx_instance, alloc, &name, bootstrap_params).await
             })
             .map_err(|err| PyException::new_err(err.to_string()))?;
             Ok(Self::new_owned(mesh))
@@ -182,6 +188,29 @@ impl PyHostMesh {
                 .getattr("py_host_mesh_from_bytes")?;
         Ok((from_bytes, py_bytes))
     }
+
+    fn __eq__(&self, other: &PyHostMesh) -> PyResult<bool> {
+        Ok(self.mesh_ref()? == other.mesh_ref()?)
+    }
+
+    fn shutdown(&self, instance: &PyInstance) -> PyResult<PyPythonTask> {
+        match self {
+            PyHostMesh::Owned(inner) => {
+                let instance = instance.clone();
+                let mesh_borrow = inner.0.borrow().map_err(anyhow::Error::from)?;
+                let fut = async move {
+                    instance_dispatch!(instance, |cx_instance| {
+                        mesh_borrow.shutdown(cx_instance).await
+                    })?;
+                    Ok(())
+                };
+                PyPythonTask::new(fut)
+            }
+            PyHostMesh::Ref(_) => Err(PyRuntimeError::new_err(
+                "cannot shut down `HostMesh` that is a reference instead of owned",
+            )),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -189,14 +218,14 @@ impl PyHostMesh {
     name = "HostMeshImpl",
     module = "monarch._rust_bindings.monarch_hyperactor.v1.host_mesh"
 )]
-struct PyHostMeshImpl(SharedCell<HostMesh>);
+pub(crate) struct PyHostMeshImpl(SharedCell<HostMesh>);
 
 #[derive(Debug, Clone)]
 #[pyclass(
     name = "HostMeshRefImpl",
     module = "monarch._rust_bindings.monarch_hyperactor.v1.host_mesh"
 )]
-struct PyHostMeshRefImpl(HostMeshRef);
+pub(crate) struct PyHostMeshRefImpl(HostMeshRef);
 
 impl PyHostMeshRefImpl {
     fn __repr__(&self) -> PyResult<String> {
