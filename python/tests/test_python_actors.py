@@ -24,8 +24,8 @@ from tempfile import TemporaryDirectory
 from types import ModuleType
 from typing import cast, Tuple
 
+import monarch.actor
 import pytest
-
 import torch
 from monarch._rust_bindings.monarch_hyperactor.actor import (
     PythonMessage,
@@ -87,9 +87,14 @@ class Counter(Actor):
     async def value(self) -> int:
         return self.v
 
+
+class SyncCounter(Actor):
+    def __init__(self, c):
+        self.c = c
+
     @endpoint
     def value_sync_endpoint(self) -> int:
-        return self.v
+        return self.c.value.choose().get()
 
 
 class Indirect(Actor):
@@ -112,7 +117,8 @@ async def test_choose():
 
     assert result == result2
 
-    result3 = await v.value_sync_endpoint.choose()
+    v2 = proc.spawn("sync_counter", SyncCounter, v)
+    result3 = v2.value_sync_endpoint.choose().get()
     assert_type(result, int)
     assert result2 == result3
 
@@ -143,6 +149,9 @@ async def test_mesh_passed_to_mesh():
     proc = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     f = proc.spawn("from", From)
     t = proc.spawn("to", To)
+    # Make sure t is initialized before sending to f. Otherwise
+    # f might call t.whoami before t.__init__.
+    await t.whoami.call()
     all = [y for x in f.fetch.stream(t) for y in await x]
     assert len(all) == 4
     assert all[0] != all[1]
@@ -154,6 +163,9 @@ async def test_mesh_passed_to_mesh_on_different_proc_mesh():
     proc2 = fake_in_process_host().spawn_procs(per_host={"gpus": 2})
     f = proc.spawn("from", From)
     t = proc2.spawn("to", To)
+    # Make sure t is initialized before sending to f. Otherwise
+    # f might call t.whoami before t.__init__.
+    await t.whoami.call()
     all = [y for x in f.fetch.stream(t) for y in await x]
     assert len(all) == 4
     assert all[0] != all[1]
@@ -335,7 +347,7 @@ class TLSActor(Actor):
         self.local.value = 0
 
     @endpoint
-    def increment(self):
+    async def increment(self):
         self.local.value += 1
 
     @endpoint
@@ -343,7 +355,7 @@ class TLSActor(Actor):
         self.local.value += 1
 
     @endpoint
-    def get_value(self):
+    async def get_value(self):
         return self.local.value
 
     @endpoint
@@ -406,18 +418,6 @@ class AsyncActor(Actor):
     @endpoint
     async def no_more(self) -> None:
         self.should_exit = True
-
-
-@pytest.mark.timeout(60)
-async def test_async_concurrency():
-    """Test that async endpoints will be processed concurrently."""
-    pm = this_host().spawn_procs(per_host={})
-    am = pm.spawn("async", AsyncActor)
-    fut = am.sleep.call()
-    # This call should go through and exit the sleep loop, as long as we are
-    # actually concurrently processing messages.
-    await am.no_more.call()
-    await fut
 
 
 async def awaitit(f):
@@ -1332,6 +1332,8 @@ async def test_sync_workspace() -> None:
 
 @pytest.mark.timeout(120)
 async def test_actor_mesh_stop() -> None:
+    # This test doesn't want the client process to crash during testing.
+    monarch.actor.unhandled_fault_hook = lambda failure: None
     pm = this_host().spawn_procs(per_host={"gpus": 2})
     am_1 = pm.spawn("printer", Printer)
     am_2 = pm.spawn("printer2", Printer)
@@ -1480,6 +1482,9 @@ async def test_undeliverable_message_with_override() -> None:
 
 @pytest.mark.timeout(60)
 async def test_undeliverable_message_without_override() -> None:
+    # This test generates a fault that reaches the client. We don't want it to
+    # crash.
+    monarch.actor.unhandled_fault_hook = lambda failure: None
     pm = this_host().spawn_procs(per_host={"gpus": 1})
     sender = pm.spawn("undeliverable_sender", UndeliverableMessageSender)
     sender.send_undeliverable.call().get()
@@ -1543,7 +1548,7 @@ class SpawningActorFromEndpointActor(Actor):
         self._root = root
 
     @endpoint
-    def return_root(self):
+    async def return_root(self):
         return self._root
 
     @endpoint

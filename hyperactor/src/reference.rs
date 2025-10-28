@@ -1051,6 +1051,7 @@ impl<M: RemoteMessage> PortRef<M> {
         message: Serialized,
     ) {
         crate::mailbox::headers::set_send_timestamp(&mut headers);
+        crate::mailbox::headers::set_rust_message_type::<M>(&mut headers);
         cx.post(self.port_id.clone(), headers, message);
     }
 
@@ -1321,22 +1322,21 @@ impl<A: Referable> GangRef<A> {
     pub fn gang_id(&self) -> &GangId {
         &self.gang_id
     }
+
+    /// The caller attests that the provided GandId can be
+    /// converted to a reachable, typed gang reference.
+    pub fn attest(gang_id: GangId) -> Self {
+        Self {
+            gang_id,
+            phantom: PhantomData,
+        }
+    }
 }
 
 impl<A: Referable> Clone for GangRef<A> {
     fn clone(&self) -> Self {
         Self {
             gang_id: self.gang_id.clone(),
-            phantom: PhantomData,
-        }
-    }
-}
-
-// TODO: remove, replace with attest
-impl<A: Referable> From<GangId> for GangRef<A> {
-    fn from(gang_id: GangId) -> Self {
-        Self {
-            gang_id,
             phantom: PhantomData,
         }
     }

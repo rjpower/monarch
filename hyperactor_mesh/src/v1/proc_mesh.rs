@@ -45,6 +45,7 @@ use ndslice::view::Ranked;
 use ndslice::view::Region;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::sync::Notify;
 
 use crate::CommActor;
 use crate::alloc::Alloc;
@@ -295,7 +296,10 @@ impl ProcMesh {
         let proc = cx.instance().proc();
 
         // First make sure we can serve the proc:
-        let (proc_channel_addr, rx) = channel::serve(ChannelAddr::any(alloc.transport()))?;
+        let (proc_channel_addr, rx) = channel::serve(
+            ChannelAddr::any(alloc.transport()),
+            &format!("proc_channel_addr for {}", proc.proc_id()),
+        )?;
         proc.clone().serve(rx);
 
         let bind_allocated_procs = |router: &DialMailboxRouter| {
@@ -378,11 +382,46 @@ impl ProcMesh {
             })
             .collect();
 
+        let stop = Arc::new(Notify::new());
+        let name = Name::new(name);
+        let extent = alloc.extent().clone();
+
+        {
+            let stop = Arc::clone(&stop);
+            let name = name.clone();
+
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = stop.notified() => {
+                            // If we are explicitly stopped, the alloc is torn down.
+                            if let Err(e) = alloc.stop_and_wait().await {
+                                tracing::error!("alloc {}: failed to stop: {}", name, e);
+                            }
+                            break;
+                        }
+                        // We are mostly just using this to drive allocation events.
+                        proc_state = alloc.next() => {
+                            match proc_state {
+                                // The alloc was stopped.
+                                None => break,
+                                Some(proc_state) => {
+                                    tracing::info!("unmonitored allocation event for {}: {}", name, proc_state);
+                                }
+                            }
+
+                        }
+                    }
+                }
+            });
+        }
+
         Self::create(
             cx,
-            Name::new(name),
+            name,
             ProcMeshAllocation::Allocated {
-                alloc,
+                stop,
+                extent,
                 ranks: Arc::new(ranks),
             },
             true, // alloc-based meshes support comm actors
@@ -392,6 +431,7 @@ impl ProcMesh {
 
     /// Detach the proc mesh from the lifetime of `self`, and return its reference.
     pub(crate) fn detach(self) -> ProcMeshRef {
+        // This also keeps the ProcMeshAllocation::Allocated alloc task alive.
         self.current_ref
     }
 
@@ -399,8 +439,9 @@ impl ProcMesh {
     pub async fn stop(&mut self, cx: &impl context::Actor) -> anyhow::Result<()> {
         let region = self.region.clone();
         match &mut self.allocation {
-            ProcMeshAllocation::Allocated { alloc, .. } => {
-                alloc.stop_and_wait().await.map_err(|e| e.into())
+            ProcMeshAllocation::Allocated { stop, .. } => {
+                stop.notify_one();
+                Ok(())
             }
             ProcMeshAllocation::Owned { hosts, .. } => {
                 let names = self.current_ref.proc_ids().collect::<Vec<ProcId>>();
@@ -430,9 +471,10 @@ impl Deref for ProcMesh {
 enum ProcMeshAllocation {
     /// A mesh that has been allocated from an `Alloc`.
     Allocated {
-        // We have to hold on to the alloc for the duration of the mesh lifetime.
-        // The procmesh inherits the alloc's extent.
-        alloc: Box<dyn Alloc + Send + Sync + 'static>,
+        // A cancellation token used to stop the task keeping the alloc alive.
+        stop: Arc<Notify>,
+
+        extent: Extent,
 
         // The allocated ranks.
         ranks: Arc<Vec<ProcRef>>,
@@ -453,7 +495,7 @@ enum ProcMeshAllocation {
 impl ProcMeshAllocation {
     fn extent(&self) -> &Extent {
         match self {
-            ProcMeshAllocation::Allocated { alloc, .. } => alloc.extent(),
+            ProcMeshAllocation::Allocated { extent, .. } => &extent,
             ProcMeshAllocation::Owned { extent, .. } => extent,
         }
     }
@@ -607,7 +649,8 @@ impl ProcMeshRef {
                 }
             } else {
                 tracing::error!(
-                    "timeout waiting for a message from proc mesh agent in mesh: {}",
+                    "timeout waiting for a message after {:?} from proc mesh agent in mesh {}",
+                    timeout,
                     agent_mesh
                 );
                 // Timeout error, stop reading from the receiver and send back what we have so far,
