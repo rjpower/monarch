@@ -21,8 +21,8 @@ from typing import Generator, Optional
 from unittest import mock
 
 import cloudpickle
+import monarch.actor
 import pytest
-
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -42,7 +42,7 @@ from monarch._src.actor.allocator import (
     StaticRemoteAllocInitializer,
     TorchXRemoteAllocInitializer,
 )
-from monarch._src.actor.host_mesh import HostMesh
+from monarch._src.actor.host_mesh import _bootstrap_cmd, HostMesh
 from monarch._src.actor.proc_mesh import ProcMesh
 from monarch._src.actor.sync_state import fake_sync_state
 from monarch.actor import Actor, current_rank, current_size, endpoint, ValueMesh
@@ -63,7 +63,11 @@ def proc_mesh_from_alloc(
     constraints: Optional[AllocConstraints] = None,
 ) -> ProcMesh:
     return HostMesh.allocate_nonblocking(
-        "hosts", Extent(*zip(*list(spec.extent.items()))), allocator, constraints
+        "hosts",
+        Extent(*zip(*list(spec.extent.items()))),
+        allocator,
+        constraints,
+        bootstrap_cmd=_bootstrap_cmd(),
     ).spawn_procs(bootstrap=setup)
 
 
@@ -169,6 +173,8 @@ class TestSetupActorInAllocator(unittest.IsolatedAsyncioTestCase):
             "TEST_ENV_VAR_2": "value_2",
             "TEST_ENV_VAR_3": "value_3",
         }
+        # If the proc mesh is stopped, don't crash the process.
+        monarch.actor.unhandled_fault_hook = lambda failure: None
 
         def setup_multiple_env_vars() -> None:
             for name, value in env_vars.items():
@@ -242,6 +248,9 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
         self.assertDictEqual(expected_world_sizes, computed_world_sizes)
 
     async def test_allocate_failure_message(self) -> None:
+        # This will generate a supervision failure, and we don't want to crash
+        # the test process.
+        monarch.actor.unhandled_fault_hook = lambda failure: None
         spec = AllocSpec(AllocConstraints(), host=2, gpu=4)
 
         with self.assertRaisesRegex(
@@ -319,6 +328,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
 
     @pytest.mark.oss_skip  # pyre-ignore[56]: Pyre cannot infer the type of this pytest marker
     async def test_allocate_2d_mesh(self) -> None:
+        monarch.actor.unhandled_fault_hook = lambda failure: None
         hosts = 2
         gpus = 4
         world_size = hosts * gpus
@@ -340,8 +350,8 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
 
             self.assert_computed_world_size(values, world_size)
 
-    @pytest.mark.skip("stop proc mesh not supported yet in v1")
     async def test_stop_proc_mesh_blocking(self) -> None:
+        monarch.actor.unhandled_fault_hook = lambda failure: None
         spec = AllocSpec(AllocConstraints(), host=2, gpu=4)
         with remote_process_allocator() as host1, remote_process_allocator() as host2:
             allocator = RemoteAllocator(
@@ -536,6 +546,7 @@ class TestRemoteAllocator(unittest.IsolatedAsyncioTestCase):
 
     @pytest.mark.oss_skip  # pyre-ignore[56]: Pyre cannot infer the type of this pytest marker
     async def test_stacked_1d_meshes(self) -> None:
+        monarch.actor.unhandled_fault_hook = lambda failure: None
         # create two stacked actor meshes on the same host
         # each actor mesh running on separate process-allocators
 

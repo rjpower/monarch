@@ -9,9 +9,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::net::Ipv6Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -187,7 +184,8 @@ impl RemoteProcessAllocator {
         <A as Allocator>::Alloc: Sync,
     {
         tracing::info!("starting remote allocator on: {}", serve_addr);
-        let (_, mut rx) = channel::serve(serve_addr.clone()).map_err(anyhow::Error::from)?;
+        let (_, mut rx) = channel::serve(serve_addr.clone(), "RemoteProcessAllocator serve addr")
+            .map_err(anyhow::Error::from)?;
 
         struct ActiveAllocation {
             handle: JoinHandle<()>,
@@ -322,13 +320,14 @@ impl RemoteProcessAllocator {
     ) {
         tracing::info!("handle allocation request, bootstrap_addr: {bootstrap_addr}");
         // start proc message forwarder
-        let (forwarder_addr, forwarder_rx) = match forwarder_addr.serve_with_config() {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!("failed to to bootstrap forwarder actor: {}", e);
-                return;
-            }
-        };
+        let (forwarder_addr, forwarder_rx) =
+            match forwarder_addr.serve_with_config("handle_allocation_request: forwarder_addr") {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("failed to to bootstrap forwarder actor: {}", e);
+                    return;
+                }
+            };
         let router = DialMailboxRouter::new();
         let mailbox_handle = router.clone().serve(forwarder_rx);
         tracing::info!("started forwarder on: {}", forwarder_addr);
@@ -630,7 +629,7 @@ impl RemoteProcessAlloc {
             None => AllocAssignedAddr::new(ChannelAddr::any(spec.transport.clone())),
         };
 
-        let (bootstrap_addr, rx) = alloc_serve_addr.serve_with_config()?;
+        let (bootstrap_addr, rx) = alloc_serve_addr.serve_with_config("alloc bootstrap_addr")?;
 
         tracing::info!(
             "starting alloc for {} on: {}",
@@ -779,8 +778,7 @@ impl RemoteProcessAlloc {
                 }
                 ChannelTransport::Tcp(TcpMode::Localhost) => {
                     // TODO: @rusch see about moving over to config for this
-                    let ip = IpAddr::V6(Ipv6Addr::LOCALHOST);
-                    format!("tcp!{}:{}", ip, self.remote_allocator_port)
+                    format!("tcp![::1]:{}", self.remote_allocator_port)
                 }
                 ChannelTransport::Tcp(TcpMode::Hostname) => {
                     format!("tcp!{}:{}", host.hostname, self.remote_allocator_port)
@@ -1328,7 +1326,7 @@ mod test {
         hyperactor_telemetry::initialize_logging_for_test();
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
         let bootstrap_addr = ChannelAddr::any(ChannelTransport::Unix);
-        let (_, mut rx) = channel::serve(bootstrap_addr.clone()).unwrap();
+        let (_, mut rx) = channel::serve(bootstrap_addr.clone(), "test").unwrap();
 
         let extent = extent!(host = 1, gpu = 2);
         let tx = channel::dial(serve_addr.clone()).unwrap();
@@ -1484,7 +1482,7 @@ mod test {
         hyperactor_telemetry::initialize_logging_for_test();
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
         let bootstrap_addr = ChannelAddr::any(ChannelTransport::Unix);
-        let (_, mut rx) = channel::serve(bootstrap_addr.clone()).unwrap();
+        let (_, mut rx) = channel::serve(bootstrap_addr.clone(), "test").unwrap();
 
         let extent = extent!(host = 1, gpu = 2);
         let tx = channel::dial(serve_addr.clone()).unwrap();
@@ -1565,7 +1563,7 @@ mod test {
         hyperactor_telemetry::initialize_logging_for_test();
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
         let bootstrap_addr = ChannelAddr::any(ChannelTransport::Unix);
-        let (_, mut rx) = channel::serve(bootstrap_addr.clone()).unwrap();
+        let (_, mut rx) = channel::serve(bootstrap_addr.clone(), "test").unwrap();
 
         let extent = extent!(host = 1, gpu = 2);
 
@@ -1704,7 +1702,7 @@ mod test {
         hyperactor_telemetry::initialize_logging_for_test();
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
         let bootstrap_addr = ChannelAddr::any(ChannelTransport::Unix);
-        let (_, mut rx) = channel::serve(bootstrap_addr.clone()).unwrap();
+        let (_, mut rx) = channel::serve(bootstrap_addr.clone(), "test").unwrap();
 
         let extent = extent!(host = 1, gpu = 2);
 
@@ -1794,7 +1792,7 @@ mod test {
         hyperactor_telemetry::initialize_logging_for_test();
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
         let bootstrap_addr = ChannelAddr::any(ChannelTransport::Unix);
-        let (_, mut rx) = channel::serve(bootstrap_addr.clone()).unwrap();
+        let (_, mut rx) = channel::serve(bootstrap_addr.clone(), "test").unwrap();
 
         let extent = extent!(host = 1, gpu = 2);
 
@@ -1896,7 +1894,7 @@ mod test {
         hyperactor_telemetry::initialize_logging(ClockKind::default());
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
         let bootstrap_addr = ChannelAddr::any(ChannelTransport::Unix);
-        let (_, mut rx) = channel::serve(bootstrap_addr.clone()).unwrap();
+        let (_, mut rx) = channel::serve(bootstrap_addr.clone(), "test").unwrap();
 
         let extent = extent!(host = 1, gpu = 1);
         let tx = channel::dial(serve_addr.clone()).unwrap();
@@ -1977,7 +1975,7 @@ mod test {
         hyperactor_telemetry::initialize_logging(ClockKind::default());
         let serve_addr = ChannelAddr::any(ChannelTransport::Unix);
         let bootstrap_addr = ChannelAddr::any(ChannelTransport::Unix);
-        let (_, mut rx) = channel::serve(bootstrap_addr.clone()).unwrap();
+        let (_, mut rx) = channel::serve(bootstrap_addr.clone(), "test").unwrap();
 
         let extent = extent!(host = 1, gpu = 1);
         let tx = channel::dial(serve_addr.clone()).unwrap();
@@ -2457,7 +2455,7 @@ mod test_alloc {
         let hosts_per_proc_mesh = 5;
 
         let pid_addr = ChannelAddr::any(ChannelTransport::Unix);
-        let (pid_addr, mut pid_rx) = channel::serve::<u32>(pid_addr).unwrap();
+        let (pid_addr, mut pid_rx) = channel::serve::<u32>(pid_addr, "test").unwrap();
 
         let addresses = (0..(num_proc_meshes * hosts_per_proc_mesh))
             .map(|_| ChannelAddr::any(ChannelTransport::Unix).to_string())
@@ -2479,7 +2477,7 @@ mod test_alloc {
 
         let done_allocating_addr = ChannelAddr::any(ChannelTransport::Unix);
         let (done_allocating_addr, mut done_allocating_rx) =
-            channel::serve::<()>(done_allocating_addr).unwrap();
+            channel::serve::<()>(done_allocating_addr, "test").unwrap();
         let mut remote_process_alloc = Command::new(crate::testresource::get(
             "monarch/hyperactor_mesh/remote_process_alloc",
         ))

@@ -244,8 +244,10 @@ pub trait ActorMesh: Mesh<Id = ActorMeshId> {
                     .into_iter(),
             );
         }
-        let gang: GangRef<Self::Actor> =
-            GangId(self.proc_mesh().world_id().clone(), self.name().to_string()).into();
+        let gang: GangRef<Self::Actor> = GangRef::attest(GangId(
+            self.proc_mesh().world_id().clone(),
+            self.name().to_string(),
+        ));
         Box::new(self.shape().slice().iter().map(move |rank| gang.rank(rank)))
     }
 
@@ -1506,6 +1508,7 @@ mod tests {
                 let serialized = Serialized::serialize(pay).unwrap();
                 let mut headers = Attrs::new();
                 hyperactor::mailbox::headers::set_send_timestamp(&mut headers);
+                hyperactor::mailbox::headers::set_rust_message_type::<Payload>(&mut headers);
                 let envelope = MessageEnvelope::new(src.clone(), dst.clone(), serialized, headers);
                 let frame = Frame::Message(0u64, envelope);
                 let message = serde_multipart::serialize_illegal_bincode(&frame).unwrap();
@@ -1545,7 +1548,7 @@ mod tests {
 
             // Message sized to exactly max frame length.
             let payload = Payload {
-                part: Part::from(Bytes::from(vec![0u8; 698])),
+                part: Part::from(Bytes::from(vec![0u8; 588])),
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
@@ -1565,7 +1568,7 @@ mod tests {
 
             // Message sized to max frame length + 1.
             let payload = Payload {
-                part: Part::from(Bytes::from(vec![0u8; 699])),
+                part: Part::from(Bytes::from(vec![0u8; 589])),
                 reply_port: reply_handle.bind(),
             };
             let frame_len = frame_length(
@@ -1728,7 +1731,7 @@ mod tests {
             let config = hyperactor::config::global::lock();
             let _guard = config.override_key(MAX_CAST_DIMENSION_SIZE, 2);
 
-            let (_, mut rx) = serve::<usize>(addr).unwrap();
+            let (_, mut rx) = serve::<usize>(addr, "test").unwrap();
 
             let expected_ranks = selection
                 .eval(
