@@ -139,11 +139,11 @@ class Future(Generic[R]):
                     self._status = _Asyncio(fut)
 
                     def set_result(fut, value):
-                        if not fut.done():
+                        if not fut.cancelled():
                             fut.set_result(value)
 
                     def set_exception(fut, e):
-                        if not fut.done():
+                        if not fut.cancelled():
                             fut.set_exception(e)
 
                     async def mark_complete():
