@@ -428,11 +428,15 @@ impl MessageEnvelope {
 impl fmt::Display for MessageEnvelope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.error_msg() {
-            None => write!(f, "{} > {}: {}", self.sender, self.dest, self.data),
+            None => write!(
+                f,
+                "{} > {}: {} {{{}}}",
+                self.sender, self.dest, self.data, self.headers
+            ),
             Some(err) => write!(
                 f,
-                "{} > {}: {}: delivery error: {}",
-                self.sender, self.dest, self.data, err
+                "{} > {}: {} {{{}}}: delivery error: {}",
+                self.sender, self.dest, self.data, self.headers, err
             ),
         }
     }
@@ -1051,10 +1055,16 @@ pub trait MailboxServer: MailboxSender + Clone + Sized + 'static {
                         }
                     }
                     result = stopped_rx.changed(), if !detached  => {
-                        tracing::debug!(
-                            "the mailbox server is stopped"
-                        );
                         detached = result.is_err();
+                        if detached {
+                            tracing::debug!(
+                                "the mailbox server is detached for Rx {}", rx.addr()
+                            );
+                        } else {
+                            tracing::debug!(
+                                "the mailbox server is stopped for Rx {}", rx.addr()
+                            );
+                        }
                     }
                 }
             }
@@ -1160,7 +1170,7 @@ impl MailboxSender for MailboxClient {
         envelope: MessageEnvelope,
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
-        tracing::event!(target:"messages", tracing::Level::DEBUG,  "size"=envelope.data.len(), "sender"= %envelope.sender, "dest" = %envelope.dest.0, "port"= envelope.dest.1, "message_type" = envelope.data.typename().unwrap_or("unknown"), "send_message");
+        tracing::event!(target:"messages", tracing::Level::TRACE,  "size"=envelope.data.len(), "sender"= %envelope.sender, "dest" = %envelope.dest.0, "port"= envelope.dest.1, "message_type" = envelope.data.typename().unwrap_or("unknown"), "send_message");
         if let Err(mpsc::error::SendError((envelope, return_handle))) =
             self.buffer.send((envelope, return_handle))
         {
@@ -1509,7 +1519,14 @@ impl MailboxSender for Mailbox {
 
         match self.inner.ports.entry(envelope.dest().index()) {
             Entry::Vacant(_) => {
-                let err = DeliveryError::Unroutable("port not bound in mailbox".to_string());
+                let err = DeliveryError::Unroutable(format!(
+                    "port not bound in mailbox; port id: {}; message type: {}",
+                    envelope.dest().index(),
+                    envelope.data().typename().map_or_else(
+                        || format!("unregistered type hash {}", envelope.data().typehash()),
+                        |s| s.to_string(),
+                    )
+                ));
 
                 envelope.undeliverable(err, return_handle);
             }
@@ -1610,6 +1627,7 @@ impl<M: Message> PortHandle<M> {
         let mut headers = Attrs::new();
 
         crate::mailbox::headers::set_send_timestamp(&mut headers);
+        crate::mailbox::headers::set_rust_message_type::<M>(&mut headers);
 
         self.sender.send(headers, message).map_err(|err| {
             MailboxSenderError::new_unbound::<M>(
@@ -2849,7 +2867,7 @@ mod tests {
             .unwrap(),
         );
 
-        let (_, rx) = serve::<MessageEnvelope>(ChannelAddr::Sim(dst_addr.clone())).unwrap();
+        let (_, rx) = serve::<MessageEnvelope>(ChannelAddr::Sim(dst_addr.clone()), "test").unwrap();
         let tx = dial::<MessageEnvelope>(src_to_dst).unwrap();
         let mbox = Mailbox::new_detached(id!(test[0].actor0));
         let serve_handle = mbox.clone().serve(rx);
@@ -2978,7 +2996,8 @@ mod tests {
 
         let mut handles = Vec::new(); // hold on to handles, or channels get closed
         for mbox in mailboxes.iter() {
-            let (addr, rx) = channel::serve(ChannelAddr::any(ChannelTransport::Local)).unwrap();
+            let (addr, rx) =
+                channel::serve(ChannelAddr::any(ChannelTransport::Local), "test").unwrap();
             let handle = (*mbox).clone().serve(rx);
             handles.push(handle);
 
@@ -3060,7 +3079,7 @@ mod tests {
 
         assert_eq!(
             format!("{}", envelope),
-            r#"source[0].actor[0] > dest[1].actor[0][123]: MyTest{"a":123,"b":"hello"}"#
+            r#"source[0].actor[0] > dest[1].actor[0][123]: MyTest{"a":123,"b":"hello"} {}"#
         );
     }
 

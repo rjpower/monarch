@@ -245,11 +245,11 @@ fn send_result(
                     "None (run with `MONARCH_HYPERACTOR_UNAWAITED_PYTOKIO_TRACEBACK=1` to see a traceback here)\n".into()
                 };
                 tracing::error!(
-                    "PythonTask errored but is not being awaited: {}\nTraceback where the task was created (most recent call last):\n{}\nCrashing!",
+                    "PythonTask errored but is not being awaited; this will not crash your program, but indicates that \
+                    something went wrong.\n{}\nTraceback where the task was created (most recent call last):\n{}",
                     SerializablePyErr::from(py, &pyerr),
                     tb
                 );
-                std::process::exit(1);
             });
         }
         _ => {}
