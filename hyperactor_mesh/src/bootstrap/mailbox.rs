@@ -21,6 +21,7 @@ use hyperactor::mailbox::MailboxClient;
 use hyperactor::mailbox::MailboxSender;
 use hyperactor::mailbox::MessageEnvelope;
 use hyperactor::mailbox::Undeliverable;
+use crate::v1;
 
 /// LocalProcDialer dials local procs directly through a configured socket
 /// directory.
@@ -58,7 +59,11 @@ impl MailboxSender for LocalProcDialer {
         return_handle: PortHandle<Undeliverable<MessageEnvelope>>,
     ) {
         if let ProcId::Direct(addr, name) = envelope.dest().actor_id().proc_id()
-            && addr == &self.local_addr
+            // Only the local backend address applies...
+            && addr == &self.local_addr 
+            // ...and only non-system procs on that address; the rest are directly
+            // reachable through the backend address.
+            && name.parse::<v1::Name>().as_ref().is_ok_and(v1::Name::is_suffixed)
         {
             let senders = self.local_senders.read().unwrap();
             let senders = if senders.contains_key(name) {

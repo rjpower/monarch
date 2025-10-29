@@ -91,8 +91,7 @@ impl System {
             BoxedMailboxSender::new(self.sender().await?),
         );
 
-        let (proc_addr, proc_rx) =
-            channel::serve(ChannelAddr::any(self.addr.transport())).unwrap();
+        let (proc_addr, proc_rx) = channel::serve(ChannelAddr::any(self.addr.transport())).unwrap();
 
         let _proc_serve_handle: MailboxServerHandle = proc.clone().serve(proc_rx);
 

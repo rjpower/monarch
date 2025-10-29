@@ -65,6 +65,7 @@ use tokio::process::ChildStdout;
 use tokio::process::Command;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
+use tracing::Instrument;
 use tracing::Level;
 
 use crate::logging::OutputTarget;
@@ -355,7 +356,7 @@ impl Bootstrap {
                 socket_dir_path,
                 config,
             } => {
-                let _span = tracing::span!(
+                let entered = tracing::span!(
                     Level::INFO,
                     "proc_bootstrap",
                     %proc_id,
@@ -400,7 +401,10 @@ impl Bootstrap {
 
                 let proc = Proc::new(proc_id.clone(), proc_sender.into_boxed());
 
+                let span = entered.exit();
+
                 let agent_handle = ok!(ProcMeshAgent::boot_v1(proc.clone())
+                    .instrument(span.clone())
                     .await
                     .map_err(|e| HostError::AgentSpawnFailure(proc_id, e)));
 
@@ -410,6 +414,7 @@ impl Bootstrap {
                 proc.clone().serve(proc_rx);
                 ok!(ok!(channel::dial(callback_addr))
                     .send((proc_addr, agent_handle.bind::<ProcMeshAgent>()))
+                    .instrument(span)
                     .await
                     .map_err(ChannelError::from));
 
@@ -432,6 +437,7 @@ impl Bootstrap {
                     None => ok!(BootstrapCommand::current()),
                 };
                 let manager = BootstrapProcManager::new(command).unwrap();
+
                 let (host, _handle) = ok!(Host::serve(manager, addr).await);
                 let addr = host.addr().clone();
                 let host_mesh_agent = ok!(host
@@ -1547,6 +1553,11 @@ impl BootstrapProcManager {
         &self.command
     }
 
+    /// The socket directory, where per-proc Unix sockets are placed.
+    pub fn socket_dir(&self) -> &Path {
+        self.socket_dir.path()
+    }
+
     /// Return the current [`ProcStatus`] for the given [`ProcId`], if
     /// the proc is known to this manager.
     ///
@@ -1980,7 +1991,7 @@ async fn bootstrap_v0_proc_mesh() -> anyhow::Error {
             .parse()?;
         let listen_addr = ChannelAddr::any(bootstrap_addr.transport());
 
-        let _span = tracing::span!(
+        let entered = tracing::span!(
             Level::INFO,
             "bootstrap_v0_proc_mesh",
             %bootstrap_addr,
@@ -1998,6 +2009,8 @@ async fn bootstrap_v0_proc_mesh() -> anyhow::Error {
             rtx,
         )?;
         tokio::spawn(exit_if_missed_heartbeat(bootstrap_index, bootstrap_addr));
+
+        let _ = entered.exit();
 
         let mut the_msg;
 
@@ -2017,16 +2030,17 @@ async fn bootstrap_v0_proc_mesh() -> anyhow::Error {
             }
         }
         loop {
-            let _span =
-                tracing::span!(Level::INFO, "wait_for_next_message_from_mesh_agent").entered();
             match the_msg? {
                 Allocator2Process::StartProc(proc_id, listen_transport) => {
-                    let _span =
-                        tracing::span!(Level::INFO, "Allocator2Process::StartProc", %proc_id, %listen_transport).entered();
-                    let (proc, mesh_agent) = ProcMeshAgent::bootstrap(proc_id.clone()).await?;
+                    let span = tracing::span!(Level::INFO, "Allocator2Process::StartProc", %proc_id, %listen_transport);
+                    let (proc, mesh_agent) = ProcMeshAgent::bootstrap(proc_id.clone())
+                        .instrument(span.clone())
+                        .await?;
+                    let entered = span.entered();
                     let (proc_addr, proc_rx) = channel::serve(ChannelAddr::any(listen_transport))?;
                     let handle = proc.clone().serve(proc_rx);
                     drop(handle); // linter appeasement; it is safe to drop this future
+                    let span = entered.exit();
                     tx.send(Process2Allocator(
                         bootstrap_index,
                         Process2AllocatorMessage::StartedProc(
@@ -2035,6 +2049,7 @@ async fn bootstrap_v0_proc_mesh() -> anyhow::Error {
                             proc_addr,
                         ),
                     ))
+                    .instrument(span)
                     .await?;
                     procs.lock().await.push(proc);
                 }
