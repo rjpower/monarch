@@ -296,7 +296,10 @@ impl ProcMesh {
         let proc = cx.instance().proc();
 
         // First make sure we can serve the proc:
-        let (proc_channel_addr, rx) = channel::serve(ChannelAddr::any(alloc.transport()))?;
+        let (proc_channel_addr, rx) = channel::serve(
+            ChannelAddr::any(alloc.transport()),
+            &format!("proc_channel_addr for {}", proc.proc_id()),
+        )?;
         proc.clone().serve(rx);
 
         let bind_allocated_procs = |router: &DialMailboxRouter| {
@@ -646,7 +649,8 @@ impl ProcMeshRef {
                 }
             } else {
                 tracing::error!(
-                    "timeout waiting for a message from proc mesh agent in mesh: {}",
+                    "timeout waiting for a message after {:?} from proc mesh agent in mesh {}",
+                    timeout,
                     agent_mesh
                 );
                 // Timeout error, stop reading from the receiver and send back what we have so far,
