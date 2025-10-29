@@ -222,7 +222,8 @@ pub type Result<T> = std::result::Result<T, Error>;
     Ord,
     Hash,
     Serialize,
-    Deserialize
+    Deserialize,
+    EnumAsInner
 )]
 pub enum Name {
     /// Normal names for most actors.
