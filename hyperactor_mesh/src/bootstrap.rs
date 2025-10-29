@@ -1538,7 +1538,7 @@ impl BootstrapProcManager {
             children: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pid_table: Arc::new(std::sync::Mutex::new(HashMap::new())),
             file_appender: log_monitor,
-            socket_dir: tempfile::tempdir()?,
+            socket_dir: runtime_dir()?,
         })
     }
 
@@ -2168,6 +2168,18 @@ impl Write for Debug {
     }
 }
 
+/// Create a new runtime [`TempDir`]. The directory is created in
+/// `$XDG_RUNTIME_DIR`, otherwise falling back to the system tempdir.
+fn runtime_dir() -> io::Result<TempDir> {
+    match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(runtime_dir) => {
+            let path = PathBuf::from(runtime_dir);
+            tempfile::tempdir_in(path)
+        }
+        None => tempfile::tempdir(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -2269,7 +2281,7 @@ mod tests {
         attrs[MESH_TAIL_LOG_LINES] = 123;
         attrs[MESH_BOOTSTRAP_ENABLE_PDEATHSIG] = false;
 
-        let socket_dir = tempfile::tempdir().unwrap();
+        let socket_dir = runtime_dir().unwrap();
 
         // Proc case
         {
