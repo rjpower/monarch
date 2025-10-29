@@ -422,6 +422,7 @@ impl Bootstrap {
                     None => ok!(BootstrapCommand::current()),
                 };
                 let manager = BootstrapProcManager::new(command).unwrap();
+
                 let (host, _handle) = ok!(Host::serve(manager, addr).await);
                 let addr = host.addr().clone();
                 let host_mesh_agent = ok!(host
@@ -1535,6 +1536,11 @@ impl BootstrapProcManager {
     /// The bootstrap command used to launch processes.
     pub fn command(&self) -> &BootstrapCommand {
         &self.command
+    }
+
+    /// The socket directory, where per-proc Unix sockets are placed.
+    pub fn socket_dir(&self) -> &Path {
+        self.socket_dir.path()
     }
 
     /// Return the current [`ProcStatus`] for the given [`ProcId`], if
