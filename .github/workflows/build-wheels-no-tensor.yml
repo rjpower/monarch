@@ -44,7 +44,7 @@ jobs:
       - name: Parse Python versions
         id: set-matrix
         run: |
-          versions=$(echo '${{ inputs.python-versions }}' | jq -R 'split(",") | map(gsub(" "; ""))')
+          versions=$(echo '${{ inputs.python-versions }}' | jq -Rc 'split(",") | map(gsub(" "; ""))')
           echo "matrix={\"python-version\":$versions}" >> $GITHUB_OUTPUT
 
   build-macos:
