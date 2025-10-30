@@ -44,7 +44,7 @@ jobs:
       - name: Parse Python versions
         id: set-matrix
         run: |
-          versions=$(echo '${{ github.event.inputs.python-versions }}' | jq -R 'split(",") | map(gsub(" "; ""))')
+          versions=$(echo '${{ inputs.python-versions }}' | jq -R 'split(",") | map(gsub(" "; ""))')
           echo "matrix={\"python-version\":$versions}" >> $GITHUB_OUTPUT
 
   build-macos:
@@ -91,7 +91,7 @@ jobs:
     name: Upload wheels to GitHub Release
     needs: build-macos
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.release-tag != '' }}
+    if: ${{ inputs.release-tag != '' }}
     permissions:
       contents: write
     steps:
@@ -107,11 +107,11 @@ jobs:
         run: ls -lhR wheels/
 
       - name: Create release if requested
-        if: ${{ github.event.inputs.create-release == 'true' }}
+        if: ${{ inputs.create-release == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! gh release view "${{ github.event.inputs.release-tag }}" > /dev/null 2>&1; then
-            gh release create "${{ github.event.inputs.release-tag }}" \
-              --title "Monarch ${{ github.event.inputs.release-tag }} (USE_TENSOR_ENGINE=0)" \
+          if ! gh release view "${{ inputs.release-tag }}" > /dev/null 2>&1; then
+            gh release create "${{ inputs.release-tag }}" \
+              --title "Monarch ${{ inputs.release-tag }} (USE_TENSOR_ENGINE=0)" \
               --notes "Custom build of Monarch with USE_TENSOR_ENGINE=0
