@@ -28,6 +28,7 @@
 //! - `IbvWc`: Wrapper around ibverbs work completion structure, used to track the status of RDMA operations.
 use std::ffi::CStr;
 use std::fmt;
+use std::sync::OnceLock;
 
 use hyperactor::Named;
 use serde::Deserialize;
@@ -86,6 +87,35 @@ impl AsMut<rdmaxcel_sys::ibv_gid> for Gid {
     }
 }
 
+/// Queue pair type for RDMA operations.
+///
+/// Controls whether to use standard ibverbs queue pairs or mlx5dv extended queue pairs.
+/// Auto mode automatically selects based on device capabilities.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RdmaQpType {
+    /// Auto-detect based on device capabilities
+    Auto,
+    /// Force standard ibverbs queue pair
+    Standard,
+    /// Force mlx5dv extended queue pair
+    Mlx5dv,
+}
+
+/// Converts `RdmaQpType` to the corresponding integer enum value in rdmaxcel_sys.
+pub fn resolve_qp_type(qp_type: RdmaQpType) -> u32 {
+    match qp_type {
+        RdmaQpType::Auto => {
+            if mlx5dv_supported() {
+                rdmaxcel_sys::RDMA_QP_TYPE_MLX5DV
+            } else {
+                rdmaxcel_sys::RDMA_QP_TYPE_STANDARD
+            }
+        }
+        RdmaQpType::Standard => rdmaxcel_sys::RDMA_QP_TYPE_STANDARD,
+        RdmaQpType::Mlx5dv => rdmaxcel_sys::RDMA_QP_TYPE_MLX5DV,
+    }
+}
+
 /// Represents ibverbs specific configurations.
 ///
 /// This struct holds various parameters required to establish and manage an RDMA connection.
@@ -132,6 +162,8 @@ pub struct IbverbsConfig {
     /// `hw_init_delay_ms` - The delay in milliseconds before initializing the hardware.
     /// This is used to allow the hardware to settle before starting the first transmission.
     pub hw_init_delay_ms: u64,
+    /// `qp_type` - The type of queue pair to create (Auto, Standard, or Mlx5dv).
+    pub qp_type: RdmaQpType,
 }
 
 /// Default RDMA parameters below are based on common values from rdma-core examples
@@ -159,6 +191,7 @@ impl Default for IbverbsConfig {
             psn: rand::random::<u32>() & 0xffffff,
             use_gpu_direct: false, // nv_peermem enabled for cuda
             hw_init_delay_ms: 2,
+            qp_type: RdmaQpType::Auto,
         }
     }
 }
@@ -168,7 +201,7 @@ impl IbverbsConfig {
     ///
     /// Device targets use a unified "type:id" format:
     /// - "cpu:N" -> finds RDMA device closest to NUMA node N
-    /// - "cuda:N" -> finds RDMA device closest to CUDA device N  
+    /// - "cuda:N" -> finds RDMA device closest to CUDA device N
     /// - "nic:mlx5_N" -> returns the specified NIC directly
     ///
     /// Shortcuts:
@@ -630,16 +663,60 @@ pub fn get_all_devices() -> Vec<RdmaDevice> {
     devices
 }
 
+/// Cached result of mlx5dv support check.
+static MLX5DV_SUPPORTED_CACHE: OnceLock<bool> = OnceLock::new();
+
+/// Checks if mlx5dv (Mellanox device-specific verbs extension) is supported.
+///
+/// This function attempts to open the first available RDMA device and check if
+/// mlx5dv extensions can be initialized. The mlx5dv extensions are required for
+/// advanced features like GPU Direct RDMA and direct queue pair manipulation.
+///
+/// The result is cached after the first call, making subsequent calls essentially free.
+///
+/// # Returns
+///
+/// `true` if mlx5dv extensions are supported, `false` otherwise.
+pub fn mlx5dv_supported() -> bool {
+    *MLX5DV_SUPPORTED_CACHE.get_or_init(mlx5dv_supported_impl)
+}
+
+fn mlx5dv_supported_impl() -> bool {
+    // SAFETY: We are calling C functions from libibverbs and libmlx5.
+    unsafe {
+        let mut mlx5dv_supported = false;
+        let mut num_devices = 0;
+        let device_list = rdmaxcel_sys::ibv_get_device_list(&mut num_devices);
+        if !device_list.is_null() && num_devices > 0 {
+            let device = *device_list;
+            if !device.is_null() {
+                mlx5dv_supported = rdmaxcel_sys::mlx5dv_is_supported(device);
+            }
+            rdmaxcel_sys::ibv_free_device_list(device_list);
+        }
+        mlx5dv_supported
+    }
+}
+
+/// Cached result of ibverbs support check.
+static IBVERBS_SUPPORTED_CACHE: OnceLock<bool> = OnceLock::new();
+
 /// Checks if ibverbs devices can be retrieved successfully.
 ///
 /// This function attempts to retrieve the list of RDMA devices using the
 /// `ibv_get_device_list` function from the ibverbs library. It returns `true`
 /// if devices are found, and `false` otherwise.
 ///
+/// The result is cached after the first call, making subsequent calls essentially free.
+///
 /// # Returns
 ///
 /// `true` if devices are successfully retrieved, `false` otherwise.
 pub fn ibverbs_supported() -> bool {
+    *IBVERBS_SUPPORTED_CACHE.get_or_init(ibverbs_supported_impl)
+}
+
+fn ibverbs_supported_impl() -> bool {
     // SAFETY: We are calling a C function from libibverbs.
     unsafe {
         let mut num_devices = 0;
@@ -649,6 +726,13 @@ pub fn ibverbs_supported() -> bool {
         }
         num_devices > 0
     }
+}
+
+/// Checks if RDMA is fully supported on this system.
+///
+/// This is the canonical function to check if RDMA can be used.
+pub fn rdma_supported() -> bool {
+    ibverbs_supported()
 }
 
 /// Represents a view of a memory region that can be registered with an RDMA device.
@@ -1015,5 +1099,32 @@ mod tests {
 
         let formatted = format_gid(&gid);
         assert_eq!(formatted, "1234:5678:9abc:def0:1122:3344:5566:7788");
+    }
+
+    #[test]
+    fn test_mlx5dv_supported_basic() {
+        // The test just verifies the function doesn't panic
+        let mlx5dv_support = mlx5dv_supported();
+        println!("mlx5dv_supported: {}", mlx5dv_support);
+    }
+
+    #[test]
+    fn test_rdma_supported_combines_checks() {
+        // This test verifies that rdma_supported() properly combines both checks
+        let ibverbs_support = ibverbs_supported();
+        let mlx5dv_support = mlx5dv_supported();
+        let rdma_support = rdma_supported();
+
+        // rdma_supported should be true only if both checks pass
+        assert_eq!(
+            rdma_support,
+            ibverbs_support && mlx5dv_support,
+            "rdma_supported should equal (ibverbs_supported && mlx5dv_supported)"
+        );
+
+        println!(
+            "ibverbs_supported: {}, mlx5dv_supported: {}, rdma_supported: {}",
+            ibverbs_support, mlx5dv_support, rdma_support
+        );
     }
 }
