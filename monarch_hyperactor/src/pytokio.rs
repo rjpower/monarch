@@ -10,7 +10,7 @@
 ///
 /// A PythonTask is constructed in Python from `PythonTask.from_coroutine()`:
 ///
-/// ```
+/// ```ignore
 /// async def task():
 ///     # ... async work, await other python tasks
 /// task = PythonTask.from_coroutine(coro=task())
@@ -22,7 +22,7 @@
 /// A task can be spawned in order to produce an awaitable that can be awaited in
 /// any async context:
 ///
-/// ```
+/// ```ignore
 /// shared = task.spawn()
 /// result = await shared
 /// ```
@@ -32,7 +32,7 @@
 ///
 /// PythonTasks can also be awaited synchronously by `block_on`:
 ///
-/// ```
+/// ```ignore
 /// result = task.block_on()
 /// ```
 ///
