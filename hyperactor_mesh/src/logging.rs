@@ -59,6 +59,7 @@ use tokio::sync::Notify;
 use tokio::sync::RwLock;
 use tokio::sync::watch::Receiver;
 use tokio::task::JoinHandle;
+use tracing::Level;
 
 use crate::bootstrap::BOOTSTRAP_LOG_CHANNEL;
 use crate::shortuuid::ShortUuid;
@@ -458,14 +459,14 @@ impl FileAppender {
                     return None;
                 }
             };
-        let (stdout_addr, stdout_rx) = match channel::serve(
-            ChannelAddr::any(ChannelTransport::Unix),
-            "FileAppender stdout_addr",
-        ) {
-            Ok((addr, rx)) => (addr, rx),
-            Err(e) => {
-                tracing::warn!("failed to serve stdout channel: {}", e);
-                return None;
+        let (stdout_addr, stdout_rx) = {
+            let _guard = tracing::span!(Level::INFO, "appender", file = "stdout").entered();
+            match channel::serve(ChannelAddr::any(ChannelTransport::Unix)) {
+                Ok((addr, rx)) => (addr, rx),
+                Err(e) => {
+                    tracing::warn!("failed to serve stdout channel: {}", e);
+                    return None;
+                }
             }
         };
         let stdout_stop = stop.clone();
@@ -485,14 +486,14 @@ impl FileAppender {
                     return None;
                 }
             };
-        let (stderr_addr, stderr_rx) = match channel::serve(
-            ChannelAddr::any(ChannelTransport::Unix),
-            "FileAppender stderr_addr",
-        ) {
-            Ok((addr, rx)) => (addr, rx),
-            Err(e) => {
-                tracing::warn!("failed to serve stderr channel: {}", e);
-                return None;
+        let (stderr_addr, stderr_rx) = {
+            let _guard = tracing::span!(Level::INFO, "appender", file = "stderr").entered();
+            match channel::serve(ChannelAddr::any(ChannelTransport::Unix)) {
+                Ok((addr, rx)) => (addr, rx),
+                Err(e) => {
+                    tracing::warn!("failed to serve stderr channel: {}", e);
+                    return None;
+                }
             }
         };
         let stderr_stop = stop.clone();
@@ -994,7 +995,7 @@ impl Actor for LogForwardActor {
             log_channel
         );
 
-        let rx = match channel::serve(log_channel.clone(), "LogForwardActor") {
+        let rx = match channel::serve(log_channel.clone()) {
             Ok((_, rx)) => rx,
             Err(err) => {
                 // This can happen if we are not spanwed on a separate process like local.
@@ -1004,11 +1005,7 @@ impl Actor for LogForwardActor {
                     log_channel,
                     err
                 );
-                channel::serve(
-                    ChannelAddr::any(ChannelTransport::Unix),
-                    "LogForwardActor Unix fallback",
-                )?
-                .1
+                channel::serve(ChannelAddr::any(ChannelTransport::Unix))?.1
             }
         };
 
@@ -1566,7 +1563,7 @@ mod tests {
         // Setup the basics
         let router = DialMailboxRouter::new();
         let (proc_addr, client_rx) =
-            channel::serve(ChannelAddr::any(ChannelTransport::Unix), "test").unwrap();
+            channel::serve(ChannelAddr::any(ChannelTransport::Unix)).unwrap();
         let proc = Proc::new(id!(client[0]), BoxedMailboxSender::new(router.clone()));
         proc.clone().serve(client_rx);
         router.bind(id!(client[0]).into(), proc_addr.clone());
@@ -1780,7 +1777,7 @@ mod tests {
 
         let (mut writer, reader) = tokio::io::duplex(1024);
         let (log_channel, mut rx) =
-            channel::serve::<LogMessage>(ChannelAddr::any(ChannelTransport::Unix), "test").unwrap();
+            channel::serve::<LogMessage>(ChannelAddr::any(ChannelTransport::Unix)).unwrap();
 
         // Create a temporary file for testing the writer
         let temp_file = tempfile::NamedTempFile::new().unwrap();
@@ -1913,7 +1910,7 @@ mod tests {
     #[tokio::test]
     async fn test_local_log_sender_inactive_status() {
         let (log_channel, _) =
-            channel::serve::<LogMessage>(ChannelAddr::any(ChannelTransport::Unix), "test").unwrap();
+            channel::serve::<LogMessage>(ChannelAddr::any(ChannelTransport::Unix)).unwrap();
         let mut sender = LocalLogSender::new(log_channel, 12345).unwrap();
 
         // This test verifies that the sender handles inactive status gracefully
