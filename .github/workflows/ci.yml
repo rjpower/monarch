@@ -14,48 +14,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-cuda:
-    name: Build CUDA
-    uses: ./.github/workflows/build-cuda.yml
-
-  build-cpu:
-    name: Build CPU
-    uses: ./.github/workflows/build-cpu.yml
-
-  test-cpu-python:
-    name: Test CPU Python
-    needs: build-cpu
-    uses: ./.github/workflows/test-cpu-python.yml
-    with:
-      artifact-name: monarch-cpu-${{ github.sha }}
-
-  test-gpu-python:
-    name: Test GPU Python
-    needs: build-cuda
-    uses: ./.github/workflows/test-gpu-python.yml
-    with:
-      artifact-name: monarch-cuda-${{ github.sha }}
-
-  test-gpu-rust:
-    name: Test GPU Rust
-    needs: build-cuda
-    uses: ./.github/workflows/test-gpu-rust.yml
-    with:
-      artifact-name: monarch-cuda-${{ github.sha }}
-
-  status-check:
-    name: Status Check
-    runs-on: ubuntu-latest
-    needs: [test-cpu-python, test-gpu-python, test-gpu-rust]
-    if: always()
-    steps:
-      - name: Check all jobs status
-        run: |
-          if [[ "${{ needs.test-cpu-python.result }}" != "success" ]] ||
-             [[ "${{ needs.test-gpu-python.result }}" != "success" ]] ||
-             [[ "${{ needs.test-gpu-rust.result }}" != "success" ]]; then
-            echo "One or more jobs failed"
-            exit 1
-          else
-            echo "All jobs passed"
-          fi
+  build-macos-wheels:
+    name: Build macOS Wheels
+    uses: ./.github/workflows/build-wheels-no-tensor.yml
