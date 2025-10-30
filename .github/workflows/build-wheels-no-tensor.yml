@@ -16,6 +16,23 @@ on:
         required: false
         type: boolean
         default: false
+  workflow_call:
+    inputs:
+      python-versions:
+        description: 'Python versions to build (comma-separated, e.g., "3.10,3.11,3.12")'
+        type: string
+        required: false
+        default: '3.10,3.11,3.12,3.13'
+      release-tag:
+        description: 'GitHub release tag to upload wheels to (leave empty to skip upload)'
+        type: string
+        required: false
+        default: ''
+      create-release:
+        description: 'Create a new release if tag does not exist'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   prepare:
